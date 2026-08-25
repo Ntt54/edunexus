@@ -1,107 +1,126 @@
 # EduNexus
 
-**Professeur IA local** — un tuteur pédagogique basé sur RAG qui s'appuie sur vos
-documents de cours (livres, PDF, notes). Interface web inspirée de NotebookLM,
-optimisée pour les machines modestes (CPU).
+**Professeur IA local** — un tuteur pédagogique qui travaille sur **vos** documents
+(cours, livres, PDF) : RAG sourcé, exercices adaptatifs, quiz corrigés, fiches de
+révision et répétition espacée. Conçu pour les machines modestes (8–16 Go RAM).
 
-![statut](https://img.shields.io/badge/tests-209%20pass%C3%A9s-brightgreen)
+![statut](https://img.shields.io/badge/tests-209_passing-brightgreen)
 
 ## Fonctionnalités
 
-- **Bibliothèque de sources** — import PDF avec extraction hybride :
-  couche texte directe, ou OCR **Granite-Docling** pour les pages scannées
-  (via llama.cpp). Indexation en arrière-plan avec statut par livre.
-- **Séance de tutorat** — chat avec mode socratique (indices progressifs),
-  citations cliquables vers la source et la page exacte, transcription vocale,
-  barre de maîtrise par notion, reprise de session.
-  **Fonctionne aussi sans aucune source sélectionnée** (réponse sans contexte documentaire).
-- **Studio** — exercices adaptatifs à difficulté choisie, quiz/examens à
-  correction immédiate, résumé audio de la notion (synthèse vocale du navigateur),
-  fiches mémoire, historique des notions (à revoir / maîtrisé).
-- **Catégories & corpus** — classement manuel des livres, ou **classification
-  automatique par LLM** (par lots consécutifs de 25 titres, ajustable manuellement).
-- **Modèles au choix** — sélecteurs Embedding + LLM dans l'en-tête ; deux moteurs :
-  - **Ollama** (par défaut) — rien à configurer si Ollama tourne ;
-  - **GGUF local via llama.cpp** — Granite-Docling / Granite Embedding / Granite LLM,
-    chargés **séquentiellement** (1 modèle à la fois = budget RAM maîtrisé).
-- **Journalisation** — toutes les erreurs (backend + navigateur) sont écrites dans
-  `~/.config/ollama-tui/errors.log` avec traceback.
+### Interface « NotebookLM » en 3 colonnes
+- **Sources** — import PDF, regroupement par matière, statut d'indexation en direct,
+  cases d'inclusion/exclusion du contexte, recherche sémantique
+- **Séance de tutorat** — mode socratique (indices progressifs), citations cliquables
+  vers la page exacte, dictée vocale (whisper), barre de maîtrise par notion,
+  reprise de session
+- **Studio** — exercices adaptatifs à difficulté choisie, quiz/examens corrigés,
+  résumé audio de la notion (synthèse vocale navigateur), fiches mémo, historique
+
+### Moteur IA à deux modes
+| Mode | Embeddings | Génération | OCR |
+|---|---|---|---|
+| **Ollama** (défaut) | via serveur Ollama | via serveur Ollama | — |
+| **GGUF local** | Granite Embedding (llama.cpp) | Granite Instruct (llama.cpp) | Granite-Docling |
+
+- Le moteur GGUF charge **un seul modèle à la fois** (budget RAM garanti par test)
+- Repli automatique vers Ollama si rien n'est configuré
+- Dimensions d'embedding **auto-détectées** (jamais codées en dur), ré-indexation gérée
+
+### Organisation pédagogique
+- Matières, **catégories et corpus** (une source peut appartenir à plusieurs)
+- **Classification automatique des livres par LLM** (par lots consécutifs),
+  ajustable manuellement
+- Mode examen avec documents temporaires (cycle de vie dédié, purge automatique)
+
+### Robustesse
+- Journalisation complète des erreurs backend **et** navigateur
+  → `~/.config/ollama-tui/errors.log`
+- Garde same-origin (WebSocket + requêtes mutantes), écoute loopback uniquement
 
 ## Installation
 
-Python ≥ 3.11 requis.
+Prérequis : Python ≥ 3.11, [Ollama](https://ollama.com) en cours d'exécution.
 
 ```bash
 cd projet_ollama_tutor
 python3 -m venv venv
-source venv/bin/activate
-pip install -e ".[dev,web]"
+venv/bin/pip install -e ".[dev,web]"
 ```
-
-> Le moteur GGUF local nécessite en plus le binaire `llama-server`
-> ([llama.cpp](https://github.com/ggml-org/llama.cpp)) et les modèles GGUF
-> (Granite-Docling 258M, Granite Embedding R2, Granite 4.1 3B). Sans cela,
-> EduNexus fonctionne entièrement via Ollama.
 
 ## Utilisation
 
 ```bash
-edunexus        # ou: python -m ollama_tutor.web.__main__
+edunexus            # si installé globalement, ou :
+venv/bin/python -m ollama_tutor.web.__main__
+# ✓ EduNexus démarré
+#   Interface web : http://127.0.0.1:9215/tutor
 ```
 
-```
-✓ EduNexus démarré
-  Interface web : http://127.0.0.1:9215/tutor
-  (Ctrl+C pour arrêter)
-```
+Options : `--port` (défaut **9215**), `--host` (loopback uniquement), `--url <serveur Ollama>`.
 
-Options : `--port` (défaut **9215**), `--host` (loopback uniquement),
-`--url` (URL Ollama).
-
-### Benchmark
+Benchmark de débit (Ollama requis) :
 
 ```bash
-MODEL=gemma4:e2b ./benchmark.sh     # Ollama live requis
+MODEL=gemma4:e2b ./benchmark.sh
 ```
-
-Compare le débit (tok/s) CLI vs API EduNexus.
 
 ## Configuration
 
 `~/.config/ollama-tui/config.json`, section `"tutor"` :
 
-| Clé | Défaut | Rôle |
-|---|---|---|
-| `enabled` | `false` | active l'interface tuteur |
-| `embedding_model` | `embeddinggemma` | modèle d'embeddings Ollama |
-| `tutor_model` | `gemma4:e2b` | LLM du tuteur |
-| `llama_bin` | `""` | chemin du binaire `llama-server` (active le moteur GGUF) |
-| `embed_gguf` | `""` | GGUF Granite Embedding (dimensions auto-détectées) |
-| `docling_gguf` / `docling_mmproj` | `""` | GGUF vision OCR |
-| `llm_gguf` | `""` | GGUF LLM local |
-| `ocr_text_threshold` / `ocr_dpi` / `pdftoppm_bin` | `32` / `150` / `pdftoppm` | ingestion hybride |
+```jsonc
+{
+  "tutor": {
+    "enabled": true,
+    "embedding_model": "ibm/granite-embedding:107m-multilingual-q8_0",
+    "tutor_model": "gemma4:e2b",
+    "socratic": true,
+    "level": "intermediate",
+    "top_k": 5,
 
-Les modèles peuvent aussi se changer depuis l'en-tête de l'interface.
+    // Moteur 100 % local (optionnel — sinon repli Ollama automatique)
+    "llama_bin": "/chemin/vers/llama-server",
+    "embed_gguf": "granite-embedding-Q8_0.gguf",
+    "docling_gguf": "granite-docling-258M-Q5_K_M.gguf",
+    "docling_mmproj": "mmproj-granite-docling-f16.gguf",
+    "llm_gguf": "granite-4.1-3b-instruct-Q4_K_M.gguf",
 
-## Architecture
+    // Voix (dictée)
+    "whisper_binary": "/chemin/vers/whisper",
+    "whisper_model": "base"
+  }
+}
+```
+
+Les modèles GGUF relatifs sont résolus depuis `llama_models_dir`.
+
+## Tests
+
+```bash
+venv/bin/python -m pytest tests/ -q        # 209 tests, < 30 s, hors-ligne
+```
+
+Aucun test ne contacte de serveur réel : les flux Ollama sont simulés via
+transport httpx injectable.
+
+## Structure
 
 ```
 src/ollama_tutor/
-├── tutor/            # cœur UI-agnostique (aucun import fastapi/textual)
-│   ├── service.py    #   TutorService : import, indexation, ask, examens
-│   ├── store.py      #   LibraryStore SQLite : livres, catégories, corpus
-│   ├── providers/    #   interfaces + adapters : EmbeddingProvider,
-│   │                 #   OCRProvider, DocumentParser, LlamaServerManager…
-│   └── …             #   assessment, prompts, progress, retrieval, voice
-├── web/              # FastAPI (transport fin) + tutor.html autonome
-├── client.py         # client Ollama (transport injectable pour les tests)
-└── config.py         # configuration persistée
+├── tutor/
+│   ├── service.py          # orchestration (import async, ask, examens)
+│   ├── store.py            # SQLite : livres, catégories, corpus, temp-docs
+│   ├── retrieval.py        # recherche vectorielle sourcée
+│   ├── assessment.py       # exercices / quiz / examens
+│   ├── progress.py         # maîtrise, lacunes, répétition espacée
+│   └── providers/          # interfaces + llama.cpp + adapters Ollama
+├── web/
+│   ├── server.py           # FastAPI (transport fin, zéro logique métier)
+│   └── static/tutor.html   # interface autonome (CSS/JS inline)
+├── client.py               # client Ollama streaming (transport injectable)
+└── config.py               # configuration persistée
 ```
-
-- **209 tests** hors-ligne (`pytest tests/ -q`) — flux mockés via `httpx.MockTransport`.
-- Le serveur ne lie que `127.0.0.1` ; garde same-origin sur WebSocket et requêtes mutantes.
-- Un seul `llama-server` à la fois : chargement/déchargement séquentiel
-  (testé par `tests/unit/test_memory_ceiling.py`).
 
 ## Licence
 
