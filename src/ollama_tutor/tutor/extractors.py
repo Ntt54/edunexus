@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-SUPPORTED_FORMATS = {".txt", ".md", ".pdf", ".epub"}
+SUPPORTED_FORMATS = {".txt", ".md", ".pdf", ".epub", ".docx", ".pptx"}
 
 
 class _TagStripper(HTMLParser):
@@ -80,6 +80,10 @@ def extract_text(path, fmt: str | None = None) -> str:
         return _extract_pdf(p)
     if fmt == "epub":
         return _extract_epub(p)
+    if fmt == "docx":
+        return _extract_docx(p)
+    if fmt == "pptx":
+        return _extract_pptx(p)
     raise ValueError(f"Unsupported format: {fmt}")
 
 
@@ -95,6 +99,43 @@ def _extract_pdf(path: Path) -> str:
             text = ""
         if text:
             parts.append(text)
+    return "\n".join(parts)
+
+
+def _extract_docx(path: Path) -> str:
+    """Extract text from a .docx file via python-docx."""
+    from docx import Document
+
+    doc = Document(str(path))
+    parts: list[str] = []
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if text:
+            parts.append(text)
+    # Also extract text from tables
+    for table in doc.tables:
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+            if cells:
+                parts.append(" | ".join(cells))
+    return "\n".join(parts)
+
+
+def _extract_pptx(path: Path) -> str:
+    """Extract text from a .pptx file via python-pptx."""
+    from pptx import Presentation
+
+    prs = Presentation(str(path))
+    parts: list[str] = []
+    for slide_num, slide in enumerate(prs.slides, start=1):
+        slide_texts: list[str] = []
+        for shape in slide.shapes:
+            if hasattr(shape, "text"):
+                text = shape.text.strip()
+                if text:
+                    slide_texts.append(text)
+        if slide_texts:
+            parts.append(f"[Slide {slide_num}]\n" + "\n".join(slide_texts))
     return "\n".join(parts)
 
 

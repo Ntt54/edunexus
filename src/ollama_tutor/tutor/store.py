@@ -345,6 +345,35 @@ class LibraryStore:
             );
             """
         )
+        # Error history (Feature 007 — US11)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS error_history (
+                id TEXT PRIMARY KEY,
+                subject_id TEXT NOT NULL,
+                concept_name TEXT NOT NULL,
+                question_text TEXT NOT NULL DEFAULT '',
+                given_answer TEXT NOT NULL DEFAULT '',
+                correct_answer TEXT NOT NULL DEFAULT '',
+                source_refs TEXT DEFAULT '[]',
+                error_type TEXT NOT NULL DEFAULT 'unknown',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE
+            );
+            """
+        )
+        # Document metadata (Feature 007 — US9)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS document_metadata (
+                book_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (book_id, key),
+                FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+            );
+            """
+        )
         self._conn.commit()
 
     def _migrate(self) -> None:
@@ -415,6 +444,87 @@ class LibraryStore:
                 "ALTER TABLE subjects ADD COLUMN domain TEXT NOT NULL DEFAULT 'generique'"
             )
             cur.commit()
+
+    # ------------------------------------------------------------------
+    # Error history (Feature 007 — US11)
+    # ------------------------------------------------------------------
+
+    def record_error(
+        self,
+        subject_id: str,
+        concept_name: str,
+        question_text: str,
+        given_answer: str,
+        correct_answer: str,
+        source_refs: list[str] | None = None,
+        error_type: str = "unknown",
+    ) -> None:
+        """Persist a detailed error record for later analysis."""
+        from .models import _now_iso, _uid
+
+        self._conn.execute(
+            """INSERT INTO error_history
+               (id, subject_id, concept_name, question_text, given_answer,
+                correct_answer, source_refs, error_type, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                _uid(),
+                subject_id,
+                concept_name,
+                question_text,
+                given_answer,
+                correct_answer,
+                json.dumps(source_refs or [], ensure_ascii=False),
+                error_type,
+                _now_iso(),
+            ),
+        )
+        self._conn.commit()
+
+    def get_error_history(
+        self,
+        subject_id: str,
+        concept_name: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return recent errors, optionally filtered by concept."""
+        if concept_name:
+            rows = self._conn.execute(
+                """SELECT * FROM error_history
+                   WHERE subject_id = ? AND concept_name = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (subject_id, concept_name, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT * FROM error_history
+                   WHERE subject_id = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (subject_id, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Document metadata (Feature 007 — US9)
+    # ------------------------------------------------------------------
+
+    def set_document_metadata(self, book_id: str, key: str, value: str) -> None:
+        """Set a key/value metadata pair for a book (upsert)."""
+        self._conn.execute(
+            """INSERT INTO document_metadata (book_id, key, value)
+               VALUES (?, ?, ?)
+               ON CONFLICT(book_id, key) DO UPDATE SET value = excluded.value""",
+            (book_id, key, value),
+        )
+        self._conn.commit()
+
+    def get_document_metadata(self, book_id: str) -> dict[str, str]:
+        """Return all metadata for a book as a dict."""
+        rows = self._conn.execute(
+            "SELECT key, value FROM document_metadata WHERE book_id = ?",
+            (book_id,),
+        ).fetchall()
+        return {r["key"]: r["value"] for r in rows}
 
     # ------------------------------------------------------------------
     # Concepts & progress (extensions: gap flag, exercise/attempt storage)
