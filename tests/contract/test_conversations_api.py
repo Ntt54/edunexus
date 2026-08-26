@@ -6,6 +6,7 @@ client Ollama scripté (même canevas que test_tutor_admin_api.py).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import httpx
