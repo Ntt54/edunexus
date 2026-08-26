@@ -36,7 +36,7 @@ from pydantic import BaseModel
 
 from ..client import OllamaClient, OllamaConnectionError
 from ..config import Config
-from ..models import Conversation, Message, MessageRole
+from ..models import Conversation, Message, MessageRole, OllamaOptions
 from ..tutor.assessment import ExamHelpError
 from ..tutor.embeddings import NumpyVectorIndex
 from ..tutor.prompts import resolve_overrides
@@ -393,6 +393,15 @@ class ConversationRename(BaseModel):
 
 class ConversationSourcesPayload(BaseModel):
     book_ids: list[str] = []
+
+
+class SettingsUpdate(BaseModel):
+    """Mise à jour partielle des réglages utilisateur (005-platform-ui-library)."""
+
+    options: dict[str, Any] | None = None
+    think: bool | None = None
+    socratic: bool | None = None
+    level: str | None = None
 
 
 def create_app(config_dir: Path | None = None) -> FastAPI:
@@ -1414,6 +1423,45 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                 status_code=404, detail="Conversation inconnue"
             ) from exc
         return {"active": n}
+
+    # ------------------------------------------------------------------
+    # REST: réglages utilisateur (005-platform-ui-library)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/tutor/settings")
+    async def settings_get() -> dict[str, Any]:
+        return {
+            "options": config.options.to_dict(),
+            "tutor": {
+                "think": config.tutor_think,
+                "socratic": config.tutor_socratic,
+                "level": config.tutor_level,
+                "top_k": config.tutor_top_k,
+            },
+        }
+
+    @app.put("/api/tutor/settings")
+    async def settings_update(payload: SettingsUpdate) -> dict[str, Any]:
+        if payload.options is not None:
+            merged = config.options.to_dict()
+            merged.update(payload.options)
+            try:
+                config.options = OllamaOptions(**merged)
+            except TypeError as exc:
+                raise HTTPException(
+                    status_code=400, detail=f"Option inconnue : {exc}"
+                ) from exc
+        try:
+            if payload.think is not None:
+                config.tutor_think = payload.think
+            if payload.socratic is not None:
+                config.tutor_socratic = payload.socratic
+            if payload.level is not None:
+                config.tutor_level = payload.level
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        config.save()  # persistance immédiate (préférence utilisateur)
+        return await settings_get()
 
     # ------------------------------------------------------------------
     # WebSocket: tutor grounded Q&A (004-local-ai-tutor, US2)
