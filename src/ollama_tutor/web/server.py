@@ -1329,6 +1329,25 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
     # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
+    # REST: provenance d'embedding & ré-indexation (005-suite)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/tutor/stale-books")
+    async def stale_books(subject_id: str) -> dict[str, Any]:
+        model = config.tutor_embedding_model
+        return {
+            "model": model,
+            "stale": tutor_store.stale_books(subject_id, model),
+        }
+
+    @app.post("/api/tutor/books/{book_id}/reindex")
+    async def book_reindex(book_id: str) -> dict[str, Any]:
+        try:
+            return await tutor_service.reindex_book(book_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Livre inconnu") from exc
+
+    # ------------------------------------------------------------------
     # REST: conversations nommées (005-platform-ui-library)
     # ------------------------------------------------------------------
 

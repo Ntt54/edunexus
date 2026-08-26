@@ -120,7 +120,10 @@ class Retriever:
     def _index_for(self, subject_id: str) -> tuple[NumpyVectorIndex, dict[str, dict], dict[str, str]]:
         if subject_id not in self._cache:
             idx = NumpyVectorIndex()
-            rows = self.store.get_indexed_chunks(subject_id)
+            # Provenance : seuls les chunks embeddés par LE modèle courant
+            # entrent dans l'index (005-suite — empêche le mélange de
+            # vecteurs incompatibles entre modèles d'embedding).
+            rows = self.store.get_indexed_chunks(subject_id, model=self.model)
             items: list[tuple[str, list[float]]] = []
             meta: dict[str, dict] = {}
             for r in rows:

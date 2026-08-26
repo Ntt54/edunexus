@@ -1349,6 +1349,32 @@ class TutorService:
         subject_id = self._resolve_subject(subject_name)
         return subject_id, self.store.import_document(subject_id, path)
 
+    async def reindex_book(self, book_id: str) -> dict[str, Any]:
+        """Ré-embed les chunks EXISTANTS d'un livre avec le modèle courant.
+
+        Résout le mélange de vecteurs inter-modèles (005-suite) : mêmes
+        textes, même découpage, nouveaux vecteurs signés du modèle courant.
+        Aucun re-découpage, aucune perte.
+        """
+        book = self.store.get_book(book_id)
+        if book is None:
+            raise KeyError(book_id)
+        subject_id = self.store.get_book_subject_id(book_id)
+        if subject_id is None:
+            raise KeyError(f"no_subject_for_{book_id}")
+        rows = [
+            r for r in self.store.get_subject_chunks(subject_id)
+            if r["book_id"] == book_id
+        ]
+        texts = [r["text"] for r in rows]
+        if not texts:
+            return {"book_id": book_id, "reembedded": 0}
+        model = self.config.tutor_embedding_model
+        vectors = await self.client.embed(model, texts)
+        n = self.store.update_chunks_embedding(book_id, vectors, model)
+        self.retriever.invalidate(subject_id)
+        return {"book_id": book_id, "reembedded": n, "model": model}
+
     def schedule_index(
         self, subject_id: str, book: Book, path: Any, fmt: str | None = None
     ) -> asyncio.Task:

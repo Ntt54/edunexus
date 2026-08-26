@@ -92,7 +92,7 @@ class FakeToolsClient:
 
 def seed_chunk(store: LibraryStore, subject_id: str, book_id: str, text: str,
                vec: list[float], chapter: str | None, page: int | None,
-               ordinal: int = 0) -> str:
+               ordinal: int = 0, embedding_model: str = "embeddinggemma") -> str:
     """Insert a chunk row with an explicit chapter/page and embedding (bypassing
     the NULL-chapter default of ``add_chunks``)."""
     import hashlib
@@ -105,10 +105,10 @@ def seed_chunk(store: LibraryStore, subject_id: str, book_id: str, text: str,
     store._conn.execute(
         "INSERT INTO chunks "
         "(id, subject_id, book_id, ordinal, text, text_hash, chapter, page, "
-        "position, content_type, embedding) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'prose', ?)",
+        "position, content_type, embedding, embedding_model) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'prose', ?, ?)",
         (cid, subject_id, book_id, ordinal, text, text_hash, chapter, page,
-         0.0, blob),
+         0.0, blob, embedding_model),
     )
     store._conn.commit()
     return cid

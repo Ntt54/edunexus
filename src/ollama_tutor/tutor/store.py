@@ -357,6 +357,21 @@ class LibraryStore:
             cur.commit()
         # Conversations nommées (005-platform-ui-library) : titre éditable +
         # horodatage de dernière activité par session.
+        # Provenance d'embedding par chunk (005-suite) : sans cette colonne,
+        # changer de modèle d'embedding mélangerait des vecteurs incompatibles.
+        ccols = {r["name"] for r in cur.execute("PRAGMA table_info(chunks)")}
+        if "embedding_model" not in ccols:
+            cur.execute("ALTER TABLE chunks ADD COLUMN embedding_model TEXT")
+            cur.commit()
+            # Backfill : retrouve le modèle réel depuis le cache d'embeddings
+            cur.execute(
+                "UPDATE chunks SET embedding_model = ("
+                " SELECT e.model FROM embeddings e"
+                " WHERE e.text_hash = chunks.text_hash"
+                " ORDER BY e.rowid DESC LIMIT 1)"
+                " WHERE embedding IS NOT NULL AND embedding_model IS NULL"
+            )
+            cur.commit()
         tcols = {r["name"] for r in cur.execute("PRAGMA table_info(tutoring_sessions)")}
         if "title" not in tcols:
             cur.execute(
@@ -747,8 +762,9 @@ class LibraryStore:
             self._conn.execute(
                 "INSERT INTO chunks "
                 "(id, subject_id, book_id, ordinal, text, text_hash, chapter, "
-                "section, page, position, difficulty, content_type, embedding) "
-                "VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, 'prose', ?)",
+                "section, page, position, difficulty, content_type, embedding, "
+                "embedding_model) "
+                "VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, 'prose', ?, ?)",
                 (
                     chunk_id,
                     subject_id,
@@ -758,6 +774,7 @@ class LibraryStore:
                     text_hash,
                     position,
                     blob,
+                    model,
                 ),
             )
             # shared hash-keyed cache (idempotent across re-imports)
@@ -770,15 +787,69 @@ class LibraryStore:
             )
         self._conn.commit()
 
-    def get_indexed_chunks(self, subject_id: str) -> list[dict[str, Any]]:
-        """Return chunk rows with a non-null embedding for a subject."""
+    def get_indexed_chunks(
+        self, subject_id: str, model: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Chunk rows with a non-null embedding for a subject.
+
+        ``model`` restreint aux chunks dont l'embedding provient de CE modèle
+        (005-suite : empêche le mélange de vecteurs incompatibles entre
+        modèles d'embedding). ``None`` = comportement historique (tout).
+        """
+        sql = (
+            "SELECT id, book_id, text, chapter, section, page, embedding, "
+            "embedding_model FROM chunks "
+            "WHERE subject_id = ? AND embedding IS NOT NULL"
+        )
+        params: list[Any] = [subject_id]
+        if model is not None:
+            sql += " AND embedding_model = ?"
+            params.append(model)
+        rows = self._conn.execute(sql + " ORDER BY ordinal", params).fetchall()
+        return [dict(r) for r in rows]
+
+    def stale_books(self, subject_id: str, model: str) -> list[dict[str, Any]]:
+        """Books whose indexed chunks do not match ``model`` (à ré-indexer).
+
+        Retourne [{id, title, ok_count, total}] pour les livres ayant au
+        moins un chunk dont l'embedding n'est pas du modèle demandé.
+        """
         rows = self._conn.execute(
-            "SELECT id, book_id, text, chapter, section, page, embedding "
-            "FROM chunks WHERE subject_id = ? AND embedding IS NOT NULL "
-            "ORDER BY ordinal",
-            (subject_id,),
+            "SELECT b.id, b.title, "
+            " SUM(CASE WHEN c.embedding_model = ? THEN 1 ELSE 0 END) AS ok_count,"
+            " COUNT(c.id) AS total "
+            "FROM books b "
+            "JOIN subject_books sb ON sb.book_id = b.id "
+            "JOIN chunks c ON c.book_id = b.id "
+            "WHERE sb.subject_id = ? "
+            "GROUP BY b.id, b.title "
+            "HAVING ok_count < total",
+            (model, subject_id),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def update_chunks_embedding(
+        self, book_id: str, embeddings: list[list[float]], model: str
+    ) -> int:
+        """Re-embed les chunks EXISTANTS d'un livre (même découpage).
+
+        Met à jour blob + embedding_model par ordinal. Retourne le nombre
+        mis à jour. Les textes ne changent pas : pas de re-découpage.
+        """
+        rows = self._conn.execute(
+            "SELECT id FROM chunks WHERE book_id = ? ORDER BY ordinal",
+            (book_id,),
+        ).fetchall()
+        n = 0
+        for row, vec in zip(rows, embeddings):
+            blob = np.array(vec, dtype=np.float32).tobytes() if vec else None
+            self._conn.execute(
+                "UPDATE chunks SET embedding = ?, embedding_model = ? WHERE id = ?",
+                (blob, model, row["id"]),
+            )
+            n += 1
+        self._conn.commit()
+        return n
 
     def get_subject_chunks(self, subject_id: str) -> list[dict[str, Any]]:
         """Return ALL chunk rows for a subject (regardless of embedding).
@@ -841,6 +912,14 @@ class LibraryStore:
             "SELECT * FROM books WHERE id = ?", (book_id,)
         ).fetchone()
         return Book.from_dict(dict(row)) if row is not None else None
+
+    def get_book_subject_id(self, book_id: str) -> str | None:
+        """Return the subject_id linked to this book via subject_books, or None."""
+        row = self._conn.execute(
+            "SELECT subject_id FROM subject_books WHERE book_id = ? LIMIT 1",
+            (book_id,),
+        ).fetchone()
+        return row["subject_id"] if row else None
 
     def list_books(
         self, subject_id: str, *, include_temp: bool = False
