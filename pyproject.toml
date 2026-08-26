@@ -38,3 +38,6 @@ ollama-tutor-webgui = "ollama_tutor.web.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ollama_tutor"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

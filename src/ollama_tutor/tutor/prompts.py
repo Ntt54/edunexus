@@ -301,3 +301,113 @@ def build_compare_user_prompt(
         parts.append(blocks if blocks else "(aucun extrait pour ce livre)")
         parts.append("")
     return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Revision sheet (US2 / T015): auto-generated fiche de révision
+# ---------------------------------------------------------------------------
+
+
+def build_revision_sheet_prompt(
+    chunks: list[str],
+    subject_name: str,
+    level: str = "intermediate",
+) -> str:
+    """Build the system prompt for auto-generating a revision sheet (fiche).
+
+    Takes raw text chunks from the user's books, the subject name and an
+    adaptation level.  Returns a system prompt instructing the LLM to produce
+    a structured revision sheet with: definitions, key formulas / concepts,
+    key points and a conceptual map — all in French, adapted to the level.
+
+    ``chunks`` is a list of **raw text** strings (already assembled context).
+    """
+    level = _normalize_level(level)
+    context_block = "\n\n---\n\n".join(chunks) if chunks else "(aucun extrait)"
+
+    complexity = {
+        "beginner": (
+            "une version simple et vulgarisée, avec des mots courants. "
+            "Définit chaque terme technique. Utilise des analogies."
+        ),
+        "intermediate": (
+            "une version équilibrée, précise mais accessible, en utilisant le "
+            "vocabulaire standard du sujet."
+        ),
+        "advanced": (
+            "une version détaillée et technique, avec des nuances, des "
+            "contre-exemples et des liens approfondis entre concepts."
+        ),
+        "expert": (
+            "une version exhaustive et rigoureuse, dense, sans simplification, "
+            "en supposant des prérequis complets."
+        ),
+    }.get(level, "une version équilibrée et accessible.")
+
+    lines: list[str] = []
+    lines.append(
+        "Tu es un tuteur personnel, bienveillant et rigoureux, spécialisé dans le "
+        f"sujet : {subject_name}."
+    )
+    lines.append("Tu réponds toujours en français.")
+    lines.append("")
+    lines.append("Tâche — Fiche de révision auto-générée :")
+    lines.append(
+        f"À partir des extraits ci-dessous, produis {complexity}"
+    )
+    lines.append("")
+    lines.append("Structure attendue de la fiche :")
+    lines.append("1) **Définitions** — Les termes et concepts clés, définis brièvement.")
+    lines.append(
+        "2) **Formules / Concepts fondamentaux** — Les formules, théorèmes ou "
+        "principes essentiels (s'il y en a ; sinon, sauter cette section)."
+    )
+    lines.append(
+        "3) **Points clés** — Les idées maîtresses à retenir, sous forme de "
+        "liste à puces."
+    )
+    lines.append(
+        "4) **Carte conceptuelle** — Une représentation textuelle des relations "
+        "entre les concepts (utilise des flèches → ou une liste hiérarchique)."
+    )
+    lines.append("")
+    lines.append("Discipline de citation :")
+    lines.append(
+        "Quand tu tires une information d'un extrait, cite-le entre crochets "
+        "exactement sous la forme fournie, par exemple "
+        "\u00ab [Livre X — chapitre Y, p. Z] \u00bb. N'invente jamais de "
+        "référence qui n'apparaît pas dans les extraits."
+    )
+    lines.append("")
+    lines.append("Règle d'honnêteté (si non fondé) :")
+    lines.append(
+        "Si les extraits fournis sont insuffisants pour une section, indique-le "
+        "explicitement plutôt que de fabriquer du contenu. Ne génère pas de "
+        "pseudo-citations."
+    )
+    lines.append("")
+    lines.append("=== Extraits des livres de l'élève ===")
+    lines.append(context_block)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# US1 — Résumé de document
+# ---------------------------------------------------------------------------
+
+
+def build_summary_prompt(chunks: list[str], book_title: str, chapter: str | None = None) -> str:
+    """Build system prompt for document summary generation."""
+    context = "\n\n".join(f"[Extrait {i+1}]\n{c}" for i, c in enumerate(chunks))
+    target = f"du chapitre '{chapter}' du livre" if chapter else "du livre"
+    return f"""Tu es un assistant pédagogique expert. Résume {target} «{book_title}».
+
+Extraits du document :
+{context}
+
+Produis un résumé structuré en markdown avec :
+1. **Résumé global** (2-3 paragraphes)
+2. **Sections clés** (liste à puces par thème)
+3. **Points essentiels** (5-10 points à retenir)
+
+Sois précis, cite les concepts importants. Toute la réponse en français."""

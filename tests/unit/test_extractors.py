@@ -142,7 +142,7 @@ def test_extract_epub_strips_tags(tmp_path: Path) -> None:
 
 
 def test_extract_unsupported_raises(tmp_path: Path) -> None:
-    p = tmp_path / "doc.docx"
+    p = tmp_path / "doc.xyz_unknown"
     p.write_text("x")
     with pytest.raises(ValueError):
         extract_text(p)

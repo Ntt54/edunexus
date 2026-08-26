@@ -47,6 +47,8 @@ from .progress import ProgressTracker
 from .prompts import (
     build_compare_system_prompt,
     build_compare_user_prompt,
+    build_revision_sheet_prompt,
+    build_summary_prompt,
     build_system_prompt,
     build_think_instruction,
     build_user_prompt,
@@ -578,8 +580,79 @@ class TutorService:
             yield frame
 
     # ------------------------------------------------------------------
-    # Practice: exercise generation, grading, solution, code analysis (US4)
+    # Revision sheet (US2 / T016): auto-generated fiche de révision
     # ------------------------------------------------------------------
+
+    def generate_revision_sheet(
+        self,
+        subject_id: str,
+        book_id: str | None = None,
+        chapter: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate a revision sheet (fiche) from the subject's indexed chunks.
+
+        When *book_id* is provided, only chunks from that book are used.
+        Otherwise all indexed chunks for the subject are included.
+        Returns ``{"sheet": text, "subject_name": str}``.
+        """
+        subject = self.store._get_subject(subject_id)
+        if book_id:
+            raw_chunks = self.store.get_chunks_by_provenance(
+                subject_id, book_id, chapter
+            )
+        else:
+            raw_chunks = self.store.get_subject_chunks(subject_id)
+
+        texts = [c["text"] for c in raw_chunks if c.get("text")]
+
+        level = self.config.tutor_level or "intermediate"
+        system_prompt = build_revision_sheet_prompt(texts, subject.name, level)
+        model = self.config.tutor_model
+
+        messages = [
+            Message(role=MessageRole.SYSTEM, content=system_prompt),
+            Message(
+                role=MessageRole.USER,
+                content="Génère la fiche de révision à partir des extraits fournis.",
+            ),
+        ]
+
+        # Synchronous collection via an internal event-loop bridge so the
+        # method stays synchronous (matches existing non-streaming helpers).
+        import asyncio
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            # We're inside an async context — run in a thread.
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(
+                    asyncio.run,
+                    self._collect_revision_sheet(model, messages),
+                )
+                sheet = future.result(timeout=120)
+        else:
+            sheet = asyncio.run(self._collect_revision_sheet(model, messages))
+
+        return {"sheet": sheet, "subject_name": subject.name}
+
+    async def _collect_revision_sheet(
+        self, model: str, messages: list[Message]
+    ) -> str:
+        """Non-streaming LLM call for revision sheet generation."""
+        options = OllamaOptions(num_ctx=max(8192, self.config.options.num_ctx or 0))
+        parts: list[str] = []
+        async for ev in self._llm_client.chat_stream(
+            messages, model, options=options
+        ):
+            if ev.kind == "content":
+                parts.append(ev.text)
+        return "".join(parts)
 
     async def _llm_collect(
         self, messages: list[Message], options: OllamaOptions
@@ -1738,3 +1811,35 @@ class TutorService:
         return await classify_subject_chunks(
             self.store, subject_id, self.client, self.config.tutor_model
         )
+
+    # ------------------------------------------------------------------
+    # Summary (US1 / T011): document summary generation
+    # ------------------------------------------------------------------
+
+    async def summarize_book(self, book_id: str, chapter: str | None = None) -> dict[str, Any]:
+        """Generate a structured summary for a book (US1)."""
+        book = self.store.get_book(book_id)
+        if book is None:
+            raise KeyError(f"Livre introuvable : {book_id}")
+        # Retrieve chunks for the book
+        raw_chunks = self.store.get_chunks_by_provenance(
+            book.subject_id, book_id, chapter
+        )
+        texts = [c["text"] for c in raw_chunks if c.get("text")]
+        if not texts:
+            return {"summary": "Aucun contenu indexé pour ce livre.", "book_title": book.title}
+        prompt = build_summary_prompt(texts[:30], book.title, chapter)
+        model = self.config.tutor_model
+        messages = [
+            Message(role=MessageRole.SYSTEM, content=prompt),
+            Message(role=MessageRole.USER, content="Génère le résumé à partir des extraits fournis."),
+        ]
+        parts: list[str] = []
+        async for ev in self._llm_client.chat_stream(
+            messages, model, options=OllamaOptions(num_ctx=max(8192, self.config.options.num_ctx or 0))
+        ):
+            if ev.kind == "content":
+                parts.append(ev.text)
+        return {"summary": "".join(parts), "book_title": book.title}
+
+

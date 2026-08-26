@@ -1564,6 +1564,19 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         domain = await tutor_service.classify_subject(subject_id)
         return {"domain": domain}
 
+    @app.post("/api/tutor/books/{book_id}/summary")
+    async def summarize_book(book_id: str, request: Request) -> dict[str, Any]:
+        body = await request.json()
+        chapter = body.get("chapter")
+        return await tutor_service.summarize_book(book_id, chapter)
+
+    @app.post("/api/tutor/subjects/{subject_id}/revision-sheet")
+    async def revision_sheet(subject_id: str, request: Request) -> dict[str, Any]:
+        body = await request.json()
+        book_id = body.get("book_id")
+        chapter = body.get("chapter")
+        return tutor_service.generate_revision_sheet(subject_id, book_id, chapter)
+
     # ------------------------------------------------------------------
     # REST: réglages utilisateur (005-platform-ui-library)
     # ------------------------------------------------------------------
