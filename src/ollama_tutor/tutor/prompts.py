@@ -411,3 +411,69 @@ Produis un résumé structuré en markdown avec :
 3. **Points essentiels** (5-10 points à retenir)
 
 Sois précis, cite les concepts importants. Toute la réponse en français."""
+
+
+# ---------------------------------------------------------------------------
+# US3 — Diagnostic initial / quiz de positionnement (T020)
+# ---------------------------------------------------------------------------
+
+_DIAGNOSTIC_LEVEL_GUIDE = {
+    "beginner": (
+        "des questions élémentaires qui vérifient la compréhension des "
+        "définitions et des notions de base, avec un vocabulaire simple."
+    ),
+    "intermediate": (
+        "des questions de niveau moyen qui testent la compréhension des "
+        "relations entre concepts et l'application pratique."
+    ),
+    "advanced": (
+        "des questions avancées qui évaluent l'analyse critique, la "
+        "synthèse et les cas complexes."
+    ),
+}
+
+
+def build_diagnostic_question_prompt(
+    concept_name: str, difficulty_level: str
+) -> str:
+    """Build a system prompt asking the LLM to generate a diagnostic MCQ.
+
+    Returns a prompt that instructs the model to produce a JSON object with:
+    ``question``, ``options`` (dict with keys A/B/C/D), ``correct`` (letter),
+    and ``explanation`` (short French text).  All UI text is in French.
+
+    ``difficulty_level`` must be one of ``"beginner"``, ``"intermediate"``,
+    or ``"advanced"``.
+    """
+    level = difficulty_level if difficulty_level in _DIAGNOSTIC_LEVEL_GUIDE else "intermediate"
+    complexity = _DIAGNOSTIC_LEVEL_GUIDE[level]
+
+    lines: list[str] = []
+    lines.append(
+        "Tu es un tuteur pédagogique qui crée un quiz de positionnement en français."
+    )
+    lines.append(
+        f"Le concept à évaluer est : {concept_name}."
+    )
+    lines.append(
+        f"Tu dois générer {complexity}"
+    )
+    lines.append("")
+    lines.append("Réponds STRICTEMENT en JSON, sans aucun texte autour, selon la forme :")
+    lines.append(
+        '{"question": "...", "options": {"A": "...", "B": "...", "C": "...", "D": "..."}, '
+        '"correct": "A", "explication": "..."}'
+    )
+    lines.append("")
+    lines.append("Contraintes :")
+    lines.append("- Le champ 'question' est une question claire et non ambiguë.")
+    lines.append("- Le champ 'options' contient exactement 4 choix (A, B, C, D).")
+    lines.append(
+        "- Le champ 'correct' est la lettre (A, B, C ou D) de la bonne réponse."
+    )
+    lines.append(
+        "- Le champ 'explication' est une courte explication (1-2 phrases) en français "
+        "qui justifie la bonne réponse."
+    )
+    lines.append("- Toute la réponse est en français.")
+    return "\n".join(lines)

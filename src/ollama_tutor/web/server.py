@@ -1578,6 +1578,24 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         return tutor_service.generate_revision_sheet(subject_id, book_id, chapter)
 
     # ------------------------------------------------------------------
+    # REST: diagnostic initial / quiz de positionnement (US3 / T024)
+    # ------------------------------------------------------------------
+
+    @app.post("/api/tutor/subjects/{subject_id}/diagnostic")
+    async def start_diagnostic(subject_id: str) -> dict[str, Any]:
+        return tutor_service.start_diagnostic(subject_id)
+
+    @app.post("/api/tutor/diagnostic/{session_id}/answer")
+    async def submit_diagnostic_answer(session_id: str, request: Request) -> dict[str, Any]:
+        body = await request.json()
+        answer = body.get("answer", "")
+        return tutor_service.submit_diagnostic_answer(session_id, answer)
+
+    @app.get("/api/tutor/diagnostic/{session_id}/result")
+    async def get_diagnostic_result(session_id: str) -> dict[str, Any]:
+        return tutor_service.get_diagnostic_result(session_id)
+
+    # ------------------------------------------------------------------
     # REST: réglages utilisateur (005-platform-ui-library)
     # ------------------------------------------------------------------
 

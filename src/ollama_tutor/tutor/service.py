@@ -20,6 +20,7 @@ from .assessment import (
     ExamHelpError,
     QuizEngine,
     QuizReport,
+    _extract_json,
     build_code_analysis_prompt,
     build_exercise_prompt,
     build_grade_prompt,
@@ -47,6 +48,7 @@ from .progress import ProgressTracker
 from .prompts import (
     build_compare_system_prompt,
     build_compare_user_prompt,
+    build_diagnostic_question_prompt,
     build_revision_sheet_prompt,
     build_summary_prompt,
     build_system_prompt,
@@ -1841,5 +1843,305 @@ class TutorService:
             if ev.kind == "content":
                 parts.append(ev.text)
         return {"summary": "".join(parts), "book_title": book.title}
+
+    # ------------------------------------------------------------------
+    # Diagnostic initial / quiz de positionnement (US3 / T021-T023)
+    # ------------------------------------------------------------------
+
+    _DIAGNOSTIC_TOTAL_QUESTIONS = 10
+
+    def start_diagnostic(self, subject_id: str) -> dict[str, Any]:
+        """Start a diagnostic quiz for a subject (T021).
+
+        Creates a tutoring_session with ``mode="diagnostic"``, picks the
+        first concept, generates an initial question, and persists the
+        diagnostic state in the session's transcript path as JSON.
+
+        Returns a dict with ``session_id``, ``question``, ``options``,
+        ``question_num``, ``total_questions``.
+        """
+        subject = self.store._get_subject(subject_id)
+        concepts = self.store.list_concepts(subject_id)
+        if not concepts:
+            raise KeyError(f"Aucun concept pour la matière : {subject_id}")
+
+        total = min(self._DIAGNOSTIC_TOTAL_QUESTIONS, len(concepts))
+        concept_pool = concepts[:total]
+        level = self.config.tutor_level or "intermediate"
+
+        # Create a tutoring session with mode=diagnostic in the title
+        session = self.store.create_tutoring_session(
+            subject_id, title="diagnostic"
+        )
+
+        # Build the first question via LLM
+        first_concept = concept_pool[0]
+        question_data = self._generate_diagnostic_question(first_concept.name, level)
+
+        # Persist diagnostic state as JSON in transcript_path
+        state: dict[str, Any] = {
+            "mode": "diagnostic",
+            "subject_id": subject_id,
+            "concept_names": [c.name for c in concept_pool],
+            "concept_ids": [c.id for c in concept_pool],
+            "total_questions": total,
+            "current_index": 0,
+            "current_level": level,
+            "correct_count": 0,
+            "answers": [],
+            "current_correct": question_data.get("correct", "A"),
+            "current_explanation": question_data.get("explication", ""),
+        }
+        state_json = json.dumps(state, ensure_ascii=False)
+        self.store._conn.execute(
+            "UPDATE tutoring_sessions SET transcript_path = ? WHERE id = ?",
+            (state_json, session.id),
+        )
+        self.store._conn.commit()
+
+        return {
+            "session_id": session.id,
+            "question": question_data.get("question", ""),
+            "options": question_data.get("options", {}),
+            "question_num": 1,
+            "total_questions": total,
+        }
+
+    def _generate_diagnostic_question(
+        self, concept_name: str, level: str
+    ) -> dict[str, Any]:
+        """Generate a diagnostic MCQ question (synchronous bridge, T020)."""
+        system_prompt = build_diagnostic_question_prompt(concept_name, level)
+        model = self.config.tutor_model
+        messages = [
+            Message(role=MessageRole.SYSTEM, content=system_prompt),
+            Message(
+                role=MessageRole.USER,
+                content=(
+                    f"Génère une question de diagnostic sur le concept : "
+                    f"{concept_name}, au niveau {level}."
+                ),
+            ),
+        ]
+        import asyncio
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(
+                    asyncio.run,
+                    self._collect_diagnostic_question(model, messages),
+                )
+                raw = future.result(timeout=120)
+        else:
+            raw = asyncio.run(
+                self._collect_diagnostic_question(model, messages)
+            )
+
+        return self._parse_diagnostic_response(raw)
+
+    async def _collect_diagnostic_question(
+        self, model: str, messages: list[Message]
+    ) -> str:
+        """Non-streaming LLM call for diagnostic question generation."""
+        options = OllamaOptions(num_ctx=max(8192, self.config.options.num_ctx or 0))
+        parts: list[str] = []
+        async for ev in self._llm_client.chat_stream(
+            messages, model, options=options
+        ):
+            if ev.kind == "content":
+                parts.append(ev.text)
+        return "".join(parts)
+
+    @staticmethod
+    def _parse_diagnostic_response(text: str) -> dict[str, Any]:
+        """Parse the LLM diagnostic JSON into a clean dict (T020)."""
+        data = _extract_json(text)
+        question = str(data.get("question", "")).strip()
+        raw_options = data.get("options", {})
+        if not isinstance(raw_options, dict):
+            raw_options = {}
+        options: dict[str, str] = {}
+        for key in ("A", "B", "C", "D"):
+            options[key] = str(raw_options.get(key, "")).strip()
+        correct = str(data.get("correct", "A")).strip().upper()
+        if correct not in ("A", "B", "C", "D"):
+            correct = "A"
+        explanation = str(data.get("explication", "")).strip()
+        return {
+            "question": question,
+            "options": options,
+            "correct": correct,
+            "explication": explanation,
+        }
+
+    def submit_diagnostic_answer(
+        self, session_id: str, answer: str
+    ) -> dict[str, Any]:
+        """Submit an answer to the current diagnostic question (T022).
+
+        Checks the answer, tracks score, adjusts difficulty, and either
+        returns the next question or the final result.
+
+        Returns a dict with ``session_id``, ``correct``, ``explanation``,
+        ``next_question`` (or ``None``), ``is_finished``.
+        """
+        session = self.store.get_tutoring_session(session_id)
+        if session is None:
+            raise KeyError(f"Session introuvable : {session_id}")
+
+        state_json = session.transcript_path or "{}"
+        state: dict[str, Any] = _extract_json(state_json) if isinstance(state_json, str) else {}
+        if not state or state.get("mode") != "diagnostic":
+            raise ValueError("La session n'est pas un diagnostic.")
+
+        idx = state.get("current_index", 0)
+        concept_names = state.get("concept_names", [])
+        correct_answer = state.get("answers", [])
+        if isinstance(correct_answer, list) and idx < len(correct_answer):
+            stored_correct = correct_answer[idx]
+        else:
+            # Retrieve from the last generated question state
+            stored_correct = state.get("current_correct", "A")
+
+        is_correct = answer.strip().upper() == stored_correct
+        if is_correct:
+            state["correct_count"] = state.get("correct_count", 0) + 1
+
+        # Record this answer
+        if "answers" not in state:
+            state["answers"] = []
+        state["answers_sent"] = state.get("answers_sent", [])
+        state["answers_sent"].append(
+            {"answer": answer, "correct": stored_correct, "is_correct": is_correct}
+        )
+
+        explanation = state.get("current_explanation", "")
+
+        # Advance to next question or finish
+        next_index = idx + 1
+        total = state.get("total_questions", self._DIAGNOSTIC_TOTAL_QUESTIONS)
+
+        next_question_data: dict[str, Any] | None = None
+        is_finished = next_index >= total
+
+        if not is_finished:
+            # Adjust difficulty based on recent performance
+            state["current_index"] = next_index
+            recent = state["answers_sent"][-3:] if state.get("answers_sent") else []
+            recent_correct = sum(1 for a in recent if a.get("is_correct"))
+            if recent_correct >= 2:
+                # Doing well → increase difficulty
+                if state.get("current_level") == "beginner":
+                    state["current_level"] = "intermediate"
+                elif state.get("current_level") == "intermediate":
+                    state["current_level"] = "advanced"
+            elif recent_correct == 0 and len(recent) >= 2:
+                # Struggling → decrease difficulty
+                if state.get("current_level") == "advanced":
+                    state["current_level"] = "intermediate"
+                elif state.get("current_level") == "intermediate":
+                    state["current_level"] = "beginner"
+
+            concept_name = concept_names[next_index] if next_index < len(concept_names) else concept_names[-1]
+            question_data = self._generate_diagnostic_question(
+                concept_name, state.get("current_level", "intermediate")
+            )
+            state["current_correct"] = question_data.get("correct", "A")
+            state["current_explanation"] = question_data.get("explication", "")
+            next_question_data = {
+                "question": question_data.get("question", ""),
+                "options": question_data.get("options", {}),
+                "question_num": next_index + 1,
+                "total_questions": total,
+            }
+        else:
+            state["current_index"] = total  # mark as done
+
+        # Persist updated state
+        state_json_out = json.dumps(state, ensure_ascii=False)
+        self.store._conn.execute(
+            "UPDATE tutoring_sessions SET transcript_path = ?, last_active_at = ? WHERE id = ?",
+            (state_json_out, _now_iso(), session_id),
+        )
+        self.store._conn.commit()
+
+        result: dict[str, Any] = {
+            "session_id": session_id,
+            "correct": is_correct,
+            "explanation": explanation,
+            "next_question": next_question_data,
+            "is_finished": is_finished,
+        }
+        if is_finished:
+            result["result"] = self.get_diagnostic_result(session_id)
+        return result
+
+    def get_diagnostic_result(self, session_id: str) -> dict[str, Any]:
+        """Compute the final diagnostic result (T023).
+
+        Returns per-concept scores, strengths, weaknesses, and a suggested
+        learning path.
+        """
+        session = self.store.get_tutoring_session(session_id)
+        if session is None:
+            raise KeyError(f"Session introuvable : {session_id}")
+
+        state_json = session.transcript_path or "{}"
+        state: dict[str, Any] = _extract_json(state_json) if isinstance(state_json, str) else {}
+        if not state or state.get("mode") != "diagnostic":
+            raise ValueError("La session n'est pas un diagnostic.")
+
+        concept_names = state.get("concept_names", [])
+        concept_ids = state.get("concept_ids", [])
+        answers_sent = state.get("answers_sent", [])
+        total = state.get("total_questions", len(concept_names))
+        correct_count = state.get("correct_count", 0)
+        score_pct = round((correct_count / total) * 100.0, 2) if total > 0 else 0.0
+
+        # Per-concept analysis
+        per_concept: list[dict[str, Any]] = []
+        concept_correct: dict[str, bool] = {}
+        for i, ans in enumerate(answers_sent):
+            name = concept_names[i] if i < len(concept_names) else f"concept_{i}"
+            concept_correct[name] = ans.get("is_correct", False)
+            per_concept.append({
+                "concept": name,
+                "correct": ans.get("is_correct", False),
+            })
+
+        strengths: list[str] = [n for n, c in concept_correct.items() if c]
+        weaknesses: list[str] = [n for n, c in concept_correct.items() if not c]
+
+        # Suggested path: focus on weaknesses first
+        if weaknesses:
+            suggested = (
+                f"Concentrez-vous sur : {', '.join(weaknesses)}. "
+                f"Score global : {score_pct}%. "
+                "Un travail ciblé sur ces concepts est recommandé."
+            )
+        else:
+            suggested = (
+                f"Félicitations ! Score global : {score_pct}%. "
+                "Vous maîtrisez tous les concepts évalués. "
+                "Poursuivez avec des exercices avancés."
+            )
+
+        return {
+            "session_id": session_id,
+            "total_questions": total,
+            "correct_count": correct_count,
+            "score_pct": score_pct,
+            "per_concept": per_concept,
+            "strengths": strengths,
+            "weaknesses": weaknesses,
+            "suggested_path": suggested,
+        }
 
 
