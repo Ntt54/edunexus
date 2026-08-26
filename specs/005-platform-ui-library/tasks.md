@@ -23,8 +23,8 @@ UI = `src/ollama_tutor/web/static/tutor.html`.
 
 ## Phase 1: Setup (Shared Infrastructure)
 
-- [ ] T001 Vérifier la baseline : suite complète verte (`venv/bin/python -m pytest tests/ -q`, ≥209) et `node --check` sur le script inline de `src/ollama_tutor/web/static/tutor.html`
-- [ ] T002 [P] Créer le squelette `src/ollama_tutor/tutor/conversations.py` : docstring de service, classe `ConversationService` avec signatures prévues par `contracts/api.md` (create/list/get/rename/delete/set_sources/get_sources), corps `raise NotImplementedError`
+- [X] T001 Vérifier la baseline : suite complète verte (`venv/bin/python -m pytest tests/ -q`, ≥209) et `node --check` sur le script inline de `src/ollama_tutor/web/static/tutor.html`
+- [X] T002 [P] Créer le squelette `src/ollama_tutor/tutor/conversations.py` : docstring de service, classe `ConversationService` avec signatures prévues par `contracts/api.md` (create/list/get/rename/delete/set_sources/get_sources), corps `raise NotImplementedError`
 
 **Checkpoint Phase 1**: suite verte, squelette compilable.
 
@@ -34,9 +34,9 @@ UI = `src/ollama_tutor/web/static/tutor.html`.
 
 **Purpose**: couche données partagée par US1 (conversations) et US4 (sources actives). AUCUNE story ne démarre avant complétion.
 
-- [ ] T003 Migration idempotente dans `src/ollama_tutor/tutor/store.py` : `ALTER TABLE sessions ADD COLUMN title TEXT` + `ADD COLUMN updated_at REAL` sous garde PRAGMA-table_info (style maison) ; backfill `updated_at=started_at` au premier listage
-- [ ] T004 Table `conversation_sources(conversation_id TEXT, book_id TEXT, PK composée, FK ON DELETE CASCADE)` dans `src/ollama_tutor/tutor/store.py` + méthodes `set_conversation_sources(id, book_ids)`, `get_conversation_sources(id)`, nettoyage cascade sur suppression session/livre
-- [ ] T005 Tests unitaires `tests/unit/test_store_conversations.py` : migration idempotente (réouverture), backfill, set/get/clear sources, cascade suppression livre/session
+- [X] T003 Migration idempotente dans `src/ollama_tutor/tutor/store.py` : `ALTER TABLE sessions ADD COLUMN title TEXT` + `ADD COLUMN updated_at REAL` sous garde PRAGMA-table_info (style maison) ; backfill `updated_at=started_at` au premier listage
+- [X] T004 Table `conversation_sources(conversation_id TEXT, book_id TEXT, PK composée, FK ON DELETE CASCADE)` dans `src/ollama_tutor/tutor/store.py` + méthodes `set_conversation_sources(id, book_ids)`, `get_conversation_sources(id)`, nettoyage cascade sur suppression session/livre
+- [X] T005 Tests unitaires `tests/unit/test_store_conversations.py` : migration idempotente (réouverture), backfill, set/get/clear sources, cascade suppression livre/session
 
 **Checkpoint Phase 2**: suite verte incluant T005 ; schéma prêt pour US1 et US4.
 
@@ -48,9 +48,9 @@ UI = `src/ollama_tutor/web/static/tutor.html`.
 
 **Independent Test**: deux conversations avec questions différentes, bascule, arrêt/relance serveur → historiques et titres intacts.
 
-- [ ] T010 [US1] Implémenter `ConversationService` dans `src/ollama_tutor/tutor/conversations.py` : create (session vierge), list (TOUTES les sessions triées updated_at desc, avec subject_name/message_count/active_sources), rename, delete (cascade messages + sources via store, journalisée `_log_error` si échec)
-- [ ] T011 [US1] Routes REST dans `src/ollama_tutor/web/server.py` : GET/POST `/api/tutor/conversations`, GET/PATCH/DELETE `/api/tutor/conversations/{id}` (formes exactes de contracts/api.md §1 ; 404 inconnue)
-- [ ] T012 [US1] Tests contrat `tests/contract/test_conversations_api.py` : CRUD complet, 404, renommage persistant, suppression cascade (messages + sources), aucune autre conversation affectée
+- [X] T010 [US1] Implémenter `ConversationService` dans `src/ollama_tutor/tutor/conversations.py` : create (session vierge), list (TOUTES les sessions triées updated_at desc, avec subject_name/message_count/active_sources), rename, delete (cascade messages + sources via store, journalisée `_log_error` si échec)
+- [X] T011 [US1] Routes REST dans `src/ollama_tutor/web/server.py` : GET/POST `/api/tutor/conversations`, GET/PATCH/DELETE `/api/tutor/conversations/{id}` (formes exactes de contracts/api.md §1 ; 404 inconnue)
+- [X] T012 [US1] Tests contrat `tests/contract/test_conversations_api.py` : CRUD complet, 404, renommage persistant, suppression cascade (messages + sources), aucune autre conversation affectée
 - [ ] T013 [US1] UI vue Conversations dans `src/ollama_tutor/web/static/tutor.html` : liste (titre/espace/date/nb messages), boutons créer/renommer (inline)/supprimer (confirm), ouverture → historique rejoué via mécanisme `resume` existant ; état par conversation restauré
 - [ ] T014 [US1] Test intégration `tests/integration/test_conversations_persist.py` : créer 2 conversations + messages via TestClient/WS, redémarrer l'app (nouvelle create_app), rouvrir → historiques distincts intacts
 
@@ -96,10 +96,10 @@ UI = `src/ollama_tutor/web/static/tutor.html`.
 
 **Dépendance**: Phases 3 (conversations) + 5 (état sélection).
 
-- [ ] T023 [US4] Frame WS `ask` : champs optionnels `conversation_id` et `book_ids` dans `src/ollama_tutor/web/server.py` (résolution périmètre : book_ids prioritaire, sinon sources de la conversation, sinon illimité)
-- [ ] T024 [US4] Filtre `book_ids` optionnel dans `src/ollama_tutor/tutor/retrieval.py` (filtrage passages avant scoring) + paramètre transmis par `service.ask()` dans `src/ollama_tutor/tutor/service.py`
-- [ ] T025 [US4] Routes GET/PUT `/api/tutor/conversations/{id}/sources` dans `src/ollama_tutor/web/server.py` (contrat api.md §2 ; dédupliqué, ids inconnus ignorés)
-- [ ] T026 [US4] Tests contrat `tests/contract/test_rag_scope.py` : question couverte par livre hors sélection ⇒ aucune citation de ce livre ; liste vide ⇒ mode sans contexte ; périmètre prioritaire sur défaut
+- [X] T023 [US4] Frame WS `ask` : champs optionnels `conversation_id` et `book_ids` dans `src/ollama_tutor/web/server.py` (résolution périmètre : book_ids prioritaire, sinon sources de la conversation, sinon illimité)
+- [X] T024 [US4] Filtre `book_ids` optionnel dans `src/ollama_tutor/tutor/retrieval.py` (filtrage passages avant scoring) + paramètre transmis par `service.ask()` dans `src/ollama_tutor/tutor/service.py`
+- [X] T025 [US4] Routes GET/PUT `/api/tutor/conversations/{id}/sources` dans `src/ollama_tutor/web/server.py` (contrat api.md §2 ; dédupliqué, ids inconnus ignorés)
+- [X] T026 [US4] Tests contrat `tests/contract/test_rag_scope.py` : question couverte par livre hors sélection ⇒ aucune citation de ce livre ; liste vide ⇒ mode sans contexte ; périmètre prioritaire sur défaut
 - [ ] T027 [US4] UI sélecteur popover « Sources : … » dans `src/ollama_tutor/web/static/tutor.html` : recherche, arborescence avec cases, Annuler/Appliquer, bouton résumé permanent (« Java · 4 documents »), indicateur « Aucune source active », persistance par conversation
 
 **Checkpoint**: RAG scopé opérationnel de bout en bout.

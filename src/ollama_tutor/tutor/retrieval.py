@@ -140,17 +140,33 @@ class Retriever:
         """Drop the cached index for a subject (called after writes)."""
         self._cache.pop(subject_id, None)
 
-    async def retrieve(self, subject_id: str, question: str, k: int) -> list[ScoredChunk]:
-        """Embed ``question`` and return the top-``k`` scored chunks (>= floor)."""
+    async def retrieve(
+        self,
+        subject_id: str,
+        question: str,
+        k: int,
+        book_ids: list[str] | None = None,
+    ) -> list[ScoredChunk]:
+        """Embed ``question`` and return the top-``k`` scored chunks (>= floor).
+
+        ``book_ids`` restreint le périmètre aux livres indiqués (sources
+        actives d'une conversation, 005-platform-ui-library) : la recherche
+        élargit temporairement son rayon pour compenser le filtrage, puis
+        coupe à ``k``. ``None`` = illimité (comportement historique).
+        """
         idx, meta, titles = self._index_for(subject_id)
         vectors = await self.client.embed(self.model, [question])
         if not vectors or not vectors[0]:
             return []
-        scored = idx.search(vectors[0], k, floor=self.floor)
+        scope = {str(b) for b in book_ids} if book_ids is not None else None
+        search_k = max(k, 24) * 3 if scope is not None else k
+        scored = idx.search(vectors[0], search_k, floor=self.floor)
         out: list[ScoredChunk] = []
         for cid, score in scored:
             r = meta[cid]
             book_id = str(r["book_id"])
+            if scope is not None and book_id not in scope:
+                continue
             out.append(ScoredChunk(
                 chunk_id=cid,
                 book_id=book_id,
@@ -160,6 +176,8 @@ class Retriever:
                 score=score,
                 text=r["text"],
             ))
+            if len(out) >= k:
+                break
         return out
 
     def assemble_context(self, chunks: list[ScoredChunk], max_chars: int | None = None) -> str:

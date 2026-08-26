@@ -310,6 +310,14 @@ class LibraryStore:
                 corpus_id INTEGER NOT NULL REFERENCES corpora(id) ON DELETE CASCADE,
                 PRIMARY KEY (book_id, corpus_id)
             );
+
+            -- Sources actives par conversation (005-platform-ui-library).
+            -- Référence pure : aucun document ni embedding dupliqué.
+            CREATE TABLE IF NOT EXISTS conversation_sources (
+                conversation_id TEXT NOT NULL REFERENCES tutoring_sessions(id) ON DELETE CASCADE,
+                book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+                PRIMARY KEY (conversation_id, book_id)
+            );
             """
         )
         self._conn.commit()
@@ -345,6 +353,19 @@ class LibraryStore:
         if "expires_at" not in bcols:
             cur.execute(
                 "ALTER TABLE books ADD COLUMN expires_at REAL"
+            )
+            cur.commit()
+        # Conversations nommées (005-platform-ui-library) : titre éditable +
+        # horodatage de dernière activité par session.
+        tcols = {r["name"] for r in cur.execute("PRAGMA table_info(tutoring_sessions)")}
+        if "title" not in tcols:
+            cur.execute(
+                "ALTER TABLE tutoring_sessions ADD COLUMN title TEXT NOT NULL DEFAULT ''"
+            )
+            cur.commit()
+        if "updated_at" not in tcols:
+            cur.execute(
+                "ALTER TABLE tutoring_sessions ADD COLUMN updated_at REAL"
             )
             cur.commit()
 
@@ -1531,20 +1552,126 @@ class LibraryStore:
     # Tutoring sessions
     # ------------------------------------------------------------------
 
-    def create_tutoring_session(self, subject_id: str) -> TutoringSession:
-        """Open a new ``active`` tutoring session row (US2)."""
+    # ------------------------------------------------------------------
+    # Conversations nommées (005-platform-ui-library)
+    # ------------------------------------------------------------------
+
+    def rename_conversation(self, session_id: str, title: str) -> bool:
+        """Set a conversation's display title. Returns False if unknown."""
+        cur = self._conn.execute(
+            "UPDATE tutoring_sessions SET title = ? WHERE id = ?",
+            (title, session_id),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def touch_conversation(self, session_id: str) -> None:
+        """Bump ``updated_at`` (called after each ask in a conversation)."""
+        self._conn.execute(
+            "UPDATE tutoring_sessions SET updated_at = ? WHERE id = ?",
+            (time.time(), session_id),
+        )
+        self._conn.commit()
+
+    def list_conversations(self) -> list[dict[str, Any]]:
+        """All sessions as conversations, most recently active first."""
+        rows = self._conn.execute(
+            "SELECT s.*, sub.name AS subject_name "
+            "FROM tutoring_sessions s "
+            "LEFT JOIN subjects sub ON sub.id = s.subject_id "
+            "ORDER BY COALESCE(s.updated_at, 0) DESC, s.started_at DESC"
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            d = dict(row)
+            d["message_count"] = len(self.get_session_transcript(d["id"]))
+            out.append(d)
+        return out
+
+    def delete_conversation(self, session_id: str) -> bool:
+        """Delete a conversation: sources, transcript file, session row."""
+        session = self.get_tutoring_session(session_id)
+        if session is None:
+            return False
+        self._conn.execute(
+            "DELETE FROM conversation_sources WHERE conversation_id = ?",
+            (session_id,),
+        )
+        self._conn.commit()
+        if session.transcript_path:
+            try:
+                Path(session.transcript_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+        cur = self._conn.execute(
+            "DELETE FROM tutoring_sessions WHERE id = ?", (session_id,)
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def set_conversation_sources(
+        self, session_id: str, book_ids: list[str]
+    ) -> int:
+        """Replace the active-source set of a conversation (deduplicated).
+
+        Unknown book ids are silently ignored ; returns the number of
+        sources actually set. Never touches books or embeddings.
+        """
+        known = {r["id"] for r in self._conn.execute("SELECT id FROM books")}
+        wanted: list[str] = []
+        for bid in book_ids:
+            b = str(bid)
+            if b in known and b not in wanted:
+                wanted.append(b)
+        self._conn.execute(
+            "DELETE FROM conversation_sources WHERE conversation_id = ?",
+            (session_id,),
+        )
+        for bid in wanted:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO conversation_sources "
+                "(conversation_id, book_id) VALUES (?, ?)",
+                (session_id, bid),
+            )
+        self._conn.commit()
+        return len(wanted)
+
+    def get_conversation_source_ids(self, session_id: str) -> list[str]:
+        """Active book ids of a conversation ([] if none/unknown)."""
+        rows = self._conn.execute(
+            "SELECT book_id FROM conversation_sources WHERE conversation_id = ?",
+            (session_id,),
+        )
+        return [r["book_id"] for r in rows]
+
+    def create_tutoring_session(
+        self,
+        subject_id: str,
+        *,
+        title: str = "",
+        session_id: str | None = None,
+    ) -> TutoringSession:
+        """Open a new ``active`` tutoring session row (US2 / 005 conversations).
+
+        ``session_id`` permet d'ouvrir une conversation avec un identifiant
+        imposé (création explicite via l'API conversations) ; ``title`` nomme
+        la conversation (défaut : sans titre).
+        """
         self._get_subject(subject_id)
         now = _now_iso()
-        sid = _uid()
+        sid = session_id or _uid()
+        ts = time.time()
         self._conn.execute(
             "INSERT INTO tutoring_sessions (id, subject_id, started_at, "
-            "last_active_at, status) VALUES (?, ?, ?, ?, 'active')",
-            (sid, subject_id, now, now),
+            "last_active_at, status, title, updated_at) "
+            "VALUES (?, ?, ?, ?, 'active', ?, ?)",
+            (sid, subject_id, now, now, title, ts),
         )
         self._conn.commit()
         return TutoringSession(
             id=sid, subject_id=subject_id, started_at=now,
-            last_active_at=now, status="active",
+            last_active_at=now, status="active", title=title,
+            updated_at=ts,
         )
 
     def get_tutoring_session(self, session_id: str) -> TutoringSession | None:

@@ -136,6 +136,8 @@ class TutorService:
         cancel: asyncio.Event | None = None,
         mode: str = "ask",
         term: str | None = None,
+        conversation_id: str | None = None,
+        book_ids: list[str] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream a grounded tutoring answer as dict frames.
 
@@ -161,6 +163,20 @@ class TutorService:
         model = model or self.config.tutor_model
         k = self.config.tutor_top_k
 
+        # Conversation nommée (005) : conversation_id EST l'identifiant de
+        # session — get-or-create, et l'espace de la conversation prime sur
+        # celui transmis lorsqu'elle existe déjà.
+        if conversation_id:
+            conv = self.store.get_tutoring_session(conversation_id)
+            if conv is not None:
+                subject_id = conv.subject_id
+                session_id = conversation_id
+            else:
+                self.store.create_tutoring_session(
+                    subject_id, session_id=conversation_id
+                )
+                session_id = conversation_id
+
         # Open (or continue) a tutoring_sessions row (FR-029 resume hook).
         if session_id:
             existing = self.store.get_tutoring_session(session_id)
@@ -168,6 +184,17 @@ class TutorService:
         else:
             session = self.store.create_tutoring_session(subject_id)
         session_id = session.id
+
+        # Périmètre RAG (005) : book_ids explicites > sources actives de la
+        # conversation > illimité (None).
+        if book_ids is not None:
+            scope_book_ids: list[str] | None = [str(b) for b in book_ids]
+        elif conversation_id:
+            scope_book_ids = self.store.get_conversation_source_ids(conversation_id)
+        else:
+            scope_book_ids = None
+        if conversation_id:
+            self.store.touch_conversation(conversation_id)
 
         if mode == "compare":
             async for frame in self._ask_compare(
@@ -195,8 +222,11 @@ class TutorService:
         # passages ARE retrieved.
         chunks: list[ScoredChunk] = []
         if self.store.get_indexed_chunks(subject_id):
-            # 1) Retrieve subject-scoped passages.
-            chunks = await self.retriever.retrieve(subject_id, question, k)
+            # 1) Retrieve subject-scoped passages (périmètre conversation si
+            # des sources actives sont définies — 005-platform-ui-library).
+            chunks = await self.retriever.retrieve(
+                subject_id, question, k, book_ids=scope_book_ids
+            )
         if not chunks:
             async for frame in self._stream_model_answer(
                 subject_name=subject_name,

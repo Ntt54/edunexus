@@ -6,8 +6,9 @@
 <title>EduNexus — Professeur IA local</title>
 <style>
 /* ==========================================================================
-   EduNexus — tuteur pédagogique RAG local
-   Une seule feuille de style inline, zéro dépendance externe.
+   EduNexus — plateforme de tutorat multi-espaces
+   Un seul fichier : CSS + JS inline, zéro dépendance externe.
+   Identité : papier/encre, indigo + ambre, titres serif.
    ========================================================================== */
 :root {
   --paper: #f3f1ea;
@@ -48,7 +49,6 @@ body {
   flex-direction: column;
   overflow: hidden;
 }
-/* Atmosphère : deux halos très doux, aucun coût de rendu notable */
 body::before {
   content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
   background:
@@ -65,9 +65,9 @@ button { cursor: pointer; }
 
 /* ------------------------------------------------------------------ header */
 .topbar {
-  position: relative; z-index: 5;
+  position: relative; z-index: 6;
   display: flex; align-items: center; gap: 12px;
-  height: 58px; padding: 0 16px;
+  height: 54px; padding: 0 16px;
   background: rgba(255,253,248,.92);
   backdrop-filter: blur(6px);
   border-bottom: 1px solid var(--line);
@@ -77,18 +77,24 @@ button { cursor: pointer; }
 .brand-name { font-family: var(--serif); font-weight: 700; font-size: 19px; letter-spacing: .01em; }
 .brand-tag { font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--gold); font-weight: 700; margin-left: 2px; }
 .space-chip {
-  display: inline-flex; align-items: center; gap: 6px;
-  max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 7px;
+  max-width: 260px; min-width: 0;
   border: 1px solid var(--accent-line); background: var(--accent-soft); color: var(--accent-deep);
   border-radius: 999px; padding: 3px 12px; font-size: 12.5px; font-weight: 600;
 }
 .space-chip svg { width: 13px; height: 13px; flex: none; }
-.top-spacer { flex: 1; }
+.space-chip select {
+  border: none; background: transparent; padding: 0; width: auto; max-width: 170px;
+  font-weight: 700; color: inherit; font-size: 12.5px;
+  text-overflow: ellipsis;
+}
+.space-chip select:focus { box-shadow: none; }
+.top-spacer { flex: 1 1 0; min-width: 8px; }
 .model-group { display: flex; align-items: center; gap: 8px; }
-.model-field { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ink-dim); }
+.model-field { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ink-dim); min-width: 0; }
 .model-field select {
   border: 1px solid var(--line); background: var(--surface); border-radius: var(--r-sm);
-  padding: 4px 6px; font-size: 12.5px; max-width: 170px; color: var(--ink);
+  padding: 4px 6px; font-size: 12.5px; max-width: 150px; color: var(--ink); text-overflow: ellipsis;
 }
 .engine-badge {
   display: inline-flex; align-items: center; gap: 6px;
@@ -100,11 +106,7 @@ button { cursor: pointer; }
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 12px; color: var(--ink-dim); min-width: 60px; justify-content: flex-end;
 }
-/* Alignement en-tête : rien ne déborde, tout se resserre proprement */
 .topbar > * { flex: none; min-width: 0; }
-.topbar > .top-spacer { flex: 1 1 0; min-width: 8px; }
-.model-field { min-width: 0; }
-.model-field select { max-width: 150px; text-overflow: ellipsis; }
 @media (max-width: 1360px) {
   .brand-tag { display: none; }
   .topbar { gap: 9px; }
@@ -112,27 +114,38 @@ button { cursor: pointer; }
   .engine-badge { padding: 3px 8px; }
 }
 
-/* ------------------------------------------------------------------- layout */
-#layout {
-  position: relative; z-index: 1;
-  flex: 1; min-height: 0;
-  display: grid;
-  grid-template-columns: var(--w-l, 330px) 8px minmax(0, 1fr) 8px var(--w-r, 380px);
-  padding: 12px;
+/* --------------------------------------------------- navigation principale */
+.mainnav {
+  position: relative; z-index: 5;
+  display: flex; align-items: stretch; gap: 4px;
+  padding: 5px 12px;
+  background: rgba(255,253,248,.94);
+  backdrop-filter: blur(6px);
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto; scrollbar-width: thin;
 }
-.handle {
-  border-radius: 999px; margin: 8px 1px; cursor: col-resize;
-  position: relative; touch-action: none;
+.navbtn {
+  border: 1px solid transparent; background: transparent; border-radius: 999px;
+  padding: 5px 14px; font-size: 13px; font-weight: 600; color: var(--ink-dim);
+  white-space: nowrap; display: inline-flex; align-items: center; gap: 7px;
+  transition: color .15s, background .15s, border-color .15s;
 }
-.handle::after {
-  content: ""; position: absolute; top: 50%; left: 50%;
-  width: 3px; height: 44px; transform: translate(-50%, -50%);
-  border-radius: 999px; background: var(--line-strong);
-  transition: background .15s, height .15s;
+.navbtn:hover { color: var(--ink); background: var(--surface2); }
+.navbtn.active {
+  color: var(--accent-deep); background: var(--accent-soft); border-color: var(--accent-line);
 }
-.handle:hover::after, .handle.dragging::after { background: var(--accent); height: 72px; }
+.navbtn:disabled { opacity: .75; cursor: not-allowed; }
+.badge.soon {
+  color: var(--gold); border: 1px solid var(--gold-line); background: var(--gold-soft);
+  font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; padding: 0 6px; border-radius: 999px;
+}
+
+/* ------------------------------------------------------------------- vues */
+#views { position: relative; z-index: 1; flex: 1; min-height: 0; padding: 12px; }
+.view { display: none; height: 100%; min-height: 0; }
+.view.active { display: flex; flex-direction: column; }
 .pane {
-  display: flex; flex-direction: column; min-height: 0; min-width: 0;
+  display: flex; flex-direction: column; min-height: 0; min-width: 0; flex: 1;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
@@ -143,11 +156,15 @@ button { cursor: pointer; }
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
   padding: 13px 16px 11px;
   border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
 }
-.pane-head h2 { margin: 0; font-size: 16.5px; }
-.pane-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px 20px; }
-.pane-scroll::-webkit-scrollbar, .thread::-webkit-scrollbar, .modal-results::-webkit-scrollbar { width: 9px; }
-.pane-scroll::-webkit-scrollbar-thumb, .thread::-webkit-scrollbar-thumb, .modal-results::-webkit-scrollbar-thumb {
+.pane-head h2 { margin: 0; font-size: 17px; }
+.pane-head .head-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pane-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 16px 22px; }
+.pane-scroll::-webkit-scrollbar, .thread::-webkit-scrollbar,
+.modal-results::-webkit-scrollbar, .conv-list::-webkit-scrollbar { width: 9px; }
+.pane-scroll::-webkit-scrollbar-thumb, .thread::-webkit-scrollbar-thumb,
+.modal-results::-webkit-scrollbar-thumb, .conv-list::-webkit-scrollbar-thumb {
   background: var(--line-strong); border-radius: 999px; border: 2px solid var(--surface);
 }
 
@@ -210,42 +227,11 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
   animation: rot .8s linear infinite;
 }
 @keyframes rot { to { transform: rotate(360deg); } }
+.spin-dark { border-color: rgba(111,116,128,.35); border-top-color: var(--ink-dim); }
+.spin-light { border-color: rgba(255,255,255,.35); border-top-color: #fff; }
+.btn .spin { width: 12px; height: 12px; display: inline-block; vertical-align: -2px; margin-right: 6px; }
 
-/* ------------------------------------------------------------ colonne gauche */
-.import-panel {
-  border: 1px dashed var(--line-strong); border-radius: var(--r-md);
-  background: var(--surface2); padding: 10px 12px; margin-top: 10px;
-  display: flex; flex-direction: column; gap: 8px;
-}
-.search-row { display: flex; gap: 6px; margin-top: 10px; }
-.search-row input { flex: 1; min-width: 0; }
-.src-group-head {
-  display: flex; align-items: baseline; gap: 8px;
-  margin: 14px 0 6px; font-family: var(--serif); font-weight: 700; font-size: 14px;
-}
-.src-group-head:first-child { margin-top: 2px; }
-.src-group-head .count { font-family: var(--sans); font-weight: 500; font-size: 11.5px; color: var(--ink-dim); }
-.src {
-  display: flex; align-items: flex-start; gap: 9px;
-  border: 1px solid var(--line); border-radius: var(--r-md);
-  background: var(--surface); padding: 9px 10px; margin-bottom: 7px;
-  transition: border-color .15s, box-shadow .15s;
-}
-.src:hover { border-color: var(--accent-line); box-shadow: var(--shadow-sm); }
-.src.excluded { opacity: .55; background: var(--surface2); }
-.src input[type=checkbox] { margin-top: 3px; width: 15px; height: 15px; accent-color: var(--accent); flex: none; cursor: pointer; }
-.src-main { flex: 1; min-width: 0; }
-.src-title { font-weight: 600; font-size: 13.5px; overflow-wrap: anywhere; }
-.src-meta { font-size: 11.5px; color: var(--ink-dim); margin-top: 2px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.fmt-chip { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; background: var(--surface2); }
-.src-del {
-  border: none; background: none; color: var(--line-strong); font-size: 17px; line-height: 1;
-  padding: 2px 4px; border-radius: 6px; flex: none;
-}
-.src-del:hover { color: var(--err); background: var(--err-soft); }
-.empty-note { color: var(--ink-dim); font-size: 13px; text-align: center; padding: 26px 10px; }
-
-/* Barre de progression indéterminée — honnête : le serveur ne fournit pas de % */
+/* Barre de progression indéterminée — honnête : pas de % côté serveur */
 .idx-track {
   position: relative; height: 6px; margin-top: 6px;
   border-radius: 999px; background: var(--surface2);
@@ -259,43 +245,40 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
 @keyframes idxsweep { to { left: 100%; } }
 @media (prefers-reduced-motion: reduce) { .idx-fill { left: 31%; animation: none; } }
 
-.spin-dark { border-color: rgba(111,116,128,.35); border-top-color: var(--ink-dim); }
-.spin-light { border-color: rgba(255,255,255,.35); border-top-color: #fff; }
-.btn .spin { width: 12px; height: 12px; display: inline-block; vertical-align: -2px; margin-right: 6px; }
+.empty-note { color: var(--ink-dim); font-size: 13px; text-align: center; padding: 26px 10px; }
 
-.src-actions { display: flex; gap: 2px; flex: none; align-items: center; }
-.src-tag {
-  border: none; background: none; color: var(--line-strong);
-  padding: 3px 5px; border-radius: 6px; flex: none; line-height: 0;
+/* ===================================================== CONVERSATIONS ===== */
+.conv-layout { flex: 1; display: flex; min-height: 0; }
+.conv-side {
+  width: 300px; flex: none; display: flex; flex-direction: column; min-height: 0;
+  border-right: 1px solid var(--line); background: var(--surface2);
 }
-.src-tag:hover { color: var(--accent); background: var(--accent-soft); }
-.src-tag.has-cats { color: var(--accent); }
-.auto-row { display: flex; gap: 8px; margin-top: 10px; }
-.auto-row .btn { flex: 1; }
+.conv-side-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 12px 14px 8px;
+}
+.conv-side-head h3 { margin: 0; font-size: 15px; }
+.newconv-form { padding: 0 14px 10px; display: flex; flex-direction: column; gap: 7px; border-bottom: 1px solid var(--line); }
+.newconv-form .row-btns { margin: 0; }
+.conv-list { flex: 1; min-height: 0; overflow-y: auto; }
+.conv-item {
+  padding: 10px 14px 9px; border-bottom: 1px solid var(--line);
+  cursor: pointer; border-left: 3px solid transparent;
+  transition: background .15s, border-color .15s;
+}
+.conv-item:hover { background: var(--surface); }
+.conv-item.active { background: var(--accent-soft); border-left-color: var(--accent); }
+.ci-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.ci-title { font-weight: 600; font-size: 13.5px; overflow-wrap: anywhere; }
+.ci-title input { font-size: 13px; padding: 2px 6px; }
+.ci-actions { display: flex; gap: 2px; flex: none; opacity: 0; transition: opacity .15s; }
+.conv-item:hover .ci-actions, .conv-item.active .ci-actions { opacity: 1; }
+.ci-act { border: none; background: none; color: var(--line-strong); border-radius: 6px; padding: 2px 5px; font-size: 13px; line-height: 1; }
+.ci-act:hover { color: var(--accent); background: var(--accent-soft); }
+.ci-act.del:hover { color: var(--err); background: var(--err-soft); }
+.ci-meta { font-family: var(--mono); font-size: 10.5px; color: var(--ink-dim); margin-top: 3px; display: flex; gap: 8px; flex-wrap: wrap; }
+.conv-main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 
-.thread-scope-note {
-  align-self: center; max-width: 92%; text-align: center;
-  font-size: 11.5px; color: var(--ink-dim);
-  border: 1px dashed var(--line-strong); border-radius: 999px;
-  padding: 4px 14px; background: var(--surface2);
-}
-.modal-body { padding: 14px 18px 18px; overflow-y: auto; }
-
-/* ------------------------------------------------------------- colonne centre */
-.session-head { align-items: flex-start; flex-direction: column; gap: 8px; display: flex; }
-.notion-row { display: flex; gap: 10px; align-items: center; width: 100%; }
-.notion-row select { max-width: 280px; }
-.mastery { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 140px; }
-.mastery-track {
-  flex: 1; height: 8px; border-radius: 999px; overflow: hidden;
-  background: var(--surface2); border: 1px solid var(--line);
-}
-.mastery-fill {
-  height: 100%; width: 0%; border-radius: 999px;
-  background: linear-gradient(90deg, var(--gold), var(--accent));
-  transition: width .5s ease;
-}
-.mastery-score { font-family: var(--mono); font-size: 11.5px; color: var(--ink-dim); min-width: 52px; text-align: right; }
 .pedagogy-row {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--surface2);
@@ -307,13 +290,24 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
 }
 .chip-toggle input { accent-color: var(--accent); width: 14px; height: 14px; margin: 0; }
 .chip-toggle select { border: none; background: transparent; padding: 0; width: auto; font-size: 12.5px; color: var(--ink); }
-.scope-note { margin-left: auto; font-size: 11.5px; color: var(--ink-dim); }
+.sources-btn {
+  margin-left: auto;
+  border: 1px solid var(--gold-line); background: var(--gold-soft); color: var(--gold);
+  border-radius: 999px; padding: 3px 13px; font-size: 12.5px; font-weight: 700;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.sources-btn:hover { filter: brightness(1.04); }
+.sources-btn.none { border-color: var(--line-strong); background: var(--surface); color: var(--ink-dim); }
 
 .thread { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 18px 8px; display: flex; flex-direction: column; gap: 14px; }
-.thread-empty {
-  margin: auto; text-align: center; color: var(--ink-dim); max-width: 380px;
-}
+.thread-empty { margin: auto; text-align: center; color: var(--ink-dim); max-width: 400px; }
 .thread-empty .big { font-family: var(--serif); font-size: 21px; color: var(--ink); margin-bottom: 6px; }
+.thread-scope-note {
+  align-self: center; max-width: 92%; text-align: center;
+  font-size: 11.5px; color: var(--ink-dim);
+  border: 1px dashed var(--line-strong); border-radius: 999px;
+  padding: 4px 14px; background: var(--surface2);
+}
 .msg { display: flex; flex-direction: column; max-width: 88%; animation: rise .22s ease; }
 @keyframes rise { from { opacity: 0; transform: translateY(6px); } }
 .msg-student { align-self: flex-end; align-items: flex-end; }
@@ -338,7 +332,6 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
 .msg-kind.k-hint { color: var(--gold); }
 .tutor-body { white-space: pre-wrap; overflow-wrap: anywhere; }
 .tutor-think { color: var(--ink-dim); font-style: italic; }
-.msg-stats { margin-top: 6px; font-size: 11.5px; color: var(--ink-dim); font-family: var(--mono); opacity: .9; }
 .cite-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 2px 0 8px; }
 .cite-chip {
   display: inline-flex; align-items: center; gap: 4px;
@@ -370,16 +363,93 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
 }
 .composer textarea { flex: 1; min-height: 40px; max-height: 160px; }
 
-/* ------------------------------------------------------------- colonne droite */
-.tabbar { display: flex; border-bottom: 1px solid var(--line); background: var(--surface2); }
-.tab {
-  flex: 1; border: none; background: transparent; padding: 11px 4px 9px;
-  font-size: 12.5px; font-weight: 700; color: var(--ink-dim);
-  border-bottom: 2px solid transparent; border-radius: 0;
-  transition: color .15s, border-color .15s;
+/* ====================================================== BIBLIOTHÈQUE ===== */
+.lib-toolbar { padding: 10px 16px 0; }
+.search-row { display: flex; gap: 6px; margin-top: 10px; }
+.search-row input { flex: 1; min-width: 0; }
+.auto-row { display: flex; gap: 8px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
+.auto-row .grow { flex: 1; }
+.count-chip {
+  font-family: var(--mono); font-size: 11.5px; color: var(--ink-dim);
+  border: 1px solid var(--line); border-radius: 999px; padding: 3px 11px; background: var(--surface2);
 }
-.tab:hover { color: var(--ink); }
-.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.import-panel {
+  border: 1px dashed var(--line-strong); border-radius: var(--r-md);
+  background: var(--surface2); padding: 10px 12px; margin-top: 10px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.sugg {
+  border: 1px dashed var(--gold-line); background: var(--gold-soft);
+  border-radius: var(--r-sm); padding: 7px 10px;
+  font-size: 12.5px; color: #6b4a10;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.sugg select { width: auto; max-width: 220px; padding: 2px 6px; font-size: 12px; }
+
+.tree { font-size: 13.5px; padding: 4px 2px; }
+.tnode { margin: 1px 0; }
+.trow {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 8px; border-radius: var(--r-sm);
+}
+.trow:hover { background: var(--surface2); }
+.tcaret {
+  width: 15px; height: 15px; flex: none; text-align: center; line-height: 15px;
+  color: var(--ink-dim); transition: transform .15s; user-select: none;
+}
+.tnode.open > .trow .tcaret { transform: rotate(90deg); }
+.tnode.open > .tkids { display: block; }
+.tkids { display: none; margin-left: 21px; border-left: 1px dashed var(--line); padding-left: 8px; }
+.tlabel { font-weight: 600; overflow-wrap: anywhere; }
+.tlabel.serif { font-family: var(--serif); font-size: 14.5px; }
+.tcount { font-family: var(--mono); font-size: 10.5px; color: var(--ink-dim); flex: none; }
+.tcheck { width: 15px; height: 15px; accent-color: var(--accent); flex: none; cursor: pointer; margin: 0; }
+.tspacer { flex: 1; }
+.tacts { display: flex; gap: 1px; opacity: 0; transition: opacity .15s; }
+.trow:hover .tacts { opacity: 1; }
+.tact { border: none; background: none; color: var(--line-strong); border-radius: 6px; padding: 1px 5px; font-size: 12.5px; line-height: 1.2; }
+.tact:hover { color: var(--accent); background: var(--accent-soft); }
+.tact.del:hover { color: var(--err); background: var(--err-soft); }
+.tdoc { padding: 4px 8px 4px 10px; }
+.tdoc .src-title { font-size: 13px; font-weight: 500; }
+.path-crumb { font-family: var(--mono); font-size: 10.5px; color: var(--ink-dim); }
+
+.fmt-chip { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; background: var(--surface2); }
+.src-actions { display: flex; gap: 2px; flex: none; align-items: center; }
+.src-tag { border: none; background: none; color: var(--line-strong); padding: 3px 5px; border-radius: 6px; flex: none; line-height: 0; }
+.src-tag:hover { color: var(--accent); background: var(--accent-soft); }
+.src-tag.has-cats { color: var(--accent); }
+.src-del { border: none; background: none; color: var(--line-strong); font-size: 16px; line-height: 1; padding: 2px 5px; border-radius: 6px; flex: none; }
+.src-del:hover { color: var(--err); background: var(--err-soft); }
+
+/* ======================================================= TABLEAU DE BORD = */
+.dash-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 12px; align-content: start;
+}
+.dash-card {
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface); padding: 14px 16px; box-shadow: var(--shadow-sm);
+  text-align: left; width: 100%;
+  transition: border-color .15s, box-shadow .15s, transform .15s;
+}
+.dash-card.clickable { cursor: pointer; }
+.dash-card.clickable:hover { border-color: var(--accent-line); box-shadow: var(--shadow-md); transform: translateY(-1px); }
+.dash-card h3 { margin: 0 0 6px; font-size: 13px; color: var(--ink-dim); font-family: var(--sans); font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.dc-num { font-family: var(--serif); font-size: 32px; font-weight: 700; line-height: 1.1; }
+.dc-line { font-size: 13px; margin-top: 4px; overflow-wrap: anywhere; }
+.dc-foot { font-size: 11.5px; color: var(--accent); margin-top: 8px; font-weight: 700; }
+.dash-hero { text-align: center; padding: 40px 20px; }
+.dash-hero .big { font-family: var(--serif); font-size: 24px; margin-bottom: 8px; }
+
+/* ============================================================ APPRENTISSAGE etc. */
+.session-head-cards { max-width: 760px; }
+.notion-row { display: flex; gap: 10px; align-items: center; width: 100%; }
+.notion-row select { max-width: 280px; }
+.mastery { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 140px; }
+.mastery-track { flex: 1; height: 8px; border-radius: 999px; overflow: hidden; background: var(--surface2); border: 1px solid var(--line); }
+.mastery-fill { height: 100%; width: 0%; border-radius: 999px; background: linear-gradient(90deg, var(--gold), var(--accent)); transition: width .5s ease; }
+.mastery-score { font-family: var(--mono); font-size: 11.5px; color: var(--ink-dim); min-width: 52px; text-align: right; }
 .studio-card {
   border: 1px solid var(--line); border-radius: var(--r-md);
   background: var(--surface); padding: 12px 14px; margin-bottom: 12px;
@@ -436,8 +506,6 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
 .mini-track { height: 6px; border-radius: 999px; background: var(--surface2); border: 1px solid var(--line); overflow: hidden; margin-top: 7px; }
 .mini-fill { height: 100%; background: linear-gradient(90deg, var(--gold), var(--accent)); border-radius: 999px; }
 .ni-meta { font-size: 11.5px; color: var(--ink-dim); margin-top: 4px; }
-.sess-item { border: 1px solid var(--line); border-left: 3px solid var(--accent-line); border-radius: var(--r-sm); padding: 8px 12px; margin-bottom: 8px; font-size: 13px; background: var(--surface); }
-.sess-item .when { font-family: var(--mono); font-size: 11px; color: var(--ink-dim); }
 
 .result { border-left: 3px solid var(--gold); background: var(--surface2); border-radius: 6px; padding: 7px 11px; margin: 7px 0; font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .stream-answer { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; margin-top: 6px; }
@@ -447,16 +515,14 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
 .compare-box .result { background: var(--surface); }
 
 /* ------------------------------------------------------------------ modal */
-/* [hidden] doit toujours gagner sur les règles display (modales, panneaux) */
 [hidden] { display: none !important; }
-
 .modal-backdrop {
   position: fixed; inset: 0; z-index: 40;
   background: rgba(35,38,47,.4); backdrop-filter: blur(2px);
   display: flex; align-items: center; justify-content: center; padding: 20px;
 }
 .modal {
-  width: min(680px, 100%); max-height: 82vh; display: flex; flex-direction: column;
+  width: min(680px, 100%); max-height: 84vh; display: flex; flex-direction: column;
   background: var(--surface); border-radius: var(--r-lg); box-shadow: var(--shadow-md);
   border: 1px solid var(--line); overflow: hidden;
 }
@@ -464,6 +530,11 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
 .modal-head h3 { margin: 0; font-size: 16px; }
 .modal-search { display: flex; gap: 8px; padding: 12px 18px; border-bottom: 1px solid var(--line); }
 .modal-results { padding: 12px 18px 18px; overflow-y: auto; }
+.modal-body { padding: 14px 18px 18px; overflow-y: auto; }
+.modal-foot {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 11px 18px; border-top: 1px solid var(--line); background: var(--surface2);
+}
 
 /* ------------------------------------------------------------------ toast */
 #toast {
@@ -475,26 +546,17 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
 #toast.show { display: block; animation: rise .2s ease; }
 
 /* ------------------------------------------------------------------ mobile */
-.mobile-tabs { display: none; }
 @media (max-width: 1020px) {
   body { overflow: auto; }
-  #layout { display: flex; flex-direction: column; padding: 10px; gap: 10px; height: auto; flex: none; }
-  .handle { display: none; }
-  .pane { min-height: 55vh; }
-  .pane[data-mobile-hidden="1"] { display: none; }
-  .mobile-tabs {
-    display: flex; position: sticky; bottom: 0; z-index: 20;
-    background: rgba(255,253,248,.96); border-top: 1px solid var(--line);
-    padding: 6px 10px calc(6px + env(safe-area-inset-bottom)); gap: 8px;
-  }
-  .mobile-tabs button {
-    flex: 1; border: 1px solid var(--line-strong); background: var(--surface);
-    border-radius: 999px; padding: 8px 0; font-weight: 700; font-size: 13px; color: var(--ink-dim);
-  }
-  .mobile-tabs button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #views { padding: 10px; }
+  .view.active { height: auto; min-height: calc(100vh - 130px); }
+  .mainnav { position: sticky; top: 0; }
+  .conv-layout { flex-direction: column; }
+  .conv-side { width: 100%; max-height: 240px; border-right: none; border-bottom: 1px solid var(--line); }
   .model-field span { display: none; }
   .brand-tag { display: none; }
-  .thread { min-height: 40vh; }
+  .thread { min-height: 42vh; }
+  .dash-grid { grid-template-columns: 1fr; }
 }
 </style>
 </head>
@@ -511,9 +573,9 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
     <span class="brand-name">EduNexus</span>
     <span class="brand-tag">Professeur IA local</span>
   </div>
-  <div class="space-chip" id="spaceChip" title="Espace d'apprentissage actif">
+  <div class="space-chip" title="Espace d'apprentissage actif — cloisonne documents, notions et conversations">
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V6a2 2 0 0 1 2-2h9l5 5v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="2"/></svg>
-    <span id="spaceChipName">…</span>
+    <select id="spaceSelect" aria-label="Espace d'apprentissage actif"></select>
   </div>
   <div class="top-spacer"></div>
   <div class="engine-badge" id="engineBadge" title="Moteur d'embeddings local"><span class="dot"></span><span id="engineLabel">détection…</span></div>
@@ -528,127 +590,226 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
   <span class="status-pill" id="statusPill" role="status" aria-live="polite">prêt</span>
 </header>
 
-<div id="layout">
+<nav class="mainnav" aria-label="Navigation principale des espaces">
+  <button class="navbtn" data-route="accueil">Accueil</button>
+  <button class="navbtn" data-route="conversations">Conversations</button>
+  <button class="navbtn" data-route="bibliotheque">Bibliothèque</button>
+  <button class="navbtn" data-route="apprentissage">Apprentissage</button>
+  <button class="navbtn" data-route="entrainer">Entraîner</button>
+  <button class="navbtn" data-route="quiz">Quiz / Examens</button>
+  <button class="navbtn" data-route="progression">Progression</button>
+  <button class="navbtn" data-route="explorer">Explorer</button>
+  <!-- US8 / T036 — emplacement réservé « Parcours » (Domaine ▸ étapes ordonnées ▸
+       ressources ▸ évaluation). Aucun comportement dans cette version : voir
+       specs/005-platform-ui-library/data-model.md §Parcours. Le modèle actuel
+       (domaines + catégories + documents référencés par identifiants) permet
+       un rattachement ultérieur sans migration destructive. -->
+  <button class="navbtn" disabled aria-disabled="true" title="Emplacement réservé — disponible dans une version future">
+    Parcours <span class="badge soon">à venir</span>
+  </button>
+</nav>
 
-  <!-- ============================ COLONNE GAUCHE — SOURCES ============================ -->
-  <aside class="pane" id="paneLeft" aria-label="Sources et ressources">
-    <div class="pane-head">
-      <h2>Sources</h2>
-      <button id="addSourceBtn" class="btn btn-primary btn-sm" aria-expanded="false" aria-controls="importPanel">+&nbsp;Ajouter une source</button>
-    </div>
-    <div style="padding: 10px 14px 0;">
-      <label class="field-label" for="spaceSelect" style="margin-top:0;">Espace d'apprentissage</label>
-      <select id="spaceSelect" aria-describedby="spaceHelp"></select>
-      <span class="hint" id="spaceHelp" style="display:block;">Les documents, notions et sessions sont cloisonnés par espace.</span>
+<div id="views">
 
-      <div class="import-panel" id="importPanel" hidden>
-        <label class="field-label" for="impSubject" style="margin-top:0;">Matière (existante ou nouvelle)</label>
-        <input type="text" id="impSubject" placeholder="ex. Mathématiques">
-        <label class="field-label" for="impFile" style="margin-top:0;">Fichier — TXT, MD, PDF, EPUB</label>
-        <input type="file" id="impFile" accept=".txt,.md,.pdf,.epub">
-        <button id="impBtn" class="btn btn-primary">Importer et indexer</button>
-        <div id="importProgress" hidden>
-          <div class="idx-track"><div class="idx-fill"></div></div>
-          <p class="hint" style="margin:4px 0 0;">Envoi du fichier… l'indexation démarre dès la réponse du serveur.</p>
+  <!-- ================================= ACCUEIL ================================ -->
+  <section class="view" id="view-accueil" aria-label="Tableau de bord">
+    <div class="pane">
+      <div class="pane-head"><h2>Accueil</h2><span class="hint" style="margin:0;">Votre séance en un coup d'œil — chaque carte mène à son espace.</span></div>
+      <div class="pane-scroll">
+        <div class="dash-hero" id="dashHero" hidden>
+          <div class="big">Bienvenue dans EduNexus.</div>
+          Importez votre premier document pour construire votre bibliothèque,<br>
+          puis démarrez une conversation avec votre professeur IA local.
+          <div class="row-btns" style="justify-content:center; margin-top:14px;">
+            <button class="btn btn-primary" id="heroImportBtn">Importer un document</button>
+            <button class="btn btn-ghost" id="heroConvBtn">Démarrer une conversation</button>
+          </div>
         </div>
-        <p class="hint" style="margin:0;">L'indexation tourne en arrière-plan ; la source passe à « Prêt » automatiquement.</p>
-      </div>
-
-      <div class="auto-row">
-        <button id="autoClassifyBtn" class="btn btn-ghost btn-sm" title="Classe les livres de tous les espaces par catégorie (LLM local)">
-          <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" style="vertical-align:-2px;margin-right:5px;"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z" fill="currentColor"/><circle cx="18.6" cy="17.6" r="1.7" fill="currentColor"/></svg>Classer automatiquement
-        </button>
-      </div>
-
-      <div class="search-row">
-        <input type="search" id="srcSearch" placeholder="Filtrer les sources…" aria-label="Filtrer les sources par titre">
-        <button id="openSearchBtn" class="btn btn-ghost btn-sm" title="Recherche sémantique dans les sources">
-          <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" style="vertical-align:-2px;margin-right:4px;"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m15.5 15.5 5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Recherche
-        </button>
+        <div class="dash-grid" id="dashGrid"></div>
       </div>
     </div>
-    <div class="pane-scroll" id="srcGroups" role="list" aria-label="Documents ingérés"></div>
-  </aside>
+  </section>
 
-  <div class="handle" id="handleL" role="separator" aria-orientation="vertical" aria-label="Redimensionner la colonne Sources" tabindex="0"></div>
+  <!-- ============================== CONVERSATIONS ============================ -->
+  <section class="view" id="view-conversations" aria-label="Conversations avec le tuteur">
+    <div class="pane">
+      <div class="conv-layout">
+        <aside class="conv-side" aria-label="Liste des conversations">
+          <div class="conv-side-head">
+            <h3>Conversations</h3>
+            <button id="newConvBtn" class="btn btn-primary btn-sm">＋ Nouvelle</button>
+          </div>
+          <form class="newconv-form" id="newConvForm" hidden>
+            <input type="text" id="newConvTitle" placeholder="Titre (optionnel)…" aria-label="Titre de la nouvelle conversation">
+            <div class="row-btns">
+              <button type="submit" id="newConvCreate" class="btn btn-primary btn-sm">Créer</button>
+              <button type="button" id="newConvCancel" class="btn btn-ghost btn-sm">Annuler</button>
+            </div>
+          </form>
+          <div class="conv-list" id="convList" role="listbox" aria-label="Conversations existantes"></div>
+        </aside>
+        <main class="conv-main" aria-label="Fil de conversation">
+          <div class="pedagogy-row" role="group" aria-label="Réglages pédagogiques et sources">
+            <label class="chip-toggle"><input type="checkbox" id="pedSocratic" checked> Socratique</label>
+            <label class="chip-toggle">Niveau
+              <select id="pedLevel" aria-label="Niveau pédagogique">
+                <option value="beginner">Débutant</option>
+                <option value="intermediate" selected>Intermédiaire</option>
+                <option value="advanced">Avancé</option>
+                <option value="expert">Expert</option>
+              </select>
+            </label>
+            <label class="chip-toggle"><input type="checkbox" id="pedThink"> Think (réflexion)</label>
+            <button type="button" id="sourcesBtn" class="sources-btn" title="Choisir les sources qui alimentent les réponses de cette conversation">
+              <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M4 19V6a2 2 0 0 1 2-2h9l5 5v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+              <span id="sourcesBtnLabel">Sources : toutes</span>
+            </button>
+          </div>
 
-  <!-- =========================== COLONNE CENTRE — SÉANCE ============================ -->
-  <main class="pane" id="paneCenter" aria-label="Séance de tutorat">
-    <div class="pane-head session-head">
-      <div class="notion-row">
-        <div style="flex:1; min-width:0;">
-          <label class="field-label" for="notionSelect" style="margin-top:0;">Notion en cours</label>
-          <select id="notionSelect"></select>
+          <div class="thread" id="thread" role="log" aria-live="polite" aria-label="Fil de la conversation">
+            <div class="thread-scope-note" id="threadScopeNote" hidden></div>
+            <div class="thread-empty" id="threadEmpty">
+              <div class="big">Votre conversation commence ici.</div>
+              Posez vos questions : avec des sources actives, les réponses sont citées
+              page par page ; sans source, le tuteur répond aussi, hors documents.
+              <br><br>Ouvrez ou créez une conversation à gauche — sinon la discussion
+              reste une séance rapide non enregistrée.
+            </div>
+          </div>
+
+          <div class="voice-row" id="voiceRow" hidden>
+            <textarea id="voiceTranscript" rows="2" placeholder="Vérifiez la transcription puis envoyez…" aria-label="Transcription de la dictée"></textarea>
+            <div class="voice-actions">
+              <button id="voiceSendBtn" class="btn btn-primary btn-sm">Envoyer</button>
+              <button id="voiceCancelBtn" class="btn btn-ghost btn-sm">Annuler</button>
+            </div>
+          </div>
+
+          <form class="composer" id="composerForm">
+            <button type="button" id="micBtn" class="icon-btn" aria-label="Dicter une question (micro)" title="Dicter (whisper local)">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3" fill="currentColor"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21m-3.5 0h7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            </button>
+            <textarea id="qInput" rows="1" placeholder="Interrogez le tuteur…  (Entrée : envoyer · Maj+Entrée : saut de ligne)" aria-label="Votre question"></textarea>
+            <button type="submit" id="sendBtn" class="btn btn-primary">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" style="vertical-align:-2px;margin-right:5px;"><path d="M3 11.5 21 3l-6.5 18-3-7.5z" fill="currentColor"/></svg>Envoyer
+            </button>
+            <button type="button" id="cancelBtn" class="btn btn-danger btn-sm" hidden>Génération… annuler</button>
+          </form>
+        </main>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== BIBLIOTHÈQUE ============================= -->
+  <section class="view" id="view-bibliotheque" aria-label="Bibliothèque de connaissances">
+    <div class="pane">
+      <div class="pane-head">
+        <h2>Bibliothèque</h2>
+        <div class="head-tools">
+          <span class="count-chip" id="libCount">0 document actif</span>
+          <button id="addSourceBtn" class="btn btn-primary btn-sm" aria-expanded="false" aria-controls="importPanel">＋ Ajouter un document</button>
         </div>
-        <div class="mastery" title="Maîtrise estimée de la notion sélectionnée">
-          <div class="mastery-track"><div class="mastery-fill" id="masteryFill"></div></div>
-          <span class="mastery-score" id="masteryScore">—</span>
+      </div>
+      <div class="lib-toolbar">
+        <div class="search-row">
+          <input type="search" id="srcSearch" placeholder="Rechercher un document par titre…" aria-label="Rechercher un document par titre">
+          <button id="openSearchBtn" class="btn btn-ghost btn-sm" title="Recherche sémantique dans les sources">
+            <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" style="vertical-align:-2px;margin-right:4px;"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m15.5 15.5 5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Recherche sémantique
+          </button>
         </div>
-        <button id="resumeBtn" class="btn btn-gold btn-sm" hidden title="Reprendre la dernière séance de cet espace"></button>
+        <div class="auto-row">
+          <button id="autoClassifyBtn" class="btn btn-ghost btn-sm" title="Classe les livres par catégorie (LLM local)">
+            <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" style="vertical-align:-2px;margin-right:5px;"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z" fill="currentColor"/><circle cx="18.6" cy="17.6" r="1.7" fill="currentColor"/></svg>Classer automatiquement
+          </button>
+          <span class="hint grow" style="margin:0;">Arborescence Domaine ▸ Catégorie ▸ Documents — cochez pour définir les documents actifs. Renommer / déplacer : survolez une ligne.</span>
+        </div>
+
+        <div class="import-panel" id="importPanel" hidden>
+          <label class="field-label" for="impSubject" style="margin-top:0;">Domaine (existant ou nouveau)</label>
+          <input type="text" id="impSubject" placeholder="ex. Programmation">
+          <label class="field-label" for="impFile" style="margin-top:0;">Fichier — TXT, MD, PDF, EPUB</label>
+          <input type="file" id="impFile" accept=".txt,.md,.pdf,.epub">
+          <div class="sugg" id="importSugg" hidden></div>
+          <button id="impBtn" class="btn btn-primary">Importer et indexer</button>
+          <div id="importProgress" hidden>
+            <div class="idx-track"><div class="idx-fill"></div></div>
+            <p class="hint" style="margin:4px 0 0;">Envoi du fichier… l'indexation démarre dès la réponse du serveur.</p>
+          </div>
+          <p class="hint" style="margin:0;">L'indexation tourne en arrière-plan ; le statut passe à « Prêt » automatiquement.</p>
+        </div>
+      </div>
+      <div class="pane-scroll"><div class="tree" id="treeBox" role="tree" aria-label="Arborescence de la bibliothèque"></div></div>
+    </div>
+  </section>
+  <!-- ============================= APPRENTISSAGE ============================= -->
+  <section class="view" id="view-apprentissage" aria-label="Apprentissage — notions et révisions">
+    <div class="pane">
+      <div class="pane-head"><h2>Apprentissage</h2><span class="hint" style="margin:0;">Notions de l'espace actif, maîtrise et révisions espacées.</span></div>
+      <div class="pane-scroll session-head-cards">
+        <div class="studio-card">
+          <h3>Notion en cours</h3>
+          <div class="notion-row">
+            <div style="flex:1; min-width:0;">
+              <label class="field-label" for="notionSelect" style="margin-top:0;">Notion suivie</label>
+              <select id="notionSelect"></select>
+            </div>
+            <div class="mastery" title="Maîtrise estimée de la notion sélectionnée">
+              <div class="mastery-track"><div class="mastery-fill" id="masteryFill"></div></div>
+              <span class="mastery-score" id="masteryScore">—</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="studio-card">
+          <h3>Résumé audio de la notion</h3>
+          <p class="hint">Synthèse vocale du navigateur, en local (aucun envoi réseau).</p>
+          <div class="grid2">
+            <label>Notion
+              <select id="ttsNotion"></select>
+            </label>
+            <span style="align-self:end;">
+              <button id="ttsGenBtn" class="btn btn-ghost btn-sm" style="width:100%;">Générer le résumé</button>
+            </span>
+          </div>
+          <textarea id="ttsText" rows="6" placeholder="Le résumé généré apparaîtra ici — ou saisissez le texte à écouter…"></textarea>
+          <div class="player">
+            <button id="ttsPlayBtn" class="icon-btn primary" aria-label="Lire le résumé">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l13-7.5z" fill="currentColor"/></svg>
+            </button>
+            <button id="ttsPauseBtn" class="icon-btn" aria-label="Pause ou reprise">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="4.5" width="4.5" height="15" rx="1" fill="currentColor"/><rect x="13.5" y="4.5" width="4.5" height="15" rx="1" fill="currentColor"/></svg>
+            </button>
+            <button id="ttsStopBtn" class="icon-btn" aria-label="Arrêter la lecture">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5.5" y="5.5" width="13" height="13" rx="2" fill="currentColor"/></svg>
+            </button>
+            <label class="rate">Vitesse
+              <input type="range" id="ttsRate" min="0.5" max="2" step="0.05" value="1" aria-label="Vitesse de lecture">
+              <span class="rate-val" id="ttsRateVal">1.00×</span>
+            </label>
+          </div>
+          <p class="hint" id="ttsVoiceInfo"></p>
+        </div>
+
+        <div class="studio-card">
+          <h3>Fiches mémo — révisions dues</h3>
+          <div class="row-btns">
+            <button id="prepareBtn" class="btn btn-ghost btn-sm" title="Génère fiches, glossaire et notions (idempotent)">Préparer le cours</button>
+            <button id="dueLoadBtn" class="btn btn-primary btn-sm">Fiches à réviser</button>
+          </div>
+          <p class="hint">Cliquez sur une fiche pour la retourner.</p>
+          <div id="dueFlow"></div>
+        </div>
       </div>
     </div>
+  </section>
 
-    <div class="pedagogy-row" role="group" aria-label="Réglages pédagogiques">
-      <label class="chip-toggle"><input type="checkbox" id="pedSocratic" checked> Socratique</label>
-      <label class="chip-toggle">Niveau
-        <select id="pedLevel" aria-label="Niveau pédagogique">
-          <option value="beginner">Débutant</option>
-          <option value="intermediate" selected>Intermédiaire</option>
-          <option value="advanced">Avancé</option>
-          <option value="expert">Expert</option>
-        </select>
-      </label>
-      <label class="chip-toggle"><input type="checkbox" id="pedThink"> Think (réflexion)</label>
-      <span class="scope-note" id="scopeNote" title="Seules les sources cochées seront proposées au contexte quand le protocole le permettra.">—</span>
-    </div>
-
-    <div class="thread" id="thread" role="log" aria-live="polite" aria-label="Fil de la séance de tutorat">
-      <div class="thread-scope-note" id="threadScopeNote" hidden></div>
-      <div class="thread-empty" id="threadEmpty">
-        <div class="big">Votre séance commence ici.</div>
-        Cochez des sources pour des réponses citées page par page — ou posez votre question
-        sans source : le tuteur répond aussi hors documents.
-        <br><br>Pas encore de document ? Bouton « + Ajouter une source » à gauche.
-      </div>
-    </div>
-
-    <div class="voice-row" id="voiceRow" hidden>
-      <textarea id="voiceTranscript" rows="2" placeholder="Vérifiez la transcription puis envoyez…" aria-label="Transcription de la dictée"></textarea>
-      <div class="voice-actions">
-        <button id="voiceSendBtn" class="btn btn-primary btn-sm">Envoyer</button>
-        <button id="voiceCancelBtn" class="btn btn-ghost btn-sm">Annuler</button>
-      </div>
-    </div>
-
-    <form class="composer" id="composerForm">
-      <button type="button" id="micBtn" class="icon-btn" aria-label="Dicter une question (micro)" title="Dicter (whisper local)">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3" fill="currentColor"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21m-3.5 0h7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-      </button>
-      <textarea id="qInput" rows="1" placeholder="Interrogez vos documents…  (Entrée : envoyer · Maj+Entrée : saut de ligne)" aria-label="Votre question"></textarea>
-      <button type="submit" id="sendBtn" class="btn btn-primary">
-        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" style="vertical-align:-2px;margin-right:5px;"><path d="M3 11.5 21 3l-6.5 18-3-7.5z" fill="currentColor"/></svg>Envoyer
-      </button>
-      <button type="button" id="cancelBtn" class="btn btn-danger btn-sm" hidden>Génération… annuler</button>
-    </form>
-  </main>
-
-  <div class="handle" id="handleR" role="separator" aria-orientation="vertical" aria-label="Redimensionner la colonne Studio" tabindex="0"></div>
-
-  <!-- ============================= COLONNE DROITE — STUDIO ============================ -->
-  <aside class="pane" id="paneRight" aria-label="Studio">
-    <div class="tabbar" role="tablist" aria-label="Sections du studio">
-      <button class="tab active" role="tab" aria-selected="true" data-tab="train" id="tabbtn-train">Entraîner</button>
-      <button class="tab" role="tab" aria-selected="false" data-tab="revise" id="tabbtn-revise">Réviser</button>
-      <button class="tab" role="tab" aria-selected="false" data-tab="follow" id="tabbtn-follow">Suivi</button>
-      <button class="tab" role="tab" aria-selected="false" data-tab="explore" id="tabbtn-explore">Explorer</button>
-    </div>
-    <div class="pane-scroll">
-
-      <!-- ---- Entraîner : exercice adaptatif + quiz/examen ---- -->
-      <section class="tabpanel" id="tabpanel-train" role="tabpanel" aria-labelledby="tabbtn-train">
+  <!-- =============================== ENTRAÎNER =============================== -->
+  <section class="view" id="view-entrainer" aria-label="Entraînement — exercices adaptatifs">
+    <div class="pane">
+      <div class="pane-head"><h2>Entraîner</h2><span class="hint" style="margin:0;">Exercices générés depuis les documents de l'espace actif.</span></div>
+      <div class="pane-scroll session-head-cards">
         <div class="studio-card">
           <h3>Exercice adaptatif</h3>
-          <p class="hint">Généré à partir des sources de l'espace actif.</p>
           <div class="grid2">
             <label>Notion
               <select id="exConcept"></select>
@@ -685,9 +846,17 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
             <div class="feedback solution" id="exSolutionBox" hidden></div>
           </div>
         </div>
+      </div>
+    </div>
+  </section>
 
+  <!-- ============================= QUIZ / EXAMENS ============================ -->
+  <section class="view" id="view-quiz" aria-label="Quiz et examens">
+    <div class="pane">
+      <div class="pane-head"><h2>Quiz &amp; Examens</h2><span class="hint" style="margin:0;">Évaluations corrigées immédiatement, portée par catégories pour les examens.</span></div>
+      <div class="pane-scroll session-head-cards">
         <div class="studio-card">
-          <h3>Quiz &amp; Examen</h3>
+          <h3>Lancer une évaluation</h3>
           <div class="grid2">
             <label>Questions
               <input type="number" id="quizSize" value="5" min="1" max="30">
@@ -711,69 +880,32 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
           <div id="assessFlow"></div>
           <div id="assessResults" hidden></div>
         </div>
-      </section>
+      </div>
+    </div>
+  </section>
 
-      <!-- ---- Réviser : résumé audio + fiches mémo ---- -->
-      <section class="tabpanel" id="tabpanel-revise" role="tabpanel" aria-labelledby="tabbtn-revise" hidden>
-        <div class="studio-card">
-          <h3>Résumé audio de la notion</h3>
-          <p class="hint">Synthèse vocale du navigateur, en local (aucun envoi réseau).</p>
-          <div class="grid2">
-            <label>Notion
-              <select id="ttsNotion"></select>
-            </label>
-            <span style="align-self:end;">
-              <button id="ttsGenBtn" class="btn btn-ghost btn-sm" style="width:100%;">Générer le résumé</button>
-            </span>
-          </div>
-          <textarea id="ttsText" rows="6" placeholder="Le résumé généré apparaîtra ici — ou saisissez le texte à écouter…"></textarea>
-          <div class="player">
-            <button id="ttsPlayBtn" class="icon-btn primary" aria-label="Lire le résumé">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l13-7.5z" fill="currentColor"/></svg>
-            </button>
-            <button id="ttsPauseBtn" class="icon-btn" aria-label="Pause ou reprise">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="4.5" width="4.5" height="15" rx="1" fill="currentColor"/><rect x="13.5" y="4.5" width="4.5" height="15" rx="1" fill="currentColor"/></svg>
-            </button>
-            <button id="ttsStopBtn" class="icon-btn" aria-label="Arrêter la lecture">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5.5" y="5.5" width="13" height="13" rx="2" fill="currentColor"/></svg>
-            </button>
-            <label class="rate">Vitesse
-              <input type="range" id="ttsRate" min="0.5" max="2" step="0.05" value="1" aria-label="Vitesse de lecture">
-              <span class="rate-val" id="ttsRateVal">1.00×</span>
-            </label>
-          </div>
-          <p class="hint" id="ttsVoiceInfo"></p>
-        </div>
-
-        <div class="studio-card">
-          <h3>Fiches mémo</h3>
-          <div class="row-btns">
-            <button id="prepareBtn" class="btn btn-ghost btn-sm" title="Génère fiches, glossaire et notions (idempotent)">Préparer le cours</button>
-            <button id="dueLoadBtn" class="btn btn-primary btn-sm">Fiches à réviser</button>
-          </div>
-          <p class="hint">Cliquez sur une fiche pour la retourner.</p>
-          <div id="dueFlow"></div>
-        </div>
-      </section>
-
-      <!-- ---- Suivi : notions + sessions ---- -->
-      <section class="tabpanel" id="tabpanel-follow" role="tabpanel" aria-labelledby="tabbtn-follow" hidden>
+  <!-- ============================== PROGRESSION ============================== -->
+  <section class="view" id="view-progression" aria-label="Progression par notion">
+    <div class="pane">
+      <div class="pane-head"><h2>Progression</h2><span class="hint" style="margin:0;">Maîtrise par notion, lacunes récentes — cliquez « Entraîner » pour travailler une lacune.</span></div>
+      <div class="pane-scroll session-head-cards">
         <div class="studio-card">
           <h3>Notions travaillées</h3>
-          <p class="hint">Statut dérivé de votre score de maîtrise par notion.</p>
+          <p class="hint">Statut dérivé du score de maîtrise : maîtrisé ≥ 75 · en cours ≥ 40 · à revoir sinon.</p>
           <div id="notionsList"></div>
         </div>
-        <div class="studio-card">
-          <h3>Sessions passées</h3>
-          <div class="row-btns">
-            <button id="followRefreshBtn" class="btn btn-ghost btn-sm">Rafraîchir</button>
-          </div>
-          <div id="sessionsList"></div>
+        <div class="row-btns">
+          <button id="followRefreshBtn" class="btn btn-ghost btn-sm">Rafraîchir la progression</button>
         </div>
-      </section>
+      </div>
+    </div>
+  </section>
 
-      <!-- ---- Explorer : localiser / comparer / glossaire / carte ---- -->
-      <section class="tabpanel" id="tabpanel-explore" role="tabpanel" aria-labelledby="tabbtn-explore" hidden>
+  <!-- ================================ EXPLORER =============================== -->
+  <section class="view" id="view-explorer" aria-label="Explorer les connaissances">
+    <div class="pane">
+      <div class="pane-head"><h2>Explorer</h2><span class="hint" style="margin:0;">Naviguer, comparer, glossaire et carte des connaissances de l'espace actif.</span></div>
+      <div class="pane-scroll session-head-cards">
         <div class="studio-card">
           <h3>Naviguer &amp; comparer</h3>
           <label class="field-label" for="expNotion">Notion</label>
@@ -805,11 +937,11 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
           </div>
           <div class="map-wrap" id="mapOut"></div>
         </div>
-      </section>
-
+      </div>
     </div>
-  </aside>
-</div>
+  </section>
+
+</div><!-- /views -->
 
 <!-- Recherche sémantique dans les sources (modale) -->
 <div class="modal-backdrop" id="searchModal" hidden>
@@ -828,18 +960,18 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
   </div>
 </div>
 
-<!-- Éditeur des catégories d'une source (appartenance multiple) -->
+<!-- Éditeur des catégories d'un document (déplacement / appartenance multiple) -->
 <div class="modal-backdrop" id="catModal" hidden>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="catTitle">
     <div class="modal-head">
-      <h3 id="catTitle">Catégories de la source</h3>
+      <h3 id="catTitle">Catégories du document</h3>
       <button class="icon-btn" id="catCloseBtn" aria-label="Fermer l'éditeur de catégories">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
       </button>
     </div>
     <div class="modal-body">
       <p class="hint" id="catBookTitle" style="margin-top:0;"></p>
-      <span class="field-label">Catégories (une source peut en avoir plusieurs)</span>
+      <span class="field-label">Catégories (un document peut appartenir à plusieurs catégories — décocher l'ancienne et cocher la nouvelle le déplace)</span>
       <div class="cat-list" id="catEditList"></div>
       <div class="modal-search" style="border-bottom:none;padding:12px 0 0;">
         <input type="text" id="catNewName" placeholder="Nouvelle catégorie…" aria-label="Nom d'une nouvelle catégorie">
@@ -852,18 +984,36 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
   </div>
 </div>
 
-<nav class="mobile-tabs" aria-label="Navigation entre colonnes">
-  <button data-pane="paneLeft">Sources</button>
-  <button data-pane="paneCenter" class="active">Séance</button>
-  <button data-pane="paneRight">Studio</button>
-</nav>
+<!-- Sélecteur « Sources actives » de la conversation -->
+<div class="modal-backdrop" id="sourcesModal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="srcTitle">
+    <div class="modal-head">
+      <h3 id="srcTitle">Sources actives de la conversation</h3>
+      <button class="icon-btn" id="srcCloseBtn" aria-label="Fermer le sélecteur de sources">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="modal-search">
+      <input type="search" id="srcSearchIn" placeholder="Filtrer les documents…" aria-label="Filtrer les documents du sélecteur">
+    </div>
+    <div class="modal-results">
+      <div class="tree" id="srcTreeBox" role="tree" aria-label="Arborescence des sources"></div>
+    </div>
+    <div class="modal-foot">
+      <span class="count-chip" id="srcCount">0 document actif</span>
+      <span class="hint" style="flex:1; margin:0;">Appliquer n'affecte jamais la bibliothèque.</span>
+      <button id="srcCancelBtn" class="btn btn-ghost btn-sm">Annuler</button>
+      <button id="srcApplyBtn" class="btn btn-primary btn-sm">Appliquer</button>
+    </div>
+  </div>
+</div>
 
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script>
 "use strict";
 /* ==========================================================================
-   EduNexus — logique d'interface (une seule fichier, aucun framework)
+   EduNexus — plateforme multi-espaces (routage par hash natif, aucun framework)
    ========================================================================== */
 
 /* ------------------------------------------------------- utilitaires de base */
@@ -871,6 +1021,7 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
   .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+const norm = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
 let _toastTimer = null;
 function toast(msg) {
@@ -886,12 +1037,11 @@ function setStatus(text) { $("statusPill").textContent = text; }
 /* --------------------------------------------------- journalisation erreurs */
 /* Aucune erreur silencieuse : window.onerror + unhandledrejection + wrapper
    fetch/WS renvoient tout vers POST /api/log-error (context: "tutor.html")
-   avec un toast discret. Anti-boucle: on ne journalise jamais l'échec de
-   log-error lui-même; anti-spam: même message à moins de 5 s => ignoré. */
+   avec un toast discret. Anti-boucle : log-error n'est jamais re-journalisé ;
+   anti-spam : même message à moins de 5 s => ignoré. */
 const LOG_ENDPOINT = "/api/log-error";
 const _lastLogged = { msg: "", at: 0 };
 
-/** Journalisation serveur sans toast (pour les événements déjà signalés). */
 function postLog(message, stack) {
   try {
     fetch(LOG_ENDPOINT, {
@@ -924,11 +1074,9 @@ window.addEventListener("unhandledrejection", (e) => {
   reportError(r && (r.message || String(r)) || "promesse rejetée", r && r.stack);
 });
 
-/** fetch surveillé : les échecs réseau deviennent visibles (jamais muets). */
 async function sf(url, opts) {
-  try {
-    return await fetch(url, opts);
-  } catch (e) {
+  try { return await fetch(url, opts); }
+  catch (e) {
     reportError("réseau indisponible : " + url, e && e.stack);
     throw e;
   }
@@ -941,102 +1089,76 @@ async function jf(url, opts) {
 
 /* ------------------------------------------------------------------ état UI */
 const S = {
-  subjects: [],            // [{id,name}]
-  activeId: "",            // id de l'espace sélectionné
-  books: [],               // livres de l'espace actif
-  excluded: new Set(),     // ids de sources décochées (portée de session)
-  concepts: [],            // [{id,name}] de l'espace actif
-  progressByConcept: {},   // concept_id -> row progress
-  gapsByConcept: {},       // concept_id -> row gaps
-  briefing: null,
-  categories: [],
-  catByBook: {},           // book_id -> [noms de catégories] (après classification)
-  groupByCat: false,       // regroupement par catégorie après auto-classification
+  route: "accueil",
+  subjects: [],            // [{id,name}] — domaines de la bibliothèque
+  activeId: "",            // id de l'espace actif
+  books: [],               // livres chargés de l'espace actif (statuts)
+  concepts: [],
+  progressByConcept: {},
+  gapsByConcept: {},
+  categories: [],          // [{id,name,book_count}]
+  catByBook: {},           // book_id -> [noms de catégories] (cache membership)
   busy: false,
-  capture: null,           // mode "capture" (résumé audio) au lieu du fil
-  sessionIds: {},          // espace -> dernier session_id reçu ("end")
-  resumeShownFor: "",
+  capture: null,           // mode « capture » (résumé audio)
+
+  /* Conversations (US1) */
+  conversations: [],
+  activeConversationId: null,
+
+  /* Sources actives (US4) : null = périmètre par défaut (non géré),
+     [] = custom vide (sans contexte), [...] = custom explicite. */
+  activeBookIds: null,
+
+  /* Sélection bibliothèque (US3) : Set dédupliqué de book_ids. */
+  selection: new Set(),
+
+  /* Bibliothèque arborescente (US2) : chargement niveau par niveau. */
+  libLoaded: false,
+  domainBooks: {},         // subject_id -> [livres] (chargés à l'expansion)
+  domainOpen: {},          // subject_id -> bool
+  statusById: {},          // book_id -> statut temps réel (index-status)
+
+  /* Popover sources actives : sélection en cours (Set). */
+  popoverSel: new Set(),
 };
 
-/* ============================================================ layout 3 cols */
-function initLayout() {
-  const layout = $("layout");
-  const saved_l = localStorage.getItem("edunexus.colL");
-  const saved_r = localStorage.getItem("edunexus.colR");
-  if (saved_l) layout.style.setProperty("--w-l", saved_l + "px");
-  if (saved_r) layout.style.setProperty("--w-r", saved_r + "px");
+/* =========================================================== ROUTEUR HASH == */
+const ROUTES = ["accueil", "conversations", "bibliotheque", "apprentissage",
+  "entrainer", "quiz", "progression", "explorer"];
 
-  function bindHandle(handle, cssVar, dir, storageKey) {
-    let startX = 0, startW = 0, dragging = false;
-    handle.addEventListener("pointerdown", (e) => {
-      dragging = true;
-      startX = e.clientX;
-      startW = parseInt(getComputedStyle(layout).getPropertyValue(cssVar), 10) ||
-        (cssVar === "--w-l" ? 330 : 380);
-      handle.setPointerCapture(e.pointerId);
-      handle.classList.add("dragging");
-    });
-    handle.addEventListener("pointermove", (e) => {
-      if (!dragging) return;
-      const w = Math.min(560, Math.max(250, startW + dir * (e.clientX - startX)));
-      layout.style.setProperty(cssVar, w + "px");
-    });
-    const stop = () => {
-      if (!dragging) return;
-      dragging = false;
-      handle.classList.remove("dragging");
-      localStorage.setItem(storageKey,
-        parseInt(getComputedStyle(layout).getPropertyValue(cssVar), 10) || "");
-    };
-    handle.addEventListener("pointerup", stop);
-    handle.addEventListener("pointercancel", stop);
-    handle.addEventListener("dblclick", () => {
-      layout.style.removeProperty(cssVar);
-      localStorage.removeItem(storageKey);
-    });
-    // Clavier : flèches gauche/droite pour redimensionner.
-    handle.addEventListener("keydown", (e) => {
-      const cur = parseInt(getComputedStyle(layout).getPropertyValue(cssVar), 10) ||
-        (cssVar === "--w-l" ? 330 : 380);
-      if (e.key === "ArrowLeft") { layout.style.setProperty(cssVar, (cur - 16) + "px"); e.preventDefault(); }
-      if (e.key === "ArrowRight") { layout.style.setProperty(cssVar, (cur + 16) + "px"); e.preventDefault(); }
-    });
-  }
-  bindHandle($("handleL"), "--w-l", +1, "edunexus.colL");
-  bindHandle($("handleR"), "--w-r", -1, "edunexus.colR");
-
-  // Mobile : onglets empilés.
-  const mq = window.matchMedia("(max-width: 1020px)");
-  function applyMobile() {
-    document.body.classList.toggle("is-mobile", mq.matches);
-  }
-  mq.addEventListener("change", applyMobile);
-  applyMobile();
-  document.querySelectorAll(".mobile-tabs button").forEach((btn) => {
-    btn.addEventListener("click", () => showMobilePane(btn));
-    // Sur mobile, la Séance est le volet par défaut.
-    if (mq.matches && btn.dataset.pane === "paneCenter") showMobilePane(btn);
-  });
-  function showMobilePane(btn) {
-    document.querySelectorAll(".mobile-tabs button").forEach(b => b.classList.remove("active"));
-    btn.classList.add("active");
-    ["paneLeft", "paneCenter", "paneRight"].forEach((id) => {
-      $(id).toggleAttribute("data-mobile-hidden", id !== btn.dataset.pane);
-    });
-  }
+function currentRouteFromHash() {
+  const h = (location.hash || "").replace(/^#\/?/, "").toLowerCase();
+  return ROUTES.includes(h) ? h : "accueil";
 }
 
-/* --------------------------------------------------------------- onglets studio */
-function initTabs() {
-  document.querySelectorAll(".tabbar .tab").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".tabbar .tab").forEach(b => {
-        b.classList.toggle("active", b === btn);
-        b.setAttribute("aria-selected", b === btn ? "true" : "false");
-      });
-      document.querySelectorAll(".tabpanel").forEach(p => { p.hidden = p.id !== "tabpanel-" + btn.dataset.tab; });
-    });
+function navigate(route) {
+  if (!ROUTES.includes(route)) route = "accueil";
+  if (currentRouteFromHash() === route) applyRoute();
+  else location.hash = "#/" + route;
+}
+
+function applyRoute() {
+  const r = currentRouteFromHash();
+  S.route = r;
+  document.querySelectorAll(".mainnav .navbtn[data-route]").forEach(b => {
+    b.classList.toggle("active", b.dataset.route === r);
+    if (b.dataset.route === r) b.setAttribute("aria-current", "page");
+    else b.removeAttribute("aria-current");
   });
+  ROUTES.forEach(name => {
+    const v = $("view-" + name);
+    if (v) v.classList.toggle("active", name === r);
+  });
+  const titles = {
+    accueil: "Accueil", conversations: "Conversations", bibliotheque: "Bibliothèque",
+    apprentissage: "Apprentissage", entrainer: "Entraîner", quiz: "Quiz / Examens",
+    progression: "Progression", explorer: "Explorer",
+  };
+  document.title = "EduNexus — " + (titles[r] || "Professeur IA local");
+  // Chargements paresseux propres à chaque vue.
+  if (r === "accueil") loadDashboard();
+  if (r === "conversations") loadConversations();
+  if (r === "bibliotheque") ensureLibrary();
 }
 
 /* ============================================== moteur + modèles (en-tête) */
@@ -1105,13 +1227,12 @@ async function putModel(kind, value) {
   }
 }
 
-/* ============================================ espaces d'apprentissage (sujets) */
+/* ============================================ espaces d'apprentissage ====== */
 async function loadSubjects() {
   let data;
   try {
     data = await jf("/api/tutor/subjects");
   } catch (e) {
-    $("spaceChipName").textContent = "aucun espace";
     return;
   }
   S.subjects = data.subjects || [];
@@ -1124,10 +1245,9 @@ async function loadSubjects() {
   }
   if (!S.subjects.length) {
     const o = document.createElement("option");
-    o.value = ""; o.textContent = "— importez une première source —";
+    o.value = ""; o.textContent = "— importez un premier document —";
     sel.appendChild(o);
     sel.disabled = true;
-    $("spaceChipName").textContent = "aucun espace";
     return;
   }
   sel.disabled = false;
@@ -1137,320 +1257,38 @@ async function loadSubjects() {
     : (data.active_id && S.subjects.some(s => s.id === data.active_id) ? data.active_id : S.subjects[0].id);
   sel.value = initial;
   if (!S.activeId) S.activeId = initial;
-  onSpaceChange(false);
+  onSpaceChange();
 }
 
 function activeSubject() {
   return S.subjects.find(s => s.id === S.activeId) || null;
 }
 
-function onSpaceChange(refreshOnly) {
+function onSpaceChange() {
   S.activeId = $("spaceSelect").value;
   localStorage.setItem("edunexus.space", S.activeId);
-  const subj = activeSubject();
-  $("spaceChipName").textContent = subj ? subj.name : "—";
-  // Portée de session mémorisée par espace.
-  S.excluded = new Set(
-    JSON.parse(localStorage.getItem("edunexus.scope." + S.activeId) || "[]")
-  );
+  // La bibliothèque dépend de l'espace : invalidation + rechargement à la visite.
+  S.libLoaded = false;
+  S.domainBooks = {};
+  S.domainOpen = {};
   loadSpaceData();
 }
 
 function loadSpaceData() {
-  // Chaque bloc charge indépendamment : un échec n'efface pas les autres.
   Promise.allSettled([
-    loadBooks(),
     loadConceptsAndProgress(),
-    loadBriefing(),
-    loadSessions(),
     loadCategories(),
+    loadSpaceBooks(),
+    refreshScopeAfterSpaceChange(),
   ]);
 }
 
-/* ================================================ sources (colonne gauche) */
-const STATUS_LABELS = {
-  done: ["Prêt", "done"],
-  ready: ["Prêt", "done"],
-  indexing: ["Indexation", "indexing"],
-  pending: ["En attente", "pending"],
-  failed: ["Échec", "failed"],
-  error: ["Erreur", "failed"],
-};
-
-async function loadBooks() {
-  const subj = activeSubject();
-  const box = $("srcGroups");
-  if (!subj) { box.innerHTML = '<div class="empty-note">Aucun espace sélectionné.</div>'; return; }
-  let books = [];
-  try {
-    const data = await jf("/api/tutor/books?subject=" + encodeURIComponent(subj.name));
-    books = data.books || [];
-  } catch (e) {
-    box.innerHTML = '<div class="empty-note">Impossible de charger les sources.</div>';
-    return;
-  }
-  S.books = books;
-  renderBooks();
-  updateScopeNote();
-  ensureIndexPolling();
+async function refreshScopeAfterSpaceChange() {
+  // Les sources actives appartiennent à la conversation : si elle est liée à
+  // un autre espace, on neutralise l'affichage custom (le backend tranche).
+  if (S.activeConversationId) await loadConversationSources(S.activeConversationId);
 }
-
-/* ---- Suivi d'indexation : GET /api/tutor/index-status toutes les ~1,5 s ----
-   Le backend ne fournit pas de pourcentage : la barre reste indéterminée et
-   le statut par livre bascule « Prêt » / « Erreur » dès que le polling le
-   voit. Une seule boucle active à la fois. */
-let _idxTimer = null;
-let _idxInFlight = false;
-let _anyIndexing = false;
-const _errToasted = new Set();
-
-function ensureIndexPolling() {
-  if (S.books.some(b => b.status === "indexing") && !_idxTimer && !_idxInFlight) {
-    pollIndexStatus();
-  }
-}
-
-async function pollIndexStatus() {
-  clearTimeout(_idxTimer);
-  _idxTimer = null;
-  if (_idxInFlight) return;
-  _idxInFlight = true;
-  let anyNow = false;
-  try {
-    const data = await jf("/api/tutor/index-status");
-    const byId = {};
-    for (const row of (data.books || [])) byId[row.id] = row;
-    let changed = false;
-    for (const b of S.books) {
-      const row = byId[b.id];
-      if (!row) continue;
-      const mapped = row.status === "ready" ? "done"
-        : row.status === "error" ? "failed" : row.status;
-      if (mapped && mapped !== b.status) {
-        b.status = mapped;
-        changed = true;
-        if (mapped === "failed" && !_errToasted.has(b.id)) {
-          _errToasted.add(b.id);
-          toast("Indexation impossible pour « " + b.title + " » — vérifiez le fichier puis réessayez.");
-          postLog("indexation échouée : " + b.title);
-        } else if (mapped === "done") {
-          toast("« " + b.title + " » est prêt.");
-        }
-      }
-    }
-    anyNow = S.books.some(b => b.status === "indexing");
-    if (changed) { renderBooks(); updateScopeNote(); }
-  } catch (e) { /* réseau ou 5xx : on retentera ; déjà tracé côté client */ }
-  _idxInFlight = false;
-  if (anyNow) {
-    if (!_anyIndexing) setStatus("indexation en cours…");
-    _idxTimer = setTimeout(pollIndexStatus, 1500);
-  } else if (_anyIndexing) {
-    setStatus("prêt");
-  }
-  _anyIndexing = anyNow;
-}
-
-function renderBooks() {
-  const box = $("srcGroups");
-  const q = ($("srcSearch").value || "").trim().toLowerCase();
-  box.innerHTML = "";
-  if (!S.books.length) {
-    box.innerHTML = '<div class="empty-note">Aucune source dans cet espace.<br>Utilisez « + Ajouter une source ».</div>';
-    return;
-  }
-  // Regroupement : par catégorie après une classification (ou un ajustement
-  // manuel), sinon par matière. « Non classé » reste visible en fin de liste.
-  const useCats = !!S.groupByCat && Object.keys(S.catByBook).length > 0;
-  const groups = {};
-  for (const b of S.books) {
-    let g;
-    if (useCats) {
-      const cats = S.catByBook[b.id];
-      g = cats && cats.length ? cats.join(" + ") : "Non classé";
-    } else {
-      g = b.subject_name || (activeSubject() ? activeSubject().name : "Sources");
-    }
-    (groups[g] = groups[g] || []).push(b);
-  }
-  const groupNames = Object.keys(groups).sort((a, b) =>
-    ((a === "Non classé") - (b === "Non classé")) || a.localeCompare(b, "fr"));
-  for (const gname of groupNames) {
-    const items = groups[gname];
-    const head = document.createElement("div");
-    head.className = "src-group-head";
-    head.innerHTML = esc(gname) +
-      ' <span class="count">' + items.length + " source" + (items.length > 1 ? "s" : "") + "</span>";
-    box.appendChild(head);
-    for (const b of items) {
-      if (q && !String(b.title || "").toLowerCase().includes(q)) continue;
-      box.appendChild(sourceRow(b));
-    }
-  }
-  if (!box.children.length) {
-    box.innerHTML = '<div class="empty-note">Aucune source ne correspond au filtre.</div>';
-  }
-}
-
-function sourceRow(b) {
-  const included = !S.excluded.has(b.id);
-  const [label, cls] = STATUS_LABELS[b.status] || [b.status, "pending"];
-  const el = document.createElement("div");
-  el.className = "src" + (included ? "" : " excluded");
-  el.setAttribute("role", "listitem");
-  // Dégradation : le backend n'expose pas encore de nombre de pages ; on
-  // affiche les fragments indexés, et `pages` si un jour il apparaît.
-  const pages = (b.pages != null) ? b.pages + " pages"
-    : (b.chunks_total > 0 ? b.chunks_total + " fragments" : "fragmentation…");
-  el.innerHTML =
-    '<input type="checkbox" ' + (included ? "checked" : "") +
-    ' aria-label="Inclure cette source dans la séance">' +
-    '<div class="src-main">' +
-      '<div class="src-title">' + esc(b.title) + "</div>" +
-      '<div class="src-meta"><span class="fmt-chip">' + esc(b.format || "?") + "</span>" +
-      "<span>" + esc(pages) + "</span></div>" +
-    "</div>" +
-    '<span class="badge ' + cls + '">' +
-      (b.status === "indexing" ? '<span class="spin"></span>' : "") + esc(label) + "</span>" +
-    '<div class="src-actions">' +
-      '<button class="src-tag" title="Catégories de cette source" aria-label="Modifier les catégories de ' + esc(b.title) + '">' +
-        '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M4 4h7l9 9-7 7-9-9z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><circle cx="8.5" cy="8.5" r="1.6" fill="currentColor"/></svg>' +
-      "</button>" +
-      '<button class="src-del" title="Supprimer cette source" aria-label="Supprimer ' + esc(b.title) + '">×</button>' +
-    "</div>";
-  // Indexation en cours : barre indéterminée sous les métadonnées.
-  if (b.status === "indexing") {
-    const prog = document.createElement("div");
-    prog.className = "idx-track";
-    prog.innerHTML = '<div class="idx-fill"></div>';
-    el.querySelector(".src-main").appendChild(prog);
-  }
-  const tagBtn = el.querySelector(".src-tag");
-  const knownCats = S.catByBook[b.id];
-  if (knownCats && knownCats.length) tagBtn.classList.add("has-cats");
-  tagBtn.addEventListener("click", () => openCatEditor(b.id));
-  const cb = el.querySelector("input[type=checkbox]");
-  cb.addEventListener("change", () => {
-    if (cb.checked) S.excluded.delete(b.id); else S.excluded.add(b.id);
-    localStorage.setItem("edunexus.scope." + S.activeId, JSON.stringify([...S.excluded]));
-    el.classList.toggle("excluded", !cb.checked);
-    updateScopeNote();
-  });
-  el.querySelector(".src-main").addEventListener("click", (e) => {
-    if (e.target.closest("button")) return;
-    cb.checked = !cb.checked;
-    cb.dispatchEvent(new Event("change"));
-  });
-  el.querySelector(".src-del").addEventListener("click", async () => {
-    if (!confirm("Supprimer « " + b.title + " » et ses fragments ?")) return;
-    try {
-      const r = await sf("/api/tutor/book/" + encodeURIComponent(b.id), { method: "DELETE" });
-      if (!r.ok && r.status !== 204) throw new Error("HTTP " + r.status);
-      toast("Source supprimée.");
-      loadBooks();
-    } catch (e) { /* déjà journalisé par sf */ }
-  });
-  return el;
-}
-
-function updateScopeNote() {
-  const total = S.books.length;
-  const inc = total - S.books.filter(b => S.excluded.has(b.id)).length;
-  $("scopeNote").textContent = total
-    ? inc + "/" + total + " sources incluses à la séance"
-    : "bibliothèque vide";
-  // Le tuteur répond toujours, même sans source — on l'annonce discrètement.
-  const note = $("threadScopeNote");
-  if (!total) {
-    note.textContent = "Bibliothèque vide — le tuteur répond sans contexte documentaire.";
-    note.hidden = false;
-  } else if (!inc) {
-    note.textContent = "Aucune source sélectionnée — réponses sans contexte documentaire.";
-    note.hidden = false;
-  } else {
-    note.hidden = true;
-  }
-}
-
-/* Import d'une nouvelle source */
-function toggleImportPanel(force) {
-  const p = $("importPanel");
-  const show = force != null ? force : p.hidden;
-  p.hidden = !show;
-  $("addSourceBtn").setAttribute("aria-expanded", show ? "true" : "false");
-  if (show) {
-    const subj = activeSubject();
-    if (!$("impSubject").value && subj) $("impSubject").value = subj.name;
-    $("impSubject").focus();
-  }
-}
-
-async function importSource() {
-  const subject = $("impSubject").value.trim();
-  const fileInput = $("impFile");
-  if (!subject) { toast("Indiquez la matière de la source."); return; }
-  if (!fileInput.files.length) { toast("Choisissez un fichier."); return; }
-  const file = fileInput.files[0];
-  const title = file.name.replace(/\.[^.]+$/, "") || file.name;
-  const fmt = (file.name.split(".").pop() || "?").toLowerCase();
-  const fd = new FormData();
-  fd.append("subject", subject);
-  fd.append("file", file);
-
-  // Retour immédiat : bouton verrouillé + barre pendant l'envoi, puis la
-  // source apparaît INSTANTANÉMENT en « indexation » dans la liste.
-  const btn = $("impBtn");
-  btn.disabled = true;
-  $("importProgress").hidden = false;
-  setStatus("envoi de la source…");
-  try {
-    const r = await sf("/api/tutor/import", { method: "POST", body: fd });
-    if (!r.ok) {
-      let detail = "HTTP " + r.status;
-      try { const j = await r.json(); if (j && j.detail) detail = String(j.detail); } catch (_) {}
-      throw new Error(detail);
-    }
-    const rep = await r.json().catch(() => ({}));
-
-    // Bascule vers l'espace cible si l'import rejoint/crée une autre matière.
-    const wanted = subject.toLowerCase();
-    const cur = activeSubject();
-    if (!cur || cur.name.toLowerCase() !== wanted) {
-      await loadSubjects();
-      const target = S.subjects.find(s => s.name.toLowerCase() === wanted);
-      if (target && target.id !== S.activeId) {
-        $("spaceSelect").value = target.id;
-        onSpaceChange();
-      }
-    }
-
-    await loadBooks();
-    if (rep.book_id != null && !S.books.some(b => b.id === rep.book_id)) {
-      S.books.unshift({
-        id: rep.book_id,
-        title,
-        format: fmt,
-        status: rep.status || "indexing",
-        chunks_total: 0,
-      });
-      renderBooks();
-      updateScopeNote();
-    }
-    ensureIndexPolling();          // bascule « prêt »/« erreur » automatique
-    toggleImportPanel(false);
-    fileInput.value = "";
-    toast("« " + title + " » ajouté — indexation lancée.");
-  } catch (e) {
-    toast("Import impossible : " + (e.message || e));
-    postLog("import refusé : " + (e.message || e));
-    setStatus("prêt");
-  } finally {
-    btn.disabled = false;
-    $("importProgress").hidden = true;
-  }
-}
-
-/* ======================================= notions, maîtrise, historique notions */
+/* ======================================= notions, maîtrise, progression === */
 async function loadConceptsAndProgress() {
   const sid = S.activeId;
   S.concepts = []; S.progressByConcept = {}; S.gapsByConcept = {};
@@ -1495,7 +1333,6 @@ function fillConceptSelects() {
     }
     if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
   }
-  // Notion par défaut : celle avec le score le plus bas (à travailler).
   const rows = Object.values(S.progressByConcept);
   if (rows.length) {
     rows.sort((a, b) => (a.score ?? 100) - (b.score ?? 100));
@@ -1526,7 +1363,7 @@ function renderNotions() {
   box.innerHTML = "";
   const rows = Object.values(S.progressByConcept);
   if (!rows.length) {
-    box.innerHTML = '<div class="empty-note">Aucune donnée de maîtrise.<br>Lancez « Préparer le cours » puis entraînez-vous.</div>';
+    box.innerHTML = '<div class="empty-note">Aucune donnée de maîtrise.<br>Lancez « Préparer le cours » dans Apprentissage puis entraînez-vous.</div>';
     return;
   }
   rows.sort((a, b) => (a.path_rank ?? 999) - (b.path_rank ?? 999) || (a.score ?? 0) - (b.score ?? 0));
@@ -1541,575 +1378,23 @@ function renderNotions() {
       '<span class="badge ' + stCls + '">' + esc(stLabel) + "</span></div>" +
       '<div class="mini-track"><div class="mini-fill" style="width:' +
         Math.max(0, Math.min(100, p.score || 0)) + '%"></div></div>' +
-      '<div class="ni-meta">' + (p.label || "") +
+      '<div class="ni-meta">' + esc(p.label || "") +
         (fails ? " · " + fails + " échec(s) récent(s)" : "") + "</div>";
     box.appendChild(el);
   }
 }
 
-/* -------------------------------------------------- reprise de séance */
-async function loadBriefing() {
-  const btn = $("resumeBtn");
-  btn.hidden = true;
-  S.briefing = null;
-  const sid = S.activeId;
-  if (!sid) return;
-  try {
-    const rb = await jf("/api/tutor/subjects/" + sid + "/resume");
-    if (sid !== S.activeId) return;   // l'espace a changé pendant le fetch
-    if (rb && rb.last_topic) {
-      S.briefing = rb;
-      btn.textContent = "Reprendre : " + rb.last_topic;
-      btn.hidden = false;
-    }
-  } catch (e) { /* best-effort : pas de session passée */ }
-}
-
-function resumeSession() {
-  const rb = S.briefing;
-  if (!rb || S.busy) return;
-  const parts = ["Reprenons la séance précédente sur « " + rb.last_topic + " »."];
-  if (rb.difficulties && rb.difficulties.length) {
-    parts.push("Points qui avaient posé problème : " + rb.difficulties.join(", ") + ".");
-  }
-  if (rb.proposal) parts.push(rb.proposal);
-  const q = parts.join(" ");
-  addNoteBubble("<b>Reprise de séance</b><br>" +
-    "Dernière notion : " + esc(rb.last_topic) +
-    (rb.difficulties && rb.difficulties.length ? "<br>Difficultés : " + esc(rb.difficulties.join(", ")) : "") +
-    (rb.proposal ? "<br>Proposition : " + esc(rb.proposal) : ""));
-  askFromThread(q);
-  $("resumeBtn").hidden = true;
-}
-/* ============================================ WebSocket tuteur + fil de chat */
-let tutorWs = null;
-let pendingAsk = null;
-let currentBubble = null;   // bulle tutorat en cours de streaming
-let hintCounter = 0;
-let _nextBubbleKind = "answer";   // « answer » ou « hint » — consommé au frame start
-
-function ensureWs() {
-  if (tutorWs && (tutorWs.readyState === WebSocket.OPEN || tutorWs.readyState === WebSocket.CONNECTING)) {
-    return tutorWs;
-  }
-  const proto = location.protocol === "https:" ? "wss://" : "ws://";
-  tutorWs = new WebSocket(proto + location.host + "/ws/tutor");
-  tutorWs.onopen = () => {
-    if (pendingAsk) { tutorWs.send(JSON.stringify(pendingAsk)); pendingAsk = null; }
-  };
-  tutorWs.onmessage = (e) => {
-    try { handleTutorFrame(JSON.parse(e.data)); }
-    catch (err) { reportError("message WS illisible", err && err.stack); }
-  };
-  tutorWs.onerror = () => {
-    reportError("connexion WebSocket au tuteur interrompue");
-    setStatus("connexion perdue");
-  };
-  tutorWs.onclose = () => { tutorWs = null; };
-  return tutorWs;
-}
-
-function sendAsk(frame) {
-  const ws = ensureWs();
-  // TODO(scope): quand le protocole WS portera un champ de portée source
-  // (ex. "book_ids"), le brancher ici sur [...S.excluded] / [...S.scope] pour
-  // n'envoyer au retrieval que les sources cochées. État client déjà prêt.
-  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
-  else pendingAsk = frame;
-}
-
-function buildAskFrame(question) {
-  const f = {
-    type: "ask",
-    question,
-    subject_id: S.activeId || undefined,
-    socratic: $("pedSocratic").checked,
-    level: $("pedLevel").value,
-    think: $("pedThink").checked,
-  };
-  const lastSid = S.sessionIds[S.activeId];
-  if (lastSid) f.session_id = lastSid;
-  return f;
-}
-
-function setBusy(b) {
-  S.busy = b;
-  $("sendBtn").disabled = b;
-  $("micBtn").disabled = b;
-  $("cancelBtn").hidden = !b;
-}
-
-/* ------------------------------------------------------------- rendu du fil */
-function hideThreadEmpty() {
-  const e = $("threadEmpty");
-  if (e) e.remove();
-}
-
-function scrollThread() {
-  const th = $("thread");
-  th.scrollTop = th.scrollHeight;
-}
-
-function addStudentBubble(text) {
-  hideThreadEmpty();
-  const wrap = document.createElement("div");
-  wrap.className = "msg msg-student";
-  const bubble = document.createElement("div");
-  bubble.className = "bubble-student";
-  bubble.textContent = text;
-  wrap.appendChild(bubble);
-  const hintWrap = document.createElement("div");
-  hintWrap.className = "hint-under";
-  const btn = document.createElement("button");
-  btn.className = "btn btn-ghost btn-sm";
-  btn.textContent = "Indice suivant";
-  btn.title = "Demander un indice supplémentaire sans révéler la réponse";
-  btn.setAttribute("aria-label", "Demander un indice supplémentaire pour cette question");
-  btn.addEventListener("click", () => requestHint(text));
-  hintWrap.appendChild(btn);
-  wrap.appendChild(hintWrap);
-  $("thread").appendChild(wrap);
-  scrollThread();
-}
-
-function addNoteBubble(html) {
-  hideThreadEmpty();
-  const wrap = document.createElement("div");
-  wrap.className = "msg msg-note";
-  const b = document.createElement("div");
-  b.className = "bubble-note";
-  b.innerHTML = html;
-  wrap.appendChild(b);
-  $("thread").appendChild(wrap);
-  scrollThread();
-}
-
-function addTutorBubble(kind) {
-  hideThreadEmpty();
-  const wrap = document.createElement("div");
-  wrap.className = "msg msg-tutor";
-  const label = document.createElement("div");
-  label.className = "msg-kind" + (kind === "hint" ? " k-hint" : "");
-  label.textContent = kind === "hint" ? "Indice du tuteur" : "Tuteur — réponse sourcée";
-  const bubble = document.createElement("div");
-  bubble.className = "bubble-tutor";
-  const citeRow = document.createElement("div");
-  citeRow.className = "cite-row";
-  citeRow.hidden = true;
-  const body = document.createElement("div");
-  body.className = "tutor-body";
-  const think = document.createElement("span");
-  think.className = "tutor-think";
-  const text = document.createElement("span");
-  body.appendChild(think);
-  body.appendChild(text);
-  const extra = document.createElement("div");   // définitions / lignes d'erreur
-  const stats = document.createElement("div");
-  stats.className = "msg-stats";
-  bubble.append(citeRow, body, extra, stats);
-  wrap.appendChild(label);
-  wrap.appendChild(bubble);
-  $("thread").appendChild(wrap);
-  currentBubble = { wrap, citeRow, think, text, extra, stats, sources: null };
-  scrollThread();
-  return currentBubble;
-}
-
-function attachSources(bubble, sources) {
-  if (!bubble || !sources || !sources.length) return;   // dégradation : pas de chips
-  bubble.sources = sources;
-  bubble.citeRow.innerHTML = "";
-  sources.forEach((s, i) => {
-    const chip = document.createElement("button");
-    chip.type = "button";
-    chip.className = "cite-chip";
-    const where = [s.chapter, (s.page != null ? "p. " + s.page : null)].filter(Boolean).join(" · ");
-    chip.title = (s.book || "Source") + (where ? " — " + where : "");
-    chip.setAttribute("aria-label", "Citation " + (i + 1) + " : " + chip.title);
-    chip.innerHTML = '<svg viewBox="0 0 24 24" width="10" height="10" aria-hidden="true"><path d="M4 19V6a2 2 0 0 1 2-2h9l5 5v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="2.4"/></svg>' +
-      (i + 1) + (s.page != null ? " p." + s.page : "");
-    chip.addEventListener("click", () => toggleCiteDetail(bubble, i));
-    bubble.citeRow.appendChild(chip);
-  });
-  bubble.citeRow.hidden = false;
-}
-
-function toggleCiteDetail(bubble, i) {
-  const existing = bubble.extra.querySelector(".cite-detail");
-  if (existing && existing.dataset.idx == i) { existing.remove(); return; }
-  if (existing) existing.remove();
-  const s = bubble.sources[i];
-  const d = document.createElement("div");
-  d.className = "cite-detail";
-  d.dataset.idx = i;
-  const bits = ["Livre : " + (s.book || "?")];
-  if (s.chapter) bits.push("Chapitre : " + s.chapter);
-  if (s.page != null) bits.push("Page : " + s.page);
-  bits.push("Pertinence : " + Number(s.score).toFixed(3));
-  d.textContent = bits.join("\n");
-  bubble.extra.appendChild(d);
-}
-
-/* ------------------------------------------------------------ flux WS reçu */
-/* Stats de la génération en cours : mises en réserve pour survivre à
-   n'importe quel ordre d'arrivée (le rendu est refait au « end » si besoin),
-   car la référence currentBubble disparaît dès qu'un « error » passe. */
-let _runStats = null;
-
-function formatTokStats(s) {
-  const gen = Math.max(0, Number(s && s.generated_tokens) || 0);
-  const speed = Math.max(0, Number(s && s.tok_s) || 0);
-  const bits = [];
-  if (gen > 0) bits.push(gen + " token" + (gen > 1 ? "s" : ""));
-  if (speed > 0) bits.push(speed.toFixed(1).replace(".", ",") + " tok/s"); // virgule française
-  return bits.join(" · ");
-}
-
-function renderRunStats() {
-  if (!currentBubble || !_runStats) return;
-  const txt = formatTokStats(_runStats);
-  if (txt) currentBubble.stats.textContent = txt;
-}
-
-function handleTutorFrame(f) {
-  switch (f.type) {
-    case "start":
-      if (S.capture) break;                    // capture résumé audio : pas de bulle
-      _runStats = null;
-      currentBubble = addTutorBubble(_nextBubbleKind);
-      _nextBubbleKind = "answer";              // la prochaine sera une réponse
-      setBusy(true);
-      setStatus("génération…");
-      break;
-
-    case "sources":
-      if (S.capture) break;
-      attachSources(currentBubble, f.sources);
-      break;
-
-    case "thinking_delta":
-      if (S.capture) { S.capture.think += f.text || ""; break; }
-      if (currentBubble) currentBubble.think.textContent += f.text || "";
-      scrollThread();
-      break;
-
-    case "content_delta":
-      if (S.capture) { S.capture.text += f.text || ""; break; }
-      if (currentBubble) currentBubble.text.textContent += f.text || "";
-      scrollThread();
-      break;
-
-    case "definition":
-      if (S.capture) { S.capture.text += (f.definition || ""); break; }
-      if (currentBubble && f.definition) {
-        const d = document.createElement("div");
-        d.className = "result";
-        d.textContent = (f.term ? f.term + " : " : "") + f.definition;
-        currentBubble.extra.appendChild(d);
-        scrollThread();
-      }
-      break;
-
-    case "stats":
-      if (S.capture) break;                    // le résumé audio n'affiche pas de stats
-      _runStats = f;                           // mémorisé quel que soit l'ordre
-      renderRunStats();                        // rendu immédiat si la bulle vit
-      break;
-
-    case "end":
-      if (S.capture) { finishCapture(f); break; }
-      if (_runStats) renderRunStats();         // persistance après streaming
-      _runStats = null;
-      if (f.session_id && S.activeId) S.sessionIds[S.activeId] = f.session_id;
-      setBusy(false);
-      setStatus(f.status === "stopped" ? "annulé" : "prêt");
-      currentBubble = null;
-      break;
-
-    case "error": {
-      if (S.capture) { failCapture(f); break; }
-      if (_runStats) renderRunStats();         // stats déjà reçues ? on les garde
-      _runStats = null;
-      setBusy(false);
-      const msg = f.message || f.code || "erreur inconnue";
-      const friendly =
-        f.code === "voice_disabled" ? "Reconnaissance vocale non configurée (whisper)."
-        : f.code === "invalid_audio" ? "Audio invalide."
-        : f.code === "transcribe_failed" ? "Échec de transcription : " + msg
-        : f.code === "busy" ? "Une opération est déjà en cours."
-        : f.code === "no_subject" ? "Aucun espace actif pour le tuteur."
-        : msg;
-      if (currentBubble) {
-        const el = document.createElement("div");
-        el.className = "error-line";
-        el.textContent = friendly;
-        currentBubble.extra.appendChild(el);
-        currentBubble = null;
-      } else {
-        reportError(friendly);
-      }
-      setStatus("erreur");
-      break;
-    }
-
-    case "cancelled":
-      if (S.capture) S.capture = null;
-      _runStats = null;
-      setBusy(false);
-      setStatus("annulé");
-      currentBubble = null;
-      break;
-
-    case "transcript":
-      $("voiceTranscript").value = f.text || "";
-      $("voiceRow").hidden = false;
-      $("voiceTranscript").focus();
-      setStatus("transcription reçue — vérifiez puis envoyez");
-      break;
-
-    default:
-      break;
-  }
-}
-
-/* ----------------------------------------------- question / indice / annuler */
-function askFromThread(question) {
-  if (S.busy) { toast("Une génération est déjà en cours."); return; }
-  // Aucun blocage lié aux sources : zéro source cochée => le backend répond
-  // sans contexte documentaire (l'avis discret dans le fil l'annonce).
-  sendAsk(buildAskFrame(question));
-  setStatus("génération…");
-}
-
-function submitQuestion() {
-  const q = $("qInput").value.trim();
-  if (!q) return;
-  hintCounter = 0;
-  addStudentBubble(q);
-  $("qInput").value = "";
-  askFromThread(q);
-}
-
-function requestHint(originalQuestion) {
-  if (S.busy) { toast("Une génération est déjà en cours."); return; }
-  if (!originalQuestion) return;
-  hintCounter += 1;
-  const q = "L'élève a posé la question : « " + originalQuestion + " ».\n" +
-    "Donne uniquement un indice supplémentaire (indice n°" + hintCounter +
-    "), sans jamais donner la réponse finale.";
-  addStudentBubble("↪ (demande un indice supplémentaire)");
-  // Pas de bulle pré-créée : le frame « start » ouvrira celle du tuteur avec
-  // le bon libellé (une pré-création laissait une coquille vide à l'écran).
-  _nextBubbleKind = "hint";
-  sendAsk(buildAskFrame(q));
-  setStatus("indice en préparation…");
-}
-
-function cancelGeneration() {
-  if (tutorWs && tutorWs.readyState === WebSocket.OPEN) {
-    tutorWs.send(JSON.stringify({ type: "cancel" }));
-  }
-}
-
-/* ------------------------------------------- dictée vocale (flux existant) */
-let _recState = null;
-let _recording = false;
-
-function encodeWav(samples, sampleRate) {
-  const buffer = new ArrayBuffer(44 + samples.length * 2);
-  const view = new DataView(buffer);
-  const writeStr = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
-  writeStr(0, "RIFF");
-  view.setUint32(4, 36 + samples.length * 2, true);
-  writeStr(8, "WAVE");
-  writeStr(12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  writeStr(36, "data");
-  view.setUint32(40, samples.length * 2, true);
-  let off = 44;
-  for (let i = 0; i < samples.length; i++) {
-    const s = Math.max(-1, Math.min(1, samples[i]));
-    view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-    off += 2;
-  }
-  return new Blob([buffer], { type: "audio/wav" });
-}
-
-async function startRecording() {
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 } });
-  const Ctx = window.AudioContext || window.webkitAudioContext;
-  const ctx = new Ctx({ sampleRate: 16000 });
-  const src = ctx.createMediaStreamSource(stream);
-  const node = ctx.createScriptProcessor(4096, 1, 1);
-  const chunks = [];
-  node.onaudioprocess = (e) => { chunks.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
-  src.connect(node);
-  node.connect(ctx.destination);
-  _recState = { stream, ctx, node, chunks };
-}
-
-function stopRecording() {
-  const { stream, ctx, node, chunks } = _recState;
-  stream.getTracks().forEach((t) => t.stop());
-  try { node.disconnect(); ctx.close(); } catch (e) {}
-  let total = 0;
-  for (const c of chunks) total += c.length;
-  const samples = new Float32Array(total);
-  let o = 0;
-  for (const c of chunks) { samples.set(c, o); o += c.length; }
-  const blob = encodeWav(samples, 16000);
-  const reader = new FileReader();
-  reader.onload = () => {
-    const b64 = String(reader.result).split(",")[1];
-    const ws = ensureWs();
-    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "transcribe", audio: b64 }));
-    else reportError("connexion au tuteur indisponible pour la dictée");
-  };
-  reader.readAsDataURL(blob);
-}
-
-async function recordTutor() {
-  if (!_recording) {
-    try {
-      await startRecording();
-      _recording = true;
-      $("micBtn").classList.add("recording");
-      $("micBtn").setAttribute("aria-label", "Arrêter l'enregistrement");
-      setStatus("écoute… parlez puis appuyez à nouveau");
-    } catch (e) {
-      reportError("micro indisponible : " + (e && e.message ? e.message : e), e && e.stack);
-    }
-  } else {
-    _recording = false;
-    $("micBtn").classList.remove("recording");
-    $("micBtn").setAttribute("aria-label", "Dicter une question (micro)");
-    stopRecording();
-  }
-}
-
-function sendVoiceTranscript() {
-  const t = $("voiceTranscript").value.trim();
-  if (!t) { toast("La transcription est vide."); return; }
-  $("voiceRow").hidden = true;
-  addStudentBubble(t);
-  $("qInput").value = "";
-  askFromThread(t);
-}
-
-/* ================================================== exercice adaptatif (US4) */
-let currentExerciseId = null;
-
-async function genExercise() {
-  const cid = $("exConcept").value;
-  if (!cid) { toast("Choisissez une notion (ou ajoutez-en une)."); return; }
-  setStatus("génération de l'exercice…");
-  try {
-    const r = await sf("/api/tutor/exercises", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ concept_id: cid, difficulty: $("exDifficulty").value }),
-    });
-    if (!r.ok) throw new Error("génération refusée HTTP " + r.status);
-    const ex = await r.json();
-    currentExerciseId = ex.id;
-    $("exMeta").textContent = "Difficulté : " + (ex.difficulty || "?") +
-      (ex.hint_level != null ? " · indices disponibles" : "");
-    $("exStatement").textContent = ex.statement || "(énoncé vide)";
-    $("exHints").innerHTML = "";
-    $("exFeedback").hidden = true;
-    $("exSolutionBox").hidden = true;
-    $("exAnswer").value = "";
-    $("exCard").hidden = false;
-    setStatus("prêt");
-  } catch (e) { /* journalisé */ setStatus("prêt"); }
-}
-
-async function revealExerciseHint() {
-  if (!currentExerciseId) return;
-  try {
-    const data = await jf("/api/tutor/exercises/" + currentExerciseId + "/answers", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ answer: "", reveal_hint: true }),
-    });
-    if (data.hint) {
-      const d = document.createElement("div");
-      d.className = "result";
-      d.textContent = "Indice : " + data.hint;
-      $("exHints").appendChild(d);
-    } else {
-      toast("Plus d'indice disponible pour cet exercice.");
-    }
-  } catch (e) { /* journalisé */ }
-}
-
-async function submitExerciseAnswer() {
-  if (!currentExerciseId) return;
-  try {
-    const data = await jf("/api/tutor/exercises/" + currentExerciseId + "/answers", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ answer: $("exAnswer").value, reveal_hint: false }),
-    });
-    const fb = $("exFeedback");
-    fb.hidden = false;
-    fb.className = "feedback v-" + (data.verdict || "incorrect");
-    fb.textContent = "Verdict : " + (data.verdict || "—") +
-      (data.feedback ? "\n" + data.feedback : "") +
-      (data.hint ? "\nIndice : " + data.hint : "");
-    loadConceptsAndProgress();     // la maîtrise vient de bouger
-  } catch (e) { /* journalisé */ }
-}
-
-async function requestSolution() {
-  if (!currentExerciseId) return;
-  try {
-    const data = await jf("/api/tutor/exercises/" + currentExerciseId + "/solution", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ explicit: true }),
-    });
-    const sb = $("exSolutionBox");
-    sb.hidden = false;
-    sb.textContent = "Solution :\n" + (data.solution || "");
-  } catch (e) {
-    toast("Solution refusée par le serveur (doit être demandée explicitement).");
-  }
-}
-
-async function addConcept() {
-  const name = $("exNewConcept").value.trim();
-  if (!name || !S.activeId) { toast("Indiquez un nom de notion."); return; }
-  try {
-    await jf("/api/tutor/subjects/" + S.activeId + "/concepts", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
-    });
-    $("exNewConcept").value = "";
-    toast("Notion ajoutée.");
-    await loadConceptsAndProgress();
-    if ([...$("exConcept").options].some(o => o.textContent === name)) {
-      $("exConcept").value = [...$("exConcept").options].find(o => o.textContent === name).value;
-    }
-  } catch (e) { /* journalisé */ }
-}
-
-/* ======================================================= quiz & examen (US5) */
-let activeQuiz = null;
-let assessTimerHandle = null;
-let examScopeNote = "";
-
+/* ================================ catégories (chargement partagé) ======== */
 async function loadCategories() {
   S.categories = [];
   try {
     const data = await jf("/api/tutor/categories");
     S.categories = data.categories || [];
   } catch (e) { /* best-effort */ }
-  renderCategoryScope();
+  renderExamScope();
 }
 
-function renderCategoryScope() {
+function renderExamScope() {
   const wrap = $("catScopeWrap");
   const list = $("catScopeList");
   list.innerHTML = "";
@@ -2127,660 +1412,612 @@ function collectExamScope() {
   return [...$("catScopeList").querySelectorAll("input:checked")].map(i => parseInt(i.value, 10));
 }
 
-function renderAssessment(quiz, isExam, scopeEcho) {
-  activeQuiz = quiz;
-  setStatus(isExam ? "examen en cours" : "quiz en cours");
-  const box = $("assessFlow");
-  box.innerHTML = "";
-  $("assessResults").hidden = true;
-  if (assessTimerHandle) { clearInterval(assessTimerHandle); assessTimerHandle = null; }
+/* ===================================================== BIBLIOTHÈQUE (US2) = */
+/* Arborescence Domaine ▸ Catégorie ▸ Documents, chargée niveau par niveau :
+   les domaines viennent de /subjects, les livres d'un domaine ne sont
+   récupérés qu'à son dépliage, et l'appartenance aux catégories est résolue
+   (puis mise en cache) uniquement pour les livres affichés. Jamais la liste
+   brute exhaustive — cible SC-008 (1 000+ documents). */
 
-  const head = document.createElement("div");
-  head.className = "hint";
-  head.textContent = (isExam ? "Examen" : "Quiz") + " — " + (quiz.questions || []).length + " questions" +
-    (scopeEcho && (scopeEcho.category_ids || []).length
-      ? " · portée : " + scopeEcho.category_ids.length + " catégorie(s)"
-      : "");
-  box.appendChild(head);
+function docStatus(b) {
+  // statut temps réel (polling index-status) prioritaire sur le cache
+  const rt = S.statusById[b.id];
+  if (rt) return rt;
+  return b.status || "pending";
+}
 
-  (quiz.questions || []).forEach((q, i) => {
-    const card = document.createElement("div");
-    card.className = "q-card";
-    card.dataset.qid = q.id;
-    const payload = q.payload || {};
-    let inner = '<div class="q-title">' + (i + 1) + ". " + esc(payload.question || "") + "</div>";
-    if (q.type === "mcq") {
-      (payload.choices || []).forEach((c, ci) => {
-        inner += '<label class="q-choice"><input type="radio" name="q_' + esc(q.id) + '" value="' + ci + '"> ' + esc(c) + "</label>";
-      });
-    } else if (q.type === "true_false") {
-      inner += '<label class="q-choice"><input type="radio" name="q_' + esc(q.id) + '" value="true"> Vrai</label>' +
-        '<label class="q-choice"><input type="radio" name="q_' + esc(q.id) + '" value="false"> Faux</label>';
-    } else if (q.type === "matching") {
-      const pairs = payload.pairs || [];
-      pairs.forEach((p, pi) => {
-        const opts = pairs.map((pp, pj) => '<option value="' + pj + '">' + esc(pp.right) + "</option>").join("");
-        inner += '<div style="margin:4px 0;font-size:13px;">' + esc(p.left) +
-          ' → <select data-match="' + esc(q.id) + '" data-idx="' + pi + '" aria-label="Association pour ' + esc(p.left) + '">' + opts + "</select></div>";
-      });
-    } else {   // open / code
-      inner += '<textarea data-open="' + esc(q.id) + '" rows="3" placeholder="Votre réponse…"' +
-        (q.type === "code" ? ' style="font-family:var(--mono);"' : "") + "></textarea>";
-    }
-    card.innerHTML = inner;
-    box.appendChild(card);
-  });
+const STATUS_LABELS = {
+  done: ["Prêt", "done"], ready: ["Prêt", "done"],
+  indexing: ["Indexation", "indexing"],
+  pending: ["En attente", "pending"],
+  failed: ["Échec", "failed"], error: ["Erreur", "failed"],
+};
 
-  const row = document.createElement("div");
-  row.className = "row-btns";
-  const submit = document.createElement("button");
-  submit.className = "btn btn-primary btn-sm";
-  submit.textContent = "Soumettre mes réponses";
-  submit.addEventListener("click", () => submitAssessment(quiz.id, isExam));
-  row.appendChild(submit);
-  if (isExam) {
-    const note = document.createElement("span");
-    note.className = "hint";
-    note.textContent = "Aide désactivée pendant l'examen.";
-    row.appendChild(note);
+async function ensureLibrary() {
+  if (!S.libLoaded) {
+    S.libLoaded = true;
+    await loadSpaceBooks();
   }
-  box.appendChild(row);
-
-  if (isExam && quiz.time_limit_s) {
-    let remaining = quiz.time_limit_s;
-    const timerEl = $("assessTimer");
-    timerEl.hidden = false;
-    const tick = () => {
-      const m = Math.floor(Math.max(0, remaining) / 60);
-      const s = Math.max(0, remaining) % 60;
-      timerEl.textContent = "Temps restant : " + m + ":" + String(s).padStart(2, "0");
-      if (remaining <= 0) {
-        clearInterval(assessTimerHandle);
-        assessTimerHandle = null;
-        timerEl.textContent = "Temps écoulé — soumission automatique.";
-        submitAssessment(quiz.id, true);
-        return;
-      }
-      remaining -= 1;
-    };
-    tick();
-    assessTimerHandle = setInterval(tick, 1000);
-  } else {
-    $("assessTimer").hidden = true;
-  }
+  renderLibrary();
+  ensureIndexPolling();
 }
 
-function collectAnswers(quiz) {
-  const answers = {};
-  for (const q of quiz.questions || []) {
-    if (q.type === "mcq") {
-      const el = document.querySelector('input[name="q_' + q.id + '"]:checked');
-      answers[q.id] = el ? parseInt(el.value, 10) : null;
-    } else if (q.type === "true_false") {
-      const el = document.querySelector('input[name="q_' + q.id + '"]:checked');
-      answers[q.id] = el ? el.value === "true" : null;
-    } else if (q.type === "matching") {
-      const sel = document.querySelectorAll('select[data-match="' + q.id + '"]');
-      answers[q.id] = Array.from(sel).map(s => parseInt(s.value, 10));
-    } else {
-      const el = document.querySelector('textarea[data-open="' + q.id + '"]');
-      answers[q.id] = el ? el.value : "";
-    }
-  }
-  return answers;
-}
-
-async function startQuiz() {
-  if (!S.activeId) { toast("Choisissez un espace."); return; }
-  const size = parseInt($("quizSize").value, 10) || 5;
-  const kinds = $("quizKinds").value.split(",").map(s => s.trim()).filter(Boolean);
-  setStatus("génération du quiz…");
-  try {
-    const r = await sf("/api/tutor/subjects/" + S.activeId + "/quizzes", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ size, kinds }),
-    });
-    if (!r.ok) throw new Error("quiz refusé HTTP " + r.status);
-    renderAssessment(await r.json(), false);
-  } catch (e) { /* journalisé */ setStatus("prêt"); }
-}
-
-async function startExam() {
-  if (!S.activeId) { toast("Choisissez un espace."); return; }
-  const size = parseInt($("quizSize").value, 10) || 10;
-  const time = parseInt($("examTime").value, 10) || 600;
-  const category_ids = collectExamScope();
-  setStatus("génération de l'examen…");
-  try {
-    const r = await sf("/api/tutor/subjects/" + S.activeId + "/exams", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ size, time_limit_s: time, category_ids }),
-    });
-    if (!r.ok) throw new Error("examen refusé HTTP " + r.status);
-    const exam = await r.json();
-    renderAssessment(exam, true, exam.scope);
-  } catch (e) { /* journalisé */ setStatus("prêt"); }
-}
-
-async function submitAssessment(quizId, isExam) {
-  if (assessTimerHandle) { clearInterval(assessTimerHandle); assessTimerHandle = null; }
-  if (!activeQuiz) return;
-  const answers = collectAnswers(activeQuiz);
-  setStatus("correction…");
-  try {
-    const r = await sf("/api/tutor/quizzes/" + quizId + "/submit", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ answers, hint_requested: false }),
-    });
-    if (!r.ok) throw new Error("soumission refusée HTTP " + r.status);
-    showAssessmentResults(await r.json(), isExam);
-  } catch (e) { /* journalisé */ setStatus("prêt"); }
-}
-
-const VERDICT_LABELS = { correct: "Correct", partial: "Partiel", incorrect: "Incorrect" };
-
-function showAssessmentResults(report, isExam) {
-  setStatus("prêt");
-  // Correction immédiate, question par question (verdicts du rapport).
-  for (const pq of (report.per_question || [])) {
-    const card = document.querySelector('.q-card[data-qid="' + pq.question_id + '"]');
-    if (!card) continue;
-    card.classList.add("v-" + (pq.verdict || "incorrect"));
-    card.querySelectorAll("input, textarea, select").forEach(el => { el.disabled = true; });
-    const chip = document.createElement("span");
-    chip.className = "badge " + (pq.verdict === "correct" ? "done" : pq.verdict === "partial" ? "indexing" : "failed");
-    chip.classList.add("verdict-chip");
-    chip.textContent = VERDICT_LABELS[pq.verdict] || pq.verdict;
-    card.querySelector(".q-title").appendChild(chip);
-  }
-  const box = $("assessResults");
-  box.hidden = false;
-  let html = '<div class="score-line">' + Number(report.score).toFixed(1) + "<small style='font-size:14px;color:var(--ink-dim)'>/100</small></div>" +
-    '<div class="hint">' + (isExam ? "Résultat de l'examen" : "Résultat du quiz") +
-    " — les verdicts par question sont affichés ci-dessus.</div>";
-  if (report.strengths && report.strengths.length) {
-    html += '<div class="report-block"><b>Points forts :</b> ' + esc(report.strengths.join(", ")) + "</div>";
-  }
-  if (report.weaknesses && report.weaknesses.length) {
-    html += '<div class="report-block"><b>Explication des lacunes — à revoir :</b> ' + esc(report.weaknesses.join(", ")) + "</div>";
-  }
-  box.innerHTML = html;
-  loadConceptsAndProgress();   // la maîtrise a été mise à jour côté serveur
-}
-
-/* ============================================ fiches mémo (révisions dues) */
-let dueCards = [];
-let dueIdx = 0;
-
-async function prepareCourse() {
-  if (!S.activeId) { toast("Choisissez un espace."); return; }
-  setStatus("préparation du cours…");
-  try {
-    const r = await sf("/api/tutor/subjects/" + S.activeId + "/prepare", { method: "POST" });
-    if (!r.ok) throw new Error("préparation refusée HTTP " + r.status);
-    const rep = await r.json();
-    toast("Préparé — fiches +" + rep.flashcards_new + ", glossaire +" + rep.glossary_new +
-      ", notions +" + rep.concepts_new + ", ignorés " + rep.skipped);
-    setStatus("prêt");
-    loadConceptsAndProgress();
-  } catch (e) { /* journalisé */ setStatus("prêt"); }
-}
-
-async function loadDueReviews() {
-  if (!S.activeId) { toast("Choisissez un espace."); return; }
-  try {
-    const data = await jf("/api/tutor/subjects/" + S.activeId + "/reviews/due");
-    dueCards = data.due || [];
-    dueIdx = 0;
-    renderDueCard();
-  } catch (e) { /* journalisé */ }
-}
-
-function renderDueCard() {
-  const box = $("dueFlow");
-  box.innerHTML = "";
-  if (!dueCards.length) {
-    box.innerHTML = '<div class="empty-note">Aucune fiche à réviser.<br>Lancez « Préparer le cours » puis revenez plus tard.</div>';
-    return;
-  }
-  if (dueIdx >= dueCards.length) {
-    box.innerHTML = '<div class="empty-note">Toutes les fiches dues ont été révisées. Bravo !</div>';
-    return;
-  }
-  const card = dueCards[dueIdx];
-  const counter = document.createElement("div");
-  counter.className = "due-counter";
-  counter.textContent = "Fiche " + (dueIdx + 1) + " / " + dueCards.length;
-  const flip = document.createElement("div");
-  flip.className = "flip";
-  flip.tabIndex = 0;
-  flip.setAttribute("role", "button");
-  flip.setAttribute("aria-label", "Carte mémoire — appuyez pour retourner");
-  flip.innerHTML =
-    '<div class="flip-inner">' +
-      '<div class="face front"><div class="face-label">Question</div>' + esc(card.question) + "</div>" +
-      '<div class="face back"><div class="face-label">Réponse</div>' + esc(card.answer) + "</div>" +
-    "</div>";
-  const doFlip = () => {
-    flip.classList.toggle("flipped");
-    flip.setAttribute("aria-pressed", flip.classList.contains("flipped") ? "true" : "false");
-  };
-  flip.addEventListener("click", doFlip);
-  flip.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); doFlip(); }
-  });
-  const row = document.createElement("div");
-  row.className = "row-btns";
-  const ok = document.createElement("button");
-  ok.className = "btn btn-primary btn-sm";
-  ok.textContent = "Je savais";
-  ok.addEventListener("click", () => gradeDueCard(card.id, true));
-  const ko = document.createElement("button");
-  ko.className = "btn btn-danger btn-sm";
-  ko.textContent = "À revoir";
-  ko.addEventListener("click", () => gradeDueCard(card.id, false));
-  row.append(ok, ko);
-  box.append(counter, flip, row);
-}
-
-async function gradeDueCard(flashcardId, success) {
-  try {
-    await sf("/api/tutor/reviews/" + flashcardId + "/grade", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ success }),
-    });
-  } catch (e) { /* best-effort : on avance quand même */ }
-  dueIdx += 1;
-  renderDueCard();
-}
-
-/* ============================== résumé audio — Web Speech API (local only) */
-const TTS = { voice: null };
-
-function ttsSupported() { return "speechSynthesis" in window; }
-
-function pickVoice() {
-  if (!ttsSupported()) return;
-  const vs = speechSynthesis.getVoices() || [];
-  TTS.voice =
-    vs.find(v => /^fr[-_]/i.test(v.lang) && /google|thomas|amelie|audrey|marie/i.test(v.name)) ||
-    vs.find(v => /^fr[-_]/i.test(v.lang)) ||
-    vs.find(v => /fr/i.test(v.lang)) || null;
-  $("ttsVoiceInfo").textContent = TTS.voice
-    ? "Voix : " + TTS.voice.name + (TTS.voice.lang ? " (" + TTS.voice.lang + ")" : "")
-    : "Voix française par défaut du navigateur.";
-}
-
-function ttsRateValue() { return parseFloat($("ttsRate").value) || 1; }
-
-function ttsSpeak() {
-  if (!ttsSupported()) { toast("Synthèse vocale non disponible dans ce navigateur."); return; }
-  const txt = ($("ttsText").value || "").trim();
-  if (!txt) { toast("Générez ou saisissez d'abord un texte à écouter."); return; }
-  speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(txt);
-  u.lang = "fr-FR";
-  if (TTS.voice) u.voice = TTS.voice;
-  u.rate = ttsRateValue();
-  u.onend = () => setStatus("prêt");
-  u.onerror = (ev) => { if (ev.error !== "interrupted" && ev.error !== "canceled") reportError("synthèse vocale : " + ev.error); };
-  speechSynthesis.speak(u);
-  setStatus("lecture audio…");
-}
-
-function ttsPauseResume() {
-  if (!ttsSupported()) return;
-  if (speechSynthesis.speaking && !speechSynthesis.paused) {
-    speechSynthesis.pause();
-    setStatus("lecture en pause");
-  } else if (speechSynthesis.paused) {
-    speechSynthesis.resume();
-    setStatus("lecture audio…");
-  }
-}
-
-function ttsStop() {
-  if (!ttsSupported()) return;
-  speechSynthesis.cancel();
-  setStatus("prêt");
-}
-
-/* Résumé généré via le flux WS existant, capturé hors fil de chat. */
-function generateAudioSummary() {
-  const cid = $("ttsNotion").value;
-  if (!cid || !S.activeId) { toast("Choisissez une notion (préparez le cours si besoin)."); return; }
-  if (S.busy) { toast("Une génération est déjà en cours."); return; }
-  const opt = $("ttsNotion").selectedOptions[0];
-  const name = opt ? opt.textContent : "la notion";
-  S.capture = { text: "", think: "" };
-  sendAsk({
-    type: "ask",
-    subject_id: S.activeId,
-    question: "Rédige un résumé de révision audio de la notion « " + name +
-      " » : une phrase de définition, cinq points clés maximum, puis un exemple concret. " +
-      "Réponds en texte continu adapté à une écoute vocale, sans puces ni markdown.",
-    socratic: false,
-    level: "intermediate",
-    think: false,
-  });
-  setStatus("résumé audio en génération…");
-}
-
-function finishCapture(endFrame) {
-  const cap = S.capture;
-  S.capture = null;
-  setBusy(false);
-  if (endFrame && endFrame.session_id && S.activeId) S.sessionIds[S.activeId] = endFrame.session_id;
-  const txt = (cap && cap.text ? cap.text : "").trim();
-  if (txt) {
-    $("ttsText").value = txt;
-    toast("Résumé prêt — appuyez sur Lire.");
-  } else {
-    toast("Le résumé n'a rien renvoyé ; saisissez votre texte manuellement.");
-  }
-  setStatus("prêt");
-}
-
-function failCapture(errFrame) {
-  S.capture = null;
-  setBusy(false);
-  reportError("échec du résumé audio : " + (errFrame && (errFrame.message || errFrame.code) || "?"));
-  setStatus("prêt");
-}
-
-/* ==================================================== sessions passées (US6) */
-async function loadSessions() {
-  const sid = S.activeId;
-  const box = $("sessionsList");
-  box.innerHTML = "";
-  if (!sid) return;
-  try {
-    const data = await jf("/api/tutor/subjects/" + sid + "/sessions");
-    const sessions = data.sessions || [];
-    if (!sessions.length) {
-      box.innerHTML = '<div class="empty-note">Aucune session clôturée dans cet espace.</div>';
-      return;
-    }
-    for (const s of sessions.slice(0, 12)) {
-      const sum = s.summary || {};
-      const when = sum.produced_at || s.started_at || "";
-      const el = document.createElement("div");
-      el.className = "sess-item";
-      el.innerHTML =
-        '<div class="when">Session ' + esc(String(s.id).slice(0, 8)) + " · " + esc(when) + " · " + esc(s.status || "") + "</div>" +
-        "<div><b>Étudié :</b> " + esc((sum.studied || []).join(", ") || "—") + "</div>" +
-        "<div><b>Maîtrisé :</b> " + esc((sum.mastered || []).join(", ") || "—") + "</div>" +
-        "<div><b>À revoir :</b> " + esc((sum.to_review || []).join(", ") || "—") + "</div>";
-      box.appendChild(el);
-    }
-  } catch (e) {
-    box.innerHTML = '<div class="empty-note">Sessions indisponibles.</div>';
-  }
-}
-
-/* ============================================ explorer : outils de connaissance */
-function requireNotionInput() {
-  const n = $("expNotion").value.trim();
-  if (!n) { toast("Saisissez une notion d'abord."); return null; }
-  return n;
-}
-
-async function locateNotion() {
-  const sid = S.activeId;
-  const notion = requireNotionInput();
-  if (!sid || !notion) return;
-  setStatus("localisation…");
-  try {
-    const data = await jf("/api/tutor/subjects/" + sid + "/locate?notion=" + encodeURIComponent(notion));
-    const box = $("locateOut");
-    box.innerHTML = "";
-    const rows = data.results || [];
-    if (!rows.length) { box.innerHTML = '<div class="empty-note">Aucun passage trouvé.</div>'; }
-    const byBook = {};
-    for (const row of rows) (byBook[row.book] = byBook[row.book] || []).push(row);
-    for (const [book, items] of Object.entries(byBook)) {
-      const h = document.createElement("div");
-      h.className = "src-group-head";
-      h.textContent = book;
-      box.appendChild(h);
-      for (const it of items) {
-        const d = document.createElement("div");
-        d.className = "result";
-        const chap = it.chapter ? " — chapitre " + it.chapter : "";
-        const pg = it.page != null ? ", p. " + it.page : "";
-        d.textContent = "[" + Number(it.score).toFixed(3) + chap + pg + "]\n" + it.text;
-        box.appendChild(d);
-      }
-    }
-    setStatus("prêt");
-  } catch (e) { /* journalisé */ setStatus("prêt"); }
-}
-
-async function rankBooks() {
-  const sid = S.activeId;
-  const notion = requireNotionInput();
-  if (!sid || !notion) return;
-  setStatus("classement…");
-  try {
-    const data = await jf("/api/tutor/subjects/" + sid + "/rank-books?notion=" + encodeURIComponent(notion));
-    const box = $("rankOut");
-    box.innerHTML = "";
-    const rows = data.results || [];
-    if (!rows.length) { box.innerHTML = '<div class="empty-note">Aucun livre pertinent.</div>'; }
-    for (const row of rows) {
-      const d = document.createElement("div");
-      d.className = "result";
-      d.textContent = row.book + " — score " + Number(row.score).toFixed(3);
-      box.appendChild(d);
-    }
-    setStatus("prêt");
-  } catch (e) { /* journalisé */ setStatus("prêt"); }
-}
-
-async function compareNotion() {
-  const sid = S.activeId;
-  const notion = requireNotionInput();
-  if (!sid || !notion) return;
-  setStatus("comparaison…");
-  $("compareBox").hidden = false;
-  $("compareAnswer").textContent = "";
-  $("compareSources").innerHTML = "";
-  try {
-    const r = await sf("/api/tutor/subjects/" + sid + "/compare", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ notion }),
-    });
-    if (!r.ok) throw new Error("comparaison refusée HTTP " + r.status);
-    await readNdjson(r, (frame) => {
-      if (frame.type === "sources") renderCompareSources(frame.sources);
-      else if (frame.type === "content_delta") $("compareAnswer").textContent += frame.text;
-      else if (frame.type === "thinking_delta") $("compareAnswer").innerHTML +=
-        '<span class="tutor-think">' + esc(frame.text) + "</span>";
-      else if (frame.type === "error") reportError(frame.message || frame.code || "erreur comparaison");
-    });
-    setStatus("prêt");
-  } catch (e) { /* journalisé */ setStatus("prêt"); }
-}
-
-function renderCompareSources(sources) {
-  const box = $("compareSources");
-  box.innerHTML = "";
-  if (!sources || !sources.length) return;
-  for (const s of sources) {
-    const d = document.createElement("div");
-    d.className = "result";
-    const chap = s.chapter ? " — chapitre " + s.chapter : "";
-    const pg = s.page != null ? ", p. " + s.page : "";
-    d.textContent = "[Livre " + (s.book || "?") + chap + pg + "] (score " + Number(s.score).toFixed(3) + ")";
-    box.appendChild(d);
-  }
-}
-
-/** Lecteur NDJSON partagé (compare, glossaire). */
-async function readNdjson(response, onFrame) {
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let idx;
-    while ((idx = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, idx).trim();
-      buf = buf.slice(idx + 1);
-      if (line) onFrame(JSON.parse(line));
-    }
-  }
-}
-
-async function loadGlossary() {
-  const sid = S.activeId;
-  if (!sid) return;
-  try {
-    const data = await jf("/api/tutor/subjects/" + sid + "/glossary");
-    const box = $("glossList");
-    box.innerHTML = "";
-    const terms = data.terms || [];
-    if (!terms.length) {
-      box.innerHTML = '<div class="empty-note">Aucun terme. Lancez « Préparer le cours ».</div>';
-      return;
-    }
-    for (const t of terms) {
-      const cardEl = document.createElement("div");
-      cardEl.className = "term-card";
-      cardEl.innerHTML =
-        '<div style="font-weight:700;">' + esc(t.term) + "</div>" +
-        '<div class="hint" style="margin-top:3px;">' + esc(t.definition) + "</div>" +
-        '<button class="btn btn-ghost btn-sm" style="margin-top:4px;">Expliquer davantage</button>' +
-        '<div class="explain" style="margin-top:6px;" hidden></div>';
-      cardEl.querySelector("button").addEventListener("click", () =>
-        explainTerm(sid, t.term, cardEl.querySelector(".explain")));
-      box.appendChild(cardEl);
-    }
-  } catch (e) { /* journalisé */ }
-}
-
-async function explainTerm(sid, term, target) {
-  target.hidden = false;
-  target.textContent = "explication…";
-  try {
-    const r = await sf("/api/tutor/subjects/" + sid + "/glossary/" + encodeURIComponent(term) + "/explain");
-    if (!r.ok) throw new Error("explication refusée HTTP " + r.status);
-    let answer = "";
-    await readNdjson(r, (f) => {
-      if (f.type === "content_delta" || f.type === "delta" || f.type === "definition") answer += f.text || "";
-    });
-    target.textContent = answer || "(aucune explication renvoyée)";
-  } catch (e) {
-    target.textContent = "échec de l'explication.";
-  }
-}
-
-async function loadKnowledgeMap() {
-  const sid = S.activeId;
-  if (!sid) return;
-  try {
-    const data = await jf("/api/tutor/subjects/" + sid + "/map");
-    renderKnowledgeMap($("mapOut"), data);
-  } catch (e) { /* journalisé */ }
-}
-
-function renderKnowledgeMap(box, data) {
-  box.innerHTML = "";
-  const nodes = data.nodes || [];
-  const edges = data.edges || [];
-  if (!nodes.length) {
-    box.innerHTML = '<div class="empty-note">Aucune relation entre notions.<br>Lancez « Préparer le cours ».</div>';
-    return;
-  }
-  const W = 600, H = 420, cx = W / 2, cy = H / 2, R = Math.min(W, H) / 2 - 60;
-  const pos = {};
-  nodes.forEach((n, i) => {
-    const ang = (2 * Math.PI * i) / nodes.length - Math.PI / 2;
-    pos[n.id] = { x: cx + R * Math.cos(ang), y: cy + R * Math.sin(ang) };
-  });
-  const ns = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(ns, "svg");
-  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
-  svg.style.width = "100%";
-  svg.style.maxWidth = "620px";
-  for (const e of edges) {
-    const a = pos[e.from_concept_id], b = pos[e.to_concept_id];
-    if (!a || !b) continue;
-    const line = document.createElementNS(ns, "line");
-    line.setAttribute("x1", a.x.toFixed(1)); line.setAttribute("y1", a.y.toFixed(1));
-    line.setAttribute("x2", b.x.toFixed(1)); line.setAttribute("y2", b.y.toFixed(1));
-    line.setAttribute("stroke", "var(--accent-line)");
-    line.setAttribute("stroke-width", "1.6");
-    const title = document.createElementNS(ns, "title");
-    title.textContent = e.relation || "";
-    line.appendChild(title);
-    svg.appendChild(line);
-  }
-  for (const n of nodes) {
-    const p = pos[n.id];
-    const c = document.createElementNS(ns, "circle");
-    c.setAttribute("cx", p.x.toFixed(1)); c.setAttribute("cy", p.y.toFixed(1)); c.setAttribute("r", "7");
-    c.setAttribute("fill", "var(--accent)");
-    svg.appendChild(c);
-    const t = document.createElementNS(ns, "text");
-    t.setAttribute("x", p.x.toFixed(1)); t.setAttribute("y", (p.y + 20).toFixed(1));
-    t.setAttribute("font-size", "11.5");
-    t.setAttribute("text-anchor", "middle");
-    t.setAttribute("fill", "currentColor");
-    t.textContent = n.name;
-    svg.appendChild(t);
-  }
-  box.appendChild(svg);
-}
-
-/* ============================================ recherche sémantique (modale) */
-function openSearchModal() {
-  $("searchModal").hidden = false;
-  $("searchQuery").focus();
-}
-function closeSearchModal() {
-  $("searchModal").hidden = true;
-  $("openSearchBtn").focus();
-}
-
-async function runSemanticSearch() {
+async function loadSpaceBooks() {
   const subj = activeSubject();
-  const q = $("searchQuery").value.trim();
-  if (!subj || !q) { toast("Choisissez un espace et saisissez une question."); return; }
-  const box = $("searchResults");
-  box.innerHTML = '<div class="hint">recherche…</div>';
+  if (!subj) return;
   try {
-    const r = await sf("/api/tutor/search", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ subject: subj.name, query: q, k: 6 }),
-    });
-    if (!r.ok) throw new Error("recherche refusée HTTP " + r.status);
-    const data = await r.json();
-    const results = data.results || [];
-    box.innerHTML = "";
-    if (!results.length) {
-      box.innerHTML = '<div class="empty-note">Aucun fragment trouvé.</div>';
-      return;
-    }
-    for (const res of results) {
-      const d = document.createElement("div");
-      d.className = "result";
-      const where = [
-        res.book_title || res.book_id,
-        res.chapter ? "chap. " + res.chapter : null,
-        res.page != null ? "p. " + res.page : null,
-      ].filter(Boolean).join(" · ");
-      d.textContent = "[" + Number(res.score).toFixed(3) + "]" + (where ? " " + where + "\n" : "\n") + res.text;
-      box.appendChild(d);
-    }
+    const data = await jf("/api/tutor/books?subject=" + encodeURIComponent(subj.name));
+    const books = data.books || [];
+    S.books = books;
+    // Pré-chargement du domaine actif (une seule requête, borné à l'espace).
+    S.domainBooks[subj.id] = books;
   } catch (e) {
-    box.innerHTML = '<div class="empty-note">La recherche a échoué.</div>';
+    S.books = [];
   }
 }
 
-/* ============================ classification automatique + catégories */
+async function loadDomainBooks(sid) {
+  if (S.domainBooks[sid]) return S.domainBooks[sid];
+  const subj = S.subjects.find(s => s.id === sid);
+  if (!subj) return [];
+  let books = [];
+  try {
+    const data = await jf("/api/tutor/books?subject=" + encodeURIComponent(subj.name));
+    books = data.books || [];
+  } catch (e) { books = []; }
+  S.domainBooks[sid] = books;
+  await hydrateMemberships(books);
+  return books;
+}
+
+/** Appartenance catégorie par livre — résolue une seule fois, mise en cache. */
+async function hydrateMemberships(books) {
+  await Promise.allSettled(books.map(async (b) => {
+    if (!(b.id in S.catByBook)) {
+      try {
+        const d = await jf("/api/tutor/books/" + encodeURIComponent(b.id) + "/categories");
+        S.catByBook[b.id] = (d.categories || [])
+          .map(m => (m && typeof m === "object") ? m.name : m).filter(Boolean);
+      } catch (e) {
+        S.catByBook[b.id] = [];
+      }
+    }
+  }));
+}
+
+function catsOf(bookId) { return S.catByBook[bookId] || []; }
+
+/* --- Sélection US3 : Set dédupliqué de book_ids, états tri-états --------- */
+function loadSelection() {
+  try {
+    const arr = JSON.parse(localStorage.getItem("edunexus.selection") || "[]");
+    if (Array.isArray(arr)) S.selection = new Set(arr.filter(x => typeof x === "string"));
+  } catch (e) { /* défaut : vide */ }
+}
+function saveSelection() {
+  localStorage.setItem("edunexus.selection", JSON.stringify([...S.selection]));
+}
+function triState(ids, sel) {
+  let n = 0;
+  for (const id of ids) if (sel.has(id)) n++;
+  if (!ids.length || n === 0) return "none";
+  if (n === ids.length) return "all";
+  return "some";
+}
+function applyTriToInput(input, state) {
+  input.checked = state === "all";
+  input.indeterminate = state === "some";
+}
+
+/* --- Rendu de l'arbre (partagé Bibliothèque / popover Sources) ----------- */
+function renderLibrary() { renderTree($("treeBox"), "lib"); }
+
+function renderTree(box, mode) {
+  if (!box) return;
+  const isLib = mode === "lib";
+  const queryEl = isLib ? $("srcSearch") : $("srcSearchIn");
+  const q = norm((queryEl && queryEl.value) || "").trim();
+  const sel = isLib ? S.selection : S.popoverSel;
+  box.innerHTML = "";
+
+  if (!S.subjects.length) {
+    box.innerHTML = '<div class="empty-note">Aucun domaine.<br>Importez un premier document depuis « ＋ Ajouter un document ».</div>';
+    return;
+  }
+
+  for (const subj of S.subjects) {
+    const dnode = document.createElement("div");
+    dnode.className = "tnode" + (S.domainOpen[subj.id] ? " open" : "");
+    const books = S.domainBooks[subj.id];
+    const loaded = !!books;
+
+    const drow = document.createElement("div");
+    drow.className = "trow";
+    const caret = document.createElement("span");
+    caret.className = "tcaret"; caret.textContent = "▸"; caret.setAttribute("aria-hidden", "true");
+
+    const dcheck = document.createElement("input");
+    dcheck.type = "checkbox"; dcheck.className = "tcheck";
+    dcheck.setAttribute("aria-label", "Sélectionner tout le domaine " + subj.name);
+
+    const dlabel = document.createElement("span");
+    dlabel.className = "tlabel serif"; dlabel.textContent = subj.name;
+    const dcount = document.createElement("span");
+    dcount.className = "tcount";
+    dcount.textContent = loaded ? books.length + " doc" : "déplier…";
+
+    drow.append(caret, dcheck, dlabel, dcount);
+
+    const dkids = document.createElement("div");
+    dkids.className = "tkids";
+
+    const toggleDomain = async () => {
+      S.domainOpen[subj.id] = !S.domainOpen[subj.id];
+      if (S.domainOpen[subj.id] && !loaded) {
+        dcount.textContent = "chargement…";
+        await loadDomainBooks(subj.id);
+      }
+      renderTree(box, mode);
+    };
+    caret.addEventListener("click", toggleDomain);
+    dlabel.addEventListener("click", toggleDomain);
+
+    // Coche domaine : tout / rien parmi les documents chargés (dédupliqués).
+    dcheck.addEventListener("change", async () => {
+      if (!loaded) await loadDomainBooks(subj.id);
+      const ids = visibleBookIds(subj.id);
+      const target = !dcheck.checked; // si partiel -> coche-tout ; sinon bascule
+      const wantChecked = dcheck.checked || (triState(ids, sel) !== "all" && target);
+      for (const id of ids) {
+        if (wantChecked) sel.add(id); else sel.delete(id);
+      }
+      afterSelectionChange(mode);
+      renderTree(box, mode);
+    });
+
+    if (loaded) {
+      // Groupes : catégories présentes dans ce domaine + « Non classé ».
+      const groups = {};
+      const order = [];
+      for (const b of books) {
+        const cs = catsOf(b.id);
+        if (!cs.length) continue;
+        for (const cn of cs) {
+          if (!groups[cn]) { groups[cn] = []; order.push(cn); }
+          groups[cn].push(b);
+        }
+      }
+      const uncategorized = books.filter(b => !catsOf(b.id).length);
+
+      for (const cname of order) {
+        const items = groups[cname];
+        if (q && !items.some(b => norm(b.title).includes(q))) continue;
+        dkids.appendChild(categoryNode(cname, items, box, mode, subj.name));
+      }
+      if (uncategorized.length && (!q || uncategorized.some(b => norm(b.title).includes(q)))) {
+        dkids.appendChild(categoryNode("Non classé", uncategorized, box, mode, subj.name, true));
+      }
+      if (q) {
+        // Résultats plats avec chemin hiérarchique (recherche FR-013).
+        const hits = books.filter(b => norm(b.title).includes(q));
+        if (hits.length) {
+          const flat = document.createElement("div");
+          flat.style.marginTop = "6px";
+          for (const b of hits) flat.appendChild(docRow(b, box, mode, subj.name, catsOf(b.id)));
+          dkids.appendChild(flat);
+        }
+      }
+      applyTriToInput(dcheck, triState(visibleBookIds(subj.id), sel));
+    } else {
+      applyTriToInput(dcheck, "none");
+    }
+
+    dnode.append(drow, dkids);
+    box.appendChild(dnode);
+  }
+
+  if (isLib) updateLibCount();
+}
+
+function visibleBookIds(sid) {
+  return (S.domainBooks[sid] || []).map(b => b.id);
+}
+
+function categoryNode(cname, items, box, mode, domainName, isUncat) {
+  const node = document.createElement("div");
+  node.className = "tnode open";
+  const row = document.createElement("div");
+  row.className = "trow";
+  const caret = document.createElement("span");
+  caret.className = "tcaret"; caret.textContent = "▸"; caret.setAttribute("aria-hidden", "true");
+  const check = document.createElement("input");
+  check.type = "checkbox"; check.className = "tcheck";
+  check.setAttribute("aria-label", "Sélectionner la catégorie " + cname);
+  const label = document.createElement("span");
+  label.className = "tlabel" + (isUncat ? "" : "");
+  label.textContent = cname;
+  const count = document.createElement("span");
+  count.className = "tcount"; count.textContent = items.length + " doc";
+
+  row.append(caret, check, label, count);
+
+  if (mode === "lib" && !isUncat) {
+    const acts = document.createElement("span");
+    acts.className = "tacts";
+    const ren = document.createElement("button");
+    ren.className = "tact"; ren.textContent = "✎"; ren.title = "Renommer la catégorie";
+    ren.addEventListener("click", () => renameCategory(cname));
+    const del = document.createElement("button");
+    del.className = "tact del"; del.textContent = "🗑"; del.title = "Supprimer la catégorie";
+    del.addEventListener("click", () => deleteCategoryByName(cname));
+    acts.append(ren, del);
+    row.appendChild(acts);
+  }
+
+  const kids = document.createElement("div");
+  kids.className = "tkids";
+  for (const b of items) kids.appendChild(docRow(b, box, mode, domainName, [cname]));
+
+  const toggle = () => { node.classList.toggle("open"); };
+  caret.addEventListener("click", toggle);
+  label.addEventListener("click", toggle);
+
+  const ids = items.map(b => b.id);
+  const sel = mode === "lib" ? S.selection : S.popoverSel;
+  applyTriToInput(check, triState(ids, sel));
+  check.addEventListener("change", () => {
+    for (const id of ids) { if (check.checked) sel.add(id); else sel.delete(id); }
+    afterSelectionChange(mode);
+    renderTree(box, mode);
+  });
+
+  node.append(row, kids);
+  return node;
+}
+
+function docRow(b, box, mode, domainName, pathCats) {
+  const sel = mode === "lib" ? S.selection : S.popoverSel;
+  const el = document.createElement("div");
+  el.className = "trow tdoc";
+  const check = document.createElement("input");
+  check.type = "checkbox"; check.className = "tcheck";
+  check.checked = sel.has(b.id);
+  check.setAttribute("aria-label", "Sélectionner le document " + b.title);
+  const main = document.createElement("div");
+  main.style.cssText = "flex:1;min-width:0;";
+  const title = document.createElement("div");
+  title.className = "src-title"; title.textContent = b.title;
+  const meta = document.createElement("div");
+  meta.className = "src-meta";
+  const [stLabel, stCls] = STATUS_LABELS[docStatus(b)] || [docStatus(b), "pending"];
+  const pages = (b.pages != null) ? b.pages + " pages"
+    : (b.chunks_total > 0 ? b.chunks_total + " fragments" : "");
+  meta.innerHTML =
+    '<span class="fmt-chip">' + esc(b.format || "?") + "</span>" +
+    '<span class="badge ' + stCls + '">' +
+      (docStatus(b) === "indexing" ? '<span class="spin"></span>' : "") + esc(stLabel) + "</span>" +
+    (pages ? "<span>" + esc(pages) + "</span>" : "") +
+    (mode === "pop" && pathCats && pathCats.length && pathCats[0] !== "Non classé"
+      ? '<span class="path-crumb">' + esc(pathCats.join(" ▸ ")) + "</span>" : "");
+  main.append(title, meta);
+
+  // Barre indéterminée pendant l'indexation (honnête : pas de % serveur).
+  if (docStatus(b) === "indexing") {
+    const prog = document.createElement("div");
+    prog.className = "idx-track";
+    prog.innerHTML = '<div class="idx-fill"></div>';
+    main.appendChild(prog);
+  }
+
+  el.append(check, main);
+
+  if (mode === "lib") {
+    const acts = document.createElement("span");
+    acts.className = "src-actions";
+    const tag = document.createElement("button");
+    tag.className = "src-tag" + (catsOf(b.id).length ? " has-cats" : "");
+    tag.title = "Déplacer / catégoriser ce document";
+    tag.setAttribute("aria-label", "Modifier les catégories de " + b.title);
+    tag.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M4 4h7l9 9-7 7-9-9z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><circle cx="8.5" cy="8.5" r="1.6" fill="currentColor"/></svg>';
+    tag.addEventListener("click", () => openCatEditor(b.id));
+    const del = document.createElement("button");
+    del.className = "src-del"; del.textContent = "×";
+    del.title = "Supprimer ce document";
+    del.setAttribute("aria-label", "Supprimer " + b.title);
+    del.addEventListener("click", () => deleteBook(b));
+    acts.append(tag, del);
+    el.appendChild(acts);
+  }
+
+  check.addEventListener("change", () => {
+    if (check.checked) sel.add(b.id); else sel.delete(b.id);
+    afterSelectionChange(mode);
+    renderTree(box, mode);
+  });
+  return el;
+}
+
+function afterSelectionChange(mode) {
+  if (mode === "lib") {
+    saveSelection();
+    updateLibCount();
+  } else {
+    updateSrcCount();
+  }
+}
+
+function updateLibCount() {
+  const n = S.selection.size;
+  $("libCount").textContent = n + " document" + (n > 1 ? "s" : "") + " actif" + (n > 1 ? "s" : "");
+}
+
+/* --- Administration des catégories dans l'arbre (FR-011 / T018) ---------- */
+async function renameCategory(oldName) {
+  const c = S.categories.find(x => x.name === oldName);
+  if (!c) return;
+  const name = prompt("Nouveau nom de la catégorie « " + oldName + " » :", oldName);
+  if (!name || name.trim() === oldName) return;
+  try {
+    const r = await sf("/api/tutor/categories/" + c.id + "/rename", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name.trim() }),
+    });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const nn = name.trim();
+    for (const id of Object.keys(S.catByBook)) {
+      S.catByBook[id] = S.catByBook[id].map(x => x === oldName ? nn : x);
+    }
+    toast("Catégorie renommée en « " + nn + " ».");
+    await loadCategories();
+    renderLibrary();
+  } catch (e) { /* journalisé */ }
+}
+
+async function deleteCategoryByName(name) {
+  const c = S.categories.find(x => x.name === name);
+  if (!c) return;
+  const n = c.book_count != null ? c.book_count : 0;
+  // FR-011 / research §7 : jamais de suppression silencieuse d'un conteneur.
+  const msg = n > 0
+    ? "La catégorie « " + name + " » contient " + n + " document(s).\n\n" +
+      "Les documents seront CONSERVÉS (ils deviendront « Non classé ») et " +
+      "sortiront des sources actives concernées.\n\nSupprimer la catégorie ?"
+    : "Supprimer la catégorie vide « " + name + " » ?";
+  if (!confirm(msg)) return;
+  try {
+    const r = await sf("/api/tutor/categories/" + c.id, { method: "DELETE" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    for (const id of Object.keys(S.catByBook)) {
+      S.catByBook[id] = S.catByBook[id].filter(x => x !== name);
+    }
+    toast("Catégorie « " + name + " » supprimée — documents conservés.");
+    await Promise.all([loadCategories(), loadBooksStatuses()]);
+    renderLibrary();
+  } catch (e) { /* journalisé */ }
+}
+
+/** Rafraîchit les statuts des livres chargés (après suppression catégorie). */
+async function loadBooksStatuses() {
+  const subj = activeSubject();
+  if (!subj) return;
+  try {
+    const data = await jf("/api/tutor/books?subject=" + encodeURIComponent(subj.name));
+    S.books = data.books || [];
+    if (S.domainBooks[subj.id]) S.domainBooks[subj.id] = S.books;
+  } catch (e) { /* best-effort */ }
+}
+
+async function deleteBook(b) {
+  if (!confirm("Supprimer « " + b.title + " » et ses fragments ?")) return;
+  try {
+    const r = await sf("/api/tutor/book/" + encodeURIComponent(b.id), { method: "DELETE" });
+    if (!r.ok && r.status !== 204) throw new Error("HTTP " + r.status);
+    S.selection.delete(b.id);
+    saveSelection();
+    toast("Document supprimé.");
+    await loadBooksStatuses();
+    renderLibrary();
+  } catch (e) { /* déjà journalisé par sf */ }
+}
+
+/* ============================================ import + suggestion (US7) === */
+function toggleImportPanel(force) {
+  const p = $("importPanel");
+  const show = force != null ? force : p.hidden;
+  p.hidden = !show;
+  $("addSourceBtn").setAttribute("aria-expanded", show ? "true" : "false");
+  if (show) {
+    const subj = activeSubject();
+    if (!$("impSubject").value && subj) $("impSubject").value = subj.name;
+    $("impSubject").focus();
+  }
+}
+
+/** Correspondance floue titre ↔ catégories existantes (sans appel LLM). */
+function suggestCategory(title) {
+  const t = norm(title);
+  const toks = t.split(/[^a-z0-9]+/).filter(w => w.length > 2);
+  let best = null, bestScore = 0;
+  for (const c of S.categories) {
+    const cn = norm(c.name);
+    if (!cn) continue;
+    let sc = 0;
+    if (t.includes(cn)) sc = 0.95;
+    else {
+      const ctoks = cn.split(/[^a-z0-9]+/).filter(w => w.length > 2);
+      let hits = 0;
+      for (const w of toks) {
+        if (ctoks.some(cw => cw.startsWith(w) || w.startsWith(cw))) hits++;
+      }
+      if (ctoks.length) sc = Math.min(0.85, (hits / ctoks.length) * 0.85);
+    }
+    if (sc > bestScore) { bestScore = sc; best = c; }
+  }
+  return bestScore >= 0.45 ? best : null;
+}
+
+function refreshImportSuggestion() {
+  const box = $("importSugg");
+  const f = $("impFile");
+  if (!f.files.length) { box.hidden = true; return; }
+  const title = f.files[0].name.replace(/\.[^.]+$/, "");
+  const sug = suggestCategory(title);
+  box.innerHTML = "";
+  if (!S.categories.length) {
+    box.hidden = false;
+    box.textContent = "Astuce : créez des catégories pour ranger automatiquement vos prochains imports.";
+    return;
+  }
+  const lab = document.createElement("span");
+  const sel = document.createElement("select");
+  sel.id = "impCatSel";
+  sel.setAttribute("aria-label", "Catégorie de rangement après import");
+  sel.innerHTML = '<option value="">— aucune —</option>' +
+    S.categories.map(c => '<option value="' + c.id + '"' +
+      (sug && sug.id === c.id ? " selected" : "") + ">" + esc(c.name) + "</option>").join("");
+  if (sug) {
+    lab.textContent = "Suggestion : « " + sug.name + " »";
+    box.append(lab, sel);
+  } else {
+    lab.textContent = "Ranger après import :";
+    box.append(lab, sel);
+  }
+  box.hidden = false;
+}
+
+async function importSource() {
+  const subject = $("impSubject").value.trim();
+  const fileInput = $("impFile");
+  if (!subject) { toast("Indiquez le domaine de destination."); return; }
+  if (!fileInput.files.length) { toast("Choisissez un fichier."); return; }
+  const file = fileInput.files[0];
+  const title = file.name.replace(/\.[^.]+$/, "") || file.name;
+  const fmt = (file.name.split(".").pop() || "?").toLowerCase();
+  const fd = new FormData();
+  fd.append("subject", subject);
+  fd.append("file", file);
+
+  const btn = $("impBtn");
+  btn.disabled = true;
+  $("importProgress").hidden = false;
+  setStatus("envoi du document…");
+  try {
+    const r = await sf("/api/tutor/import", { method: "POST", body: fd });
+    if (!r.ok) {
+      let detail = "HTTP " + r.status;
+      try { const j = await r.json(); if (j && j.detail) detail = String(j.detail); } catch (_) {}
+      throw new Error(detail);
+    }
+    const rep = await r.json().catch(() => ({}));
+
+    // Rangement suggéré / choisi (membership, jamais de ré-indexation).
+    const catSel = $("impCatSel");
+    if (rep.book_id != null && catSel && catSel.value) {
+      try {
+        await sf("/api/tutor/books/" + encodeURIComponent(rep.book_id) + "/categories", {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ category_id: parseInt(catSel.value, 10) }),
+        });
+        const c = S.categories.find(x => String(x.id) === String(catSel.value));
+        toast("Rangé dans « " + (c ? c.name : "catégorie") + " ».");
+      } catch (e) { /* rangement non bloquant */ }
+    }
+
+    // Bascule vers le domaine cible si l'import en crée/rejoint un autre.
+    const wanted = subject.toLowerCase();
+    const cur = activeSubject();
+    if (!cur || cur.name.toLowerCase() !== wanted) {
+      await loadSubjects();
+      const target = S.subjects.find(s => s.name.toLowerCase() === wanted);
+      if (target && target.id !== S.activeId) {
+        $("spaceSelect").value = target.id;
+        onSpaceChange();
+      }
+    }
+
+    await loadBooksStatuses();
+    if (rep.book_id != null && !S.books.some(b => b.id === rep.book_id)) {
+      S.books.unshift({
+        id: rep.book_id, title, format: fmt,
+        status: rep.status || "indexing", chunks_total: 0,
+      });
+    }
+    S.libLoaded = true;
+    if (activeSubject()) S.domainBooks[activeSubject().id] = S.books;
+    renderLibrary();
+    ensureIndexPolling();
+    toggleImportPanel(false);
+    fileInput.value = "";
+    refreshImportSuggestion();
+    toast("« " + title + " » ajouté — indexation lancée.");
+  } catch (e) {
+    toast("Import impossible : " + (e.message || e));
+    postLog("import refusé : " + (e.message || e));
+    setStatus("prêt");
+  } finally {
+    btn.disabled = false;
+    $("importProgress").hidden = true;
+  }
+}
+
+/* ---- Suivi d'indexation temps réel (T017) : ~1,5 s tant que nécessaire --- */
+let _idxTimer = null;
+let _idxInFlight = false;
+let _anyIndexing = false;
+const _errToasted = new Set();
+
+function ensureIndexPolling() {
+  const anyKnown = S.books.some(b => docStatus(b) === "indexing") ||
+    Object.values(S.domainBooks).some(list => (list || []).some(b => docStatus(b) === "indexing"));
+  if (anyKnown && !_idxTimer && !_idxInFlight) pollIndexStatus();
+}
+
+async function pollIndexStatus() {
+  clearTimeout(_idxTimer);
+  _idxTimer = null;
+  if (_idxInFlight) return;
+  _idxInFlight = true;
+  let anyNow = false;
+  try {
+    const data = await jf("/api/tutor/index-status");
+    const byId = {};
+    for (const row of (data.books || [])) byId[row.id] = row;
+    let changed = false;
+    const touch = (b) => {
+      const row = byId[b.id];
+      if (!row) return;
+      const mapped = row.status === "ready" ? "done" : row.status === "error" ? "failed" : row.status;
+      if (mapped && mapped !== b.status) {
+        b.status = mapped;
+        changed = true;
+        if (mapped === "failed" && !_errToasted.has(b.id)) {
+          _errToasted.add(b.id);
+          toast("Indexation impossible pour « " + b.title + " » — vérifiez le fichier puis réessayez.");
+          postLog("indexation échouée : " + b.title);
+        } else if (mapped === "done") {
+          toast("« " + b.title + " » est prêt.");
+        }
+      }
+    };
+    for (const b of S.books) touch(b);
+    for (const list of Object.values(S.domainBooks)) for (const b of (list || [])) touch(b);
+    anyNow = S.books.some(b => docStatus(b) === "indexing") ||
+      Object.values(S.domainBooks).some(l => (l || []).some(b => docStatus(b) === "indexing"));
+    if (changed) {
+      if (S.route === "bibliotheque") renderLibrary();
+    }
+  } catch (e) { /* réseau ou 5xx : on retentera ; déjà tracé côté client */ }
+  _idxInFlight = false;
+  if (anyNow) {
+    if (!_anyIndexing) setStatus("indexation en cours…");
+    _idxTimer = setTimeout(pollIndexStatus, 1500);
+  } else if (_anyIndexing) {
+    setStatus("prêt");
+  }
+  _anyIndexing = anyNow;
+}
+
+/* ============================ classification automatique (conservée) ===== */
 async function autoClassify() {
   const btn = $("autoClassifyBtn");
   if (btn.disabled) return;
@@ -2801,7 +2038,6 @@ async function autoClassify() {
       toast(data.message ? String(data.message) : "Rien à classer.");
     } else {
       applyAssignments(assignments);
-      S.groupByCat = true;   // le rendu passe au regroupement par catégorie
       const created = (data.categories_created || []).length;
       const failed = data.failed_batches | 0;
       let msg = assignments.length + " livre" + (assignments.length > 1 ? "s" : "") +
@@ -2813,9 +2049,9 @@ async function autoClassify() {
       }
       toast(msg);
     }
-    await Promise.all([loadCategories(), loadBooks()]);
-    renderBooks();
-    updateScopeNote();
+    await Promise.all([loadCategories(), loadBooksStatuses()]);
+    S.catByBook = {};   // memberships à résoudre à nouveau au dépliage
+    renderLibrary();
     setStatus("prêt");
   } catch (e) { /* déjà journalisé + toasté */ setStatus("prêt"); }
   finally {
@@ -2831,216 +2067,8 @@ function applyAssignments(assignments) {
     if (!arr.includes(a.category)) arr.push(a.category);
   }
 }
+/*@@PART3B@@*/
 
-/* --- Éditeur manuel : appartenance multiple via PUT/DELETE membership --- */
-let catEditBook = null;
-let catEditWas = new Set();
-
-function memberIds(members) {
-  return new Set((members || [])
-    .map(m => (m && typeof m === "object") ? m.id : m)
-    .filter(v => v != null)
-    .map(Number));
-}
-
-async function openCatEditor(bookId) {
-  const b = S.books.find(x => x.id === bookId);
-  if (!b) return;
-  catEditBook = b;
-  $("catBookTitle").textContent = b.title;
-  $("catEditList").innerHTML = '<span class="hint">chargement des catégories…</span>';
-  $("catNewName").value = "";
-  $("catModal").hidden = false;
-  $("catCloseBtn").focus();
-  if (!S.categories.length) await loadCategories();
-  let members = [];
-  try {
-    const d = await jf("/api/tutor/books/" + encodeURIComponent(bookId) + "/categories");
-    members = d.categories || [];
-  } catch (e) { /* dégradation : liste vide, l'ajustement reste possible */ }
-  catEditWas = memberIds(members);
-  renderCatEditList(null);
-}
-
-function renderCatEditList(pendingCheckedId) {
-  const list = $("catEditList");
-  list.innerHTML = "";
-  if (!S.categories.length) {
-    list.innerHTML = '<span class="hint">Aucune catégorie existante — créez la première ci-dessous.</span>';
-    return;
-  }
-  for (const c of S.categories) {
-    const lab = document.createElement("label");
-    const checked = pendingCheckedId === c.id || catEditWas.has(c.id);
-    lab.innerHTML = '<input type="checkbox" value="' + c.id + '"' + (checked ? " checked" : "") + "> " +
-      esc(c.name) +
-      ' <span style="color:var(--ink-dim)">(' + (c.book_count != null ? c.book_count : "") + ")</span>";
-    list.appendChild(lab);
-  }
-}
-
-async function createCategoryInline() {
-  const name = $("catNewName").value.trim();
-  if (!name) { toast("Indiquez un nom de catégorie."); return; }
-  try {
-    const r = await sf("/api/tutor/categories", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
-    });
-    if (r.status === 409) { toast("Cette catégorie existe déjà."); return; }
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    const data = await r.json();
-    const cat = data.category || {};
-    if (cat.id != null) {
-      S.categories.push({ id: cat.id, name: cat.name || name, book_count: 0 });
-      renderCatEditList(cat.id);
-      $("catNewName").value = "";
-      toast("Catégorie « " + (cat.name || name) + " » créée — cochez-la puis enregistrez.");
-    }
-  } catch (e) { /* journalisé */ }
-}
-
-async function saveCatEdits() {
-  if (!catEditBook) return;
-  const bid = catEditBook.id;
-  const boxes = [...$("catEditList").querySelectorAll('input[type="checkbox"]')];
-  const now = new Set(boxes.filter(b => b.checked).map(b => Number(b.value)));
-  let applied = 0;
-  for (const c of S.categories) {
-    const was = catEditWas.has(c.id);
-    try {
-      if (now.has(c.id) && !was) {
-        await sf("/api/tutor/books/" + encodeURIComponent(bid) + "/categories", {
-          method: "PUT", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ category_id: c.id }),
-        });
-        applied++;
-      } else if (!now.has(c.id) && was) {
-        await sf("/api/tutor/books/" + encodeURIComponent(bid) + "/categories/" + c.id, { method: "DELETE" });
-        applied++;
-      }
-    } catch (e) { /* un échec n'empêche pas les autres changements */ }
-  }
-  // Appartenance réelle -> regroupement par catégories à jour.
-  try {
-    const d = await jf("/api/tutor/books/" + encodeURIComponent(bid) + "/categories");
-    const names = (d.categories || [])
-      .map(m => (m && typeof m === "object") ? m.name : m).filter(Boolean);
-    if (names.length) { S.catByBook[bid] = names; S.groupByCat = true; }
-    else delete S.catByBook[bid];
-  } catch (e) { /* best-effort */ }
-  closeCatModal();
-  await loadCategories();
-  renderBooks();
-  updateScopeNote();
-  toast(applied
-    ? "Catégories mises à jour (" + applied + " changement" + (applied > 1 ? "s" : "") + ")."
-    : "Aucun changement.");
-  catEditBook = null;
-}
-
-function closeCatModal() {
-  $("catModal").hidden = true;
-  catEditBook = null;
-}
-
-/* =================================================================== câblage */
-function wireAll() {
-  // En-tête
-  $("modelEmbedding").addEventListener("change", (e) => putModel("embedding", e.target.value));
-  $("modelLLM").addEventListener("change", (e) => putModel("llm", e.target.value));
-
-  // Colonne gauche
-  $("spaceSelect").addEventListener("change", onSpaceChange);
-  $("addSourceBtn").addEventListener("click", () => toggleImportPanel());
-  $("impBtn").addEventListener("click", importSource);
-  $("srcSearch").addEventListener("input", renderBooks);
-  $("openSearchBtn").addEventListener("click", openSearchModal);
-  $("searchCloseBtn").addEventListener("click", closeSearchModal);
-  $("searchGoBtn").addEventListener("click", runSemanticSearch);
-  $("searchModal").addEventListener("click", (e) => { if (e.target === $("searchModal")) closeSearchModal(); });
-  $("searchQuery").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); runSemanticSearch(); } });
-
-  // Colonne centre
-  $("notionSelect").addEventListener("change", updateMastery);
-  $("resumeBtn").addEventListener("click", resumeSession);
-  $("composerForm").addEventListener("submit", (e) => { e.preventDefault(); submitQuestion(); });
-  $("qInput").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitQuestion(); }
-  });
-  $("cancelBtn").addEventListener("click", cancelGeneration);
-  $("micBtn").addEventListener("click", recordTutor);
-  $("voiceSendBtn").addEventListener("click", sendVoiceTranscript);
-  $("voiceCancelBtn").addEventListener("click", () => { $("voiceRow").hidden = true; });
-
-  // Colonne gauche — classification automatique
-  $("autoClassifyBtn").addEventListener("click", autoClassify);
-
-  // Modale catégories (même canevas que la modale de recherche)
-  $("catCloseBtn").addEventListener("click", closeCatModal);
-  $("catSaveBtn").addEventListener("click", saveCatEdits);
-  $("catCreateBtn").addEventListener("click", createCategoryInline);
-  $("catNewName").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); createCategoryInline(); }
-  });
-  $("catModal").addEventListener("click", (e) => { if (e.target === $("catModal")) closeCatModal(); });
-
-  // Studio — Entraîner
-  $("exGenBtn").addEventListener("click", genExercise);
-  $("exHintBtn").addEventListener("click", revealExerciseHint);
-  $("exSubmitBtn").addEventListener("click", submitExerciseAnswer);
-  $("exSolutionBtn").addEventListener("click", requestSolution);
-  $("exAddConceptBtn").addEventListener("click", addConcept);
-  $("exNewConcept").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addConcept(); } });
-  $("quizStartBtn").addEventListener("click", startQuiz);
-  $("examStartBtn").addEventListener("click", startExam);
-
-  // Studio — Réviser
-  $("prepareBtn").addEventListener("click", prepareCourse);
-  $("dueLoadBtn").addEventListener("click", loadDueReviews);
-  $("ttsGenBtn").addEventListener("click", generateAudioSummary);
-  $("ttsPlayBtn").addEventListener("click", ttsSpeak);
-  $("ttsPauseBtn").addEventListener("click", ttsPauseResume);
-  $("ttsStopBtn").addEventListener("click", ttsStop);
-  $("ttsRate").addEventListener("input", () => {
-    $("ttsRateVal").textContent = ttsRateValue().toFixed(2) + "×";
-  });
-  if (ttsSupported()) {
-    pickVoice();
-    if (typeof speechSynthesis.addEventListener === "function") {
-      speechSynthesis.addEventListener("voiceschanged", pickVoice);
-    }
-    speechSynthesis.onvoiceschanged = pickVoice;   // Safari legacy
-  } else {
-    $("ttsVoiceInfo").textContent = "Synthèse vocale indisponible dans ce navigateur.";
-    for (const id of ["ttsPlayBtn", "ttsPauseBtn", "ttsStopBtn"]) $(id).disabled = true;
-  }
-
-  // Studio — Suivi
-  $("followRefreshBtn").addEventListener("click", () => { loadSessions(); loadConceptsAndProgress(); });
-
-  // Studio — Explorer
-  $("expLocateBtn").addEventListener("click", locateNotion);
-  $("expRankBtn").addEventListener("click", rankBooks);
-  $("expCompareBtn").addEventListener("click", compareNotion);
-  $("glossLoadBtn").addEventListener("click", loadGlossary);
-  $("mapLoadBtn").addEventListener("click", loadKnowledgeMap);
-  $("expNotion").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); locateNotion(); } });
-
-  // Échap ferme toute modale visible.
-  document.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape") return;
-    if (!$("searchModal").hidden) closeSearchModal();
-    if (!$("catModal").hidden) closeCatModal();
-  });
-}
-
-wireAll();
-initLayout();
-initTabs();
-loadEngineBadge();
-loadModels();
-loadSubjects();
 </script>
 </body>
 </html>

@@ -578,6 +578,10 @@ class TutoringSession:
     last_active_at: str
     status: str = "active"  # active | closed
     transcript_path: str | None = None
+    # Conversation nommée (005-platform-ui-library) : titre éditable +
+    # horodatage de dernière activité mis à jour à chaque ask.
+    title: str = ""
+    updated_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -587,6 +591,8 @@ class TutoringSession:
             "last_active_at": self.last_active_at,
             "status": self.status,
             "transcript_path": self.transcript_path,
+            "title": self.title,
+            "updated_at": self.updated_at,
         }
 
     @classmethod
@@ -598,6 +604,8 @@ class TutoringSession:
             last_active_at=str(raw.get("last_active_at", "")),
             status=str(raw.get("status", "active")),
             transcript_path=raw.get("transcript_path"),
+            title=str(raw.get("title", "") or ""),
+            updated_at=raw.get("updated_at"),
         )
 
 

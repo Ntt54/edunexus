@@ -47,6 +47,7 @@ from ..tutor.providers.gguf_embedding import (
     get_default_manager,
 )
 from ..tutor.providers.hybrid_parser import HybridDocumentParser
+from ..tutor.conversations import ConversationService
 from ..tutor.service import TutorService
 from ..tutor.store import LibraryStore
 from ..tutor.voice import VoiceError, WhisperTranscriber
@@ -381,6 +382,19 @@ def _conversation_to_dict(conv: Conversation) -> dict[str, Any]:
     }
 
 
+class ConversationCreate(BaseModel):
+    title: str = ""
+    subject_id: str
+
+
+class ConversationRename(BaseModel):
+    title: str
+
+
+class ConversationSourcesPayload(BaseModel):
+    book_ids: list[str] = []
+
+
 def create_app(config_dir: Path | None = None) -> FastAPI:
     """Build the web GUI application."""
     app = FastAPI(title="EduNexus")
@@ -426,6 +440,8 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
     )
     # Mastery / gap / path tracker (US4 practice surface).
     tutor_progress = ProgressTracker(tutor_store)
+    # Conversations nommées (005-platform-ui-library).
+    conversations = ConversationService(tutor_store)
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
@@ -1304,6 +1320,82 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
     # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
+    # REST: conversations nommées (005-platform-ui-library)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/tutor/conversations")
+    async def conversations_list() -> dict[str, Any]:
+        convs = []
+        for c in conversations.list():
+            convs.append({
+                "id": c["id"],
+                "title": c.get("title") or "",
+                "subject_id": c.get("subject_id"),
+                "subject_name": c.get("subject_name"),
+                "updated_at": c.get("updated_at"),
+                "started_at": c.get("started_at"),
+                "message_count": c.get("message_count", 0),
+                "active_sources": len(
+                    tutor_store.get_conversation_source_ids(c["id"])
+                ),
+            })
+        return {"conversations": convs}
+
+    @app.post("/api/tutor/conversations")
+    async def conversations_create(payload: ConversationCreate) -> dict[str, Any]:
+        try:
+            sess = conversations.create(payload.subject_id, title=payload.title)
+        except Exception as exc:  # espace inconnu
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"conversation": {
+            "id": sess.id,
+            "title": sess.title or payload.title,
+            "subject_id": sess.subject_id,
+        }}
+
+    @app.patch("/api/tutor/conversations/{conversation_id}")
+    async def conversations_rename(
+        conversation_id: str, payload: ConversationRename
+    ) -> dict[str, Any]:
+        try:
+            conversations.rename(conversation_id, payload.title)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404, detail="Conversation inconnue"
+            ) from exc
+        sess = tutor_store.get_tutoring_session(conversation_id)
+        return {"conversation": {
+            "id": conversation_id,
+            "title": payload.title,
+            "subject_id": sess.subject_id if sess else None,
+        }}
+
+    @app.delete("/api/tutor/conversations/{conversation_id}")
+    async def conversations_delete(conversation_id: str) -> dict[str, Any]:
+        return {"deleted": conversations.delete(conversation_id)}
+
+    @app.get("/api/tutor/conversations/{conversation_id}/sources")
+    async def conversation_sources_list(conversation_id: str) -> dict[str, Any]:
+        ids = conversations.sources(conversation_id)
+        books = []
+        for bid in ids:
+            b = tutor_store.get_book(bid)
+            books.append({"id": bid, "title": (b.title if b else bid)})
+        return {"book_ids": ids, "books": books}
+
+    @app.put("/api/tutor/conversations/{conversation_id}/sources")
+    async def conversation_sources_set(
+        conversation_id: str, payload: ConversationSourcesPayload
+    ) -> dict[str, Any]:
+        try:
+            n = conversations.set_sources(conversation_id, payload.book_ids)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404, detail="Conversation inconnue"
+            ) from exc
+        return {"active": n}
+
+    # ------------------------------------------------------------------
     # WebSocket: tutor grounded Q&A (004-local-ai-tutor, US2)
     # ------------------------------------------------------------------
 
@@ -1397,6 +1489,12 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                     session_id=data.get("session_id"),
                     cancel=run_cancel,
                     mode=data.get("mode", "ask"),
+                    conversation_id=data.get("conversation_id"),
+                    book_ids=(
+                        [str(b) for b in data["book_ids"]]
+                        if isinstance(data.get("book_ids"), list)
+                        else None
+                    ),
                     term=data.get("term"),
                 ):
                     ftype = frame.get("type")
