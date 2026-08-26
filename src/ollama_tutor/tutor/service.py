@@ -52,7 +52,7 @@ from .prompts import (
     build_user_prompt,
     resolve_overrides,
 )
-from .providers.openai_compat import OpenAICompatClient
+from .providers.openai_compat import OpenAICompatProvider
 from .retrieval import Retriever
 from .review import ReviewScheduler
 from .store import LibraryStore
@@ -120,7 +120,7 @@ class TutorService:
             getattr(config, "llm_provider", "ollama") == "openai"
             and getattr(config, "llm_base_url", "")
         ):
-            self._llm_client: Any = OpenAICompatClient(
+            self._llm_client: Any = OpenAICompatProvider(
                 base_url=config.llm_base_url,
                 api_key=getattr(config, "llm_api_key", ""),
             )
@@ -1480,6 +1480,13 @@ class TutorService:
             asyncio.run(self.client.close())
         except Exception:
             pass
+        # Also close the LLM provider client when it differs from the
+        # main client (e.g. OpenAICompatProvider).
+        if self._llm_client is not self.client and hasattr(self._llm_client, "close"):
+            try:
+                asyncio.run(self._llm_client.close())
+            except Exception:
+                pass
 
     async def _embed_with_provider(self, chunks: list[str]) -> list[list[float]]:
         """Embed via the configured provider inside the SAME sha256-hash cache.

@@ -11,18 +11,18 @@ llama.cpp server (``--openai`` flag), and any service exposing the
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 import httpx
 
-from ...models import InferenceStats, Message
+from ...client import StreamEvent
+from ...models import InferenceStats
 
 
-class OpenAICompatError(Exception):
+class OpenAIClientError(Exception):
     """Raised on HTTP or protocol errors from the OpenAI-compatible API."""
 
 
@@ -32,10 +32,11 @@ class _StreamState:
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
-    has_reasoning: bool = False
 
 
-class OpenAICompatClient:
+
+
+class OpenAICompatProvider:
     """Duck-typed client with the same ``chat_stream`` / ``embed`` signature
     as ``OllamaClient`` so ``TutorService`` can swap transparently.
 
@@ -45,22 +46,31 @@ class OpenAICompatClient:
         API root, e.g. ``https://api.openai.com/v1``.
     api_key:
         Bearer token.  Empty string = no auth header (local servers).
+    transport:
+        Optional ``httpx.AsyncBaseTransport`` for testing (mock).
     """
 
-    def __init__(self, base_url: str, api_key: str = "") -> None:
+    def __init__(
+        self,
+        base_url: str = "",
+        api_key: str = "",
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
+        self._transport = transport
         self._client: httpx.AsyncClient | None = None
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            headers: dict[str, str] = {"Content-Type": "application/json"}
+            headers: dict[str, str] = {}
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
                 headers=headers,
                 timeout=None,  # no timeout for streaming
+                transport=self._transport,
             )
         return self._client
 
@@ -75,26 +85,31 @@ class OpenAICompatClient:
 
     async def chat_stream(
         self,
-        messages: list[Message],
+        messages: list[dict[str, Any]],
         model: str,
         *,
         think: bool = False,
         options: Any = None,
         format: dict[str, Any] | None = None,
         tools: list[dict[str, Any]] | None = None,
-    ) -> AsyncIterator[Any]:
-        """Stream a chat completion, yielding ``StreamEvent``-like objects.
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream a chat completion, yielding ``StreamEvent`` objects.
 
-        The yielded objects duck-type ``client.StreamEvent`` with attributes
-        ``kind`` (``"thinking"`` | ``"content"`` | ``"done"``), ``text``
-        and ``stats``.
+        Accepts both ``list[Message]`` and ``list[dict]`` for messages
+        (duck-typed to match OllamaClient).
         """
-        from ...client import StreamEvent
-
         client = self._get_client()
 
         # Build OpenAI-compatible request body.
-        api_messages = [msg.to_dict() for msg in messages]
+        api_messages: list[dict[str, Any]] = []
+        for msg in messages:
+            if hasattr(msg, "to_dict"):
+                api_messages.append(msg.to_dict())
+            elif isinstance(msg, dict):
+                api_messages.append(msg)
+            else:
+                api_messages.append({"role": "user", "content": str(msg)})
+
         payload: dict[str, Any] = {
             "model": model,
             "messages": api_messages,
@@ -112,17 +127,13 @@ class OpenAICompatClient:
             payload["temperature"] = opts_dict["temperature"]
         if "top_p" in opts_dict and opts_dict["top_p"] is not None:
             payload["top_p"] = opts_dict["top_p"]
-        if "top_k" in opts_dict and opts_dict["top_k"] is not None:
-            payload["top_k"] = opts_dict["top_k"]
+        # top_k is NOT supported by OpenAI — skip it.
         if "num_predict" in opts_dict and opts_dict["num_predict"] is not None:
             payload["max_tokens"] = opts_dict["num_predict"]
         if "repeat_penalty" in opts_dict and opts_dict["repeat_penalty"] is not None:
             payload["frequency_penalty"] = opts_dict["repeat_penalty"]
         if "seed" in opts_dict and opts_dict["seed"] is not None:
             payload["seed"] = opts_dict["seed"]
-
-        if format:
-            payload["response_format"] = format
 
         t_start = time.monotonic()
         state = _StreamState()
@@ -131,7 +142,7 @@ class OpenAICompatClient:
             async with client.stream("POST", "/chat/completions", json=payload) as resp:
                 if resp.status_code != 200:
                     body = await resp.aread()
-                    raise OpenAICompatError(
+                    raise OpenAIClientError(
                         f"OpenAI API error {resp.status_code}: "
                         f"{body.decode('utf-8', 'replace')[:300]}"
                     )
@@ -147,18 +158,14 @@ class OpenAICompatClient:
                     except json.JSONDecodeError:
                         continue
 
-                    delta = (
-                        chunk.get("choices", [{}])[0].get("delta", {})
-                        if chunk.get("choices")
-                        else {}
-                    )
+                    choices = chunk.get("choices", [])
+                    delta = choices[0].get("delta", {}) if choices else {}
 
                     # Some providers (DeepSeek, QwQ) emit reasoning_content.
                     reasoning = delta.get("reasoning_content") or delta.get(
                         "reasoning"
                     )
                     if reasoning:
-                        state.has_reasoning = True
                         yield StreamEvent(kind="thinking", text=reasoning)
 
                     content = delta.get("content")
@@ -177,13 +184,13 @@ class OpenAICompatClient:
                         )
 
         except httpx.ConnectError as e:
-            raise OpenAICompatError(f"Cannot connect to {self.base_url}: {e}")
+            raise OpenAIClientError(f"Cannot connect to {self.base_url}: {e}")
         except httpx.TimeoutException as e:
-            raise OpenAICompatError(f"Request timed out: {e}")
-        except OpenAICompatError:
+            raise OpenAIClientError(f"Request timed out: {e}")
+        except OpenAIClientError:
             raise
         except Exception as e:
-            raise OpenAICompatError(f"Unexpected error: {e}")
+            raise OpenAIClientError(f"Unexpected error: {e}")
 
         # Build InferenceStats from accumulated usage.
         elapsed = time.monotonic() - t_start
@@ -211,13 +218,13 @@ class OpenAICompatClient:
         try:
             resp = await client.post("/embeddings", json=payload)
         except httpx.ConnectError as e:
-            raise OpenAICompatError(f"Cannot connect to {self.base_url}: {e}")
+            raise OpenAIClientError(f"Cannot connect to {self.base_url}: {e}")
         except httpx.TimeoutException as e:
-            raise OpenAICompatError(f"Request timed out: {e}")
+            raise OpenAIClientError(f"Request timed out: {e}")
         except Exception as e:
-            raise OpenAICompatError(f"Unexpected error: {e}")
+            raise OpenAIClientError(f"Unexpected error: {e}")
         if resp.status_code != 200:
-            raise OpenAICompatError(
+            raise OpenAIClientError(
                 f"Embedding API error {resp.status_code}: {resp.text[:200]}"
             )
         data = resp.json()
