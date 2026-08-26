@@ -24,6 +24,14 @@ optionnels ; titre défaut « Sans titre »).
 Réponse 200 : `{"conversation": {"id","title","subject_id","created_at"}}`.
 Effet : crée la session sous-jacente ; n'affecte aucune autre conversation.
 
+### GET /api/tutor/conversations/{id}
+Réponse 200 :
+```json
+{ "conversation": {"id","title","subject_id"},
+  "messages": [{"role": "user|assistant", "text": "…"}] }
+```
+404 si inconnue. Alimente le rejeu d'historique à la réouverture (FR-006).
+
 ### PATCH /api/tutor/conversations/{id}
 Requête : `{"title": "Nouveau nom"}` → Réponse : `{"conversation": {...}}`.
 404 si inconnue.

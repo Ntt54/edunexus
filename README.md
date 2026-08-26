@@ -8,6 +8,9 @@ optimisée pour les machines modestes (CPU).
 
 ## Fonctionnalités
 
+- **Navigation multi-espaces** — Accueil (tableau de bord), Conversations
+  nommées persistantes, Bibliothèque, Apprentissage, Entraîner,
+  Quiz/Examens, Progression, Explorer (+ Parcours « à venir »).
 - **Bibliothèque de sources** — import PDF avec extraction hybride :
   couche texte directe, ou OCR **Granite-Docling** pour les pages scannées
   (via llama.cpp). Indexation en arrière-plan avec statut par livre.

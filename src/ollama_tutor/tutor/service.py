@@ -139,6 +139,64 @@ class TutorService:
         conversation_id: str | None = None,
         book_ids: list[str] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
+        """Point d'entrée public : persiste l'historique puis délègue.
+
+        Historique de conversation (005-platform-ui-library, FR-006/SC-003) :
+        la question utilisateur est ajoutée au transcript avant le run et la
+        réponse accumulée depuis les frames ``delta`` y est ajoutée après —
+        persistance inter-restarts. Hors conversation : délégation pure.
+        """
+        if conversation_id:
+            try:
+                self.store.append_conversation_message(
+                    conversation_id, "user", question
+                )
+            except Exception:  # jamais bloquant pour le run
+                pass
+        text_parts: list[str] = []
+        async for frame in self._ask_iter(
+            subject_name,
+            question,
+            model=model,
+            think=think,
+            socratic=socratic,
+            level=level,
+            session_id=session_id,
+            cancel=cancel,
+            mode=mode,
+            term=term,
+            conversation_id=conversation_id,
+            book_ids=book_ids,
+        ):
+            if frame.get("type") == "delta":
+                text_parts.append(frame.get("text", ""))
+            yield frame
+        if conversation_id:
+            answer = "".join(text_parts).strip()
+            if answer:
+                try:
+                    self.store.append_conversation_message(
+                        conversation_id, "assistant", answer
+                    )
+                except Exception:
+                    pass
+
+    async def _ask_iter(
+        self,
+        subject_name: str,
+        question: str,
+        *,
+        model: str | None = None,
+        think: bool | None = None,
+        socratic: bool | None = None,
+        level: str | None = None,
+        session_id: str | None = None,
+        cancel: asyncio.Event | None = None,
+        mode: str = "ask",
+        term: str | None = None,
+        conversation_id: str | None = None,
+        book_ids: list[str] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
         """Stream a grounded tutoring answer as dict frames.
 
         Frame order (contracts/tutor-ws-protocol.md): ``sources`` first, then

@@ -121,3 +121,32 @@ def test_sources_roundtrip(client, tmp_path):
     got = client.get(f"/api/tutor/conversations/{conv['id']}/sources").json()
     assert got["book_ids"] == [book_id]
     assert got["books"][0]["title"] == "livre_src"
+
+
+def test_history_roundtrip(client, tmp_path):
+    """FR-006/SC-003 : l'historique persiste et est servi par GET /{id}."""
+    book_id = _import_book(client, tmp_path, "Réseaux", "hist.txt")
+    sid = _subject_id(client)
+    conv = client.post("/api/tutor/conversations",
+                       json={"title": "Histo", "subject_id": sid}).json()["conversation"]
+
+    # Initialement vide
+    r = client.get(f"/api/tutor/conversations/{conv['id']}")
+    assert r.status_code == 200
+    assert r.json()["messages"] == []
+    assert r.json()["conversation"]["title"] == "Histo"
+
+    # Persistance via la couche store (même config_dir que create_app)
+    from src.ollama_tutor.tutor.store import LibraryStore
+    store = LibraryStore(tmp_path / "config")
+    store.append_conversation_message(conv["id"], "user", "Question ?")
+    store.append_conversation_message(conv["id"], "assistant", "Réponse.")
+
+    r = client.get(f"/api/tutor/conversations/{conv['id']}")
+    msgs = r.json()["messages"]
+    assert [m["role"] for m in msgs] == ["user", "assistant"]
+    assert msgs[0]["text"] == "Question ?"
+
+    # 404 sur inconnue
+    assert client.get(
+        "/api/tutor/conversations/inconnu").status_code == 404

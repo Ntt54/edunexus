@@ -1116,7 +1116,11 @@ const S = {
   libLoaded: false,
   domainBooks: {},         // subject_id -> [livres] (chargés à l'expansion)
   domainOpen: {},          // subject_id -> bool
+  hydrated: {},            // subject_id -> bool (memberships résolues)
   statusById: {},          // book_id -> statut temps réel (index-status)
+
+  /* Continuité « séance rapide » hors conversation (comportement hérité). */
+  sessionIds: {},
 
   /* Popover sources actives : sélection en cours (Set). */
   popoverSel: new Set(),
@@ -1258,6 +1262,9 @@ async function loadSubjects() {
   sel.value = initial;
   if (!S.activeId) S.activeId = initial;
   onSpaceChange();
+  // Si l'utilisateur atterrit sur l'Accueil pendant le chargement initial,
+  // les cartes notion/révisions ont besoin des données de l'espace actif.
+  if (S.route === "accueil") loadDashboard();
 }
 
 function activeSubject() {
@@ -1457,17 +1464,20 @@ async function loadSpaceBooks() {
 }
 
 async function loadDomainBooks(sid) {
-  if (S.domainBooks[sid]) return S.domainBooks[sid];
-  const subj = S.subjects.find(s => s.id === sid);
-  if (!subj) return [];
-  let books = [];
-  try {
-    const data = await jf("/api/tutor/books?subject=" + encodeURIComponent(subj.name));
-    books = data.books || [];
-  } catch (e) { books = []; }
-  S.domainBooks[sid] = books;
-  await hydrateMemberships(books);
-  return books;
+  if (S.domainBooks[sid] && S.hydrated[sid]) return S.domainBooks[sid];
+  if (!S.domainBooks[sid]) {
+    const subj = S.subjects.find(s => s.id === sid);
+    if (!subj) return [];
+    try {
+      const data = await jf("/api/tutor/books?subject=" + encodeURIComponent(subj.name));
+      S.domainBooks[sid] = data.books || [];
+    } catch (e) {
+      S.domainBooks[sid] = [];
+    }
+  }
+  await hydrateMemberships(S.domainBooks[sid]);
+  S.hydrated[sid] = true;
+  return S.domainBooks[sid];
 }
 
 /** Appartenance catégorie par livre — résolue une seule fois, mise en cache. */
@@ -1563,11 +1573,11 @@ function renderTree(box, mode) {
     dlabel.addEventListener("click", toggleDomain);
 
     // Coche domaine : tout / rien parmi les documents chargés (dédupliqués).
+    // partiel -> coche-tout ; tout coché -> décoche-tout ; vide -> coche-tout.
     dcheck.addEventListener("change", async () => {
       if (!loaded) await loadDomainBooks(subj.id);
       const ids = visibleBookIds(subj.id);
-      const target = !dcheck.checked; // si partiel -> coche-tout ; sinon bascule
-      const wantChecked = dcheck.checked || (triState(ids, sel) !== "all" && target);
+      const wantChecked = dcheck.checked || triState(ids, sel) === "some";
       for (const id of ids) {
         if (wantChecked) sel.add(id); else sel.delete(id);
       }
@@ -2067,7 +2077,1779 @@ function applyAssignments(assignments) {
     if (!arr.includes(a.category)) arr.push(a.category);
   }
 }
-/*@@PART3B@@*/
+/* ================== éditeur de catégories d'un document (déplacement) ===== */
+/* Déplacement FR-012 : décocher l'ancienne catégorie + cocher la nouvelle
+   via les endpoints membership existants (aucune ré-indexation). */
+let catEditBook = null;
+let catEditWas = new Set();
+
+function memberIds(members) {
+  return new Set((members || [])
+    .map(m => (m && typeof m === "object") ? m.id : m)
+    .filter(v => v != null)
+    .map(Number));
+}
+
+async function openCatEditor(bookId) {
+  const b = (S.books.find(x => x.id === bookId)) ||
+    Object.values(S.domainBooks).flatMap(l => l || []).find(x => x.id === bookId);
+  if (!b) return;
+  catEditBook = b;
+  $("catBookTitle").textContent = b.title;
+  $("catEditList").innerHTML = '<span class="hint">chargement des catégories…</span>';
+  $("catNewName").value = "";
+  $("catModal").hidden = false;
+  $("catCloseBtn").focus();
+  if (!S.categories.length) await loadCategories();
+  let members = [];
+  try {
+    const d = await jf("/api/tutor/books/" + encodeURIComponent(bookId) + "/categories");
+    members = d.categories || [];
+  } catch (e) { /* dégradation : liste vide, l'ajustement reste possible */ }
+  catEditWas = memberIds(members);
+  renderCatEditList(null);
+}
+
+function renderCatEditList(pendingCheckedId) {
+  const list = $("catEditList");
+  list.innerHTML = "";
+  if (!S.categories.length) {
+    list.innerHTML = '<span class="hint">Aucune catégorie existante — créez la première ci-dessous.</span>';
+    return;
+  }
+  for (const c of S.categories) {
+    const lab = document.createElement("label");
+    const checked = pendingCheckedId === c.id || catEditWas.has(c.id);
+    lab.innerHTML = '<input type="checkbox" value="' + c.id + '"' + (checked ? " checked" : "") + "> " +
+      esc(c.name) +
+      ' <span style="color:var(--ink-dim)">(' + (c.book_count != null ? c.book_count : "") + ")</span>";
+    list.appendChild(lab);
+  }
+}
+
+async function createCategoryInline() {
+  const name = $("catNewName").value.trim();
+  if (!name) { toast("Indiquez un nom de catégorie."); return; }
+  try {
+    const r = await sf("/api/tutor/categories", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (r.status === 409) { toast("Cette catégorie existe déjà."); return; }
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const data = await r.json();
+    const cat = data.category || {};
+    if (cat.id != null) {
+      S.categories.push({ id: cat.id, name: cat.name || name, book_count: 0 });
+      renderCatEditList(cat.id);
+      $("catNewName").value = "";
+      toast("Catégorie « " + (cat.name || name) + " » créée — cochez-la puis enregistrez.");
+    }
+  } catch (e) { /* journalisé */ }
+}
+
+async function saveCatEdits() {
+  if (!catEditBook) return;
+  const bid = catEditBook.id;
+  const boxes = [...$("catEditList").querySelectorAll('input[type="checkbox"]')];
+  const now = new Set(boxes.filter(b => b.checked).map(b => Number(b.value)));
+  let applied = 0;
+  for (const c of S.categories) {
+    const was = catEditWas.has(c.id);
+    try {
+      if (now.has(c.id) && !was) {
+        await sf("/api/tutor/books/" + encodeURIComponent(bid) + "/categories", {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ category_id: c.id }),
+        });
+        applied++;
+      } else if (!now.has(c.id) && was) {
+        await sf("/api/tutor/books/" + encodeURIComponent(bid) + "/categories/" + c.id, { method: "DELETE" });
+        applied++;
+      }
+    } catch (e) { /* un échec n'empêche pas les autres changements */ }
+  }
+  // Appartenance réelle -> arbre à jour.
+  try {
+    const d = await jf("/api/tutor/books/" + encodeURIComponent(bid) + "/categories");
+    S.catByBook[bid] = (d.categories || [])
+      .map(m => (m && typeof m === "object") ? m.name : m).filter(Boolean);
+  } catch (e) { /* best-effort */ }
+  closeCatModal();
+  await loadCategories();
+  renderLibrary();
+  toast(applied
+    ? "Rangement mis à jour (" + applied + " changement" + (applied > 1 ? "s" : "") + ")."
+    : "Aucun changement.");
+  catEditBook = null;
+}
+
+function closeCatModal() {
+  $("catModal").hidden = true;
+  catEditBook = null;
+}
+
+/* ==================== sources actives par conversation (US4 / T027) ====== */
+/* S.activeBookIds : null = périmètre par défaut (le serveur applique les
+   sources persistées de la conversation, sinon illimité) ; [] = custom vide
+   (mode sans contexte) ; [...] = périmètre explicite prioritaire. */
+
+function dominantCategoryName(ids) {
+  // Nom de catégorie commun si TOUS les documents partagent la même (ex. « Java · 4 documents »).
+  let common = null;
+  for (const id of ids) {
+    const cs = catsOf(id).filter(c => c !== "Non classé");
+    if (!cs.length) return null;
+    if (common === null) common = cs;
+    else common = common.filter(c => cs.includes(c));
+    if (!common.length) return null;
+  }
+  return common && common.length ? common[0] : null;
+}
+
+function updateSourcesUI() {
+  const btn = $("sourcesBtn");
+  const lab = $("sourcesBtnLabel");
+  const note = $("threadScopeNote");
+  const ids = S.activeBookIds;
+  if (ids === null) {
+    lab.textContent = "Sources : toutes";
+    btn.classList.remove("none");
+    btn.title = "Périmètre par défaut — cliquez pour choisir les sources actives";
+  } else if (!ids.length) {
+    lab.textContent = "Aucune source active";
+    btn.classList.add("none");
+    btn.title = "Le tuteur répond sans contexte documentaire — cliquez pour choisir";
+  } else {
+    const dom = dominantCategoryName(ids);
+    lab.textContent = dom
+      ? dom + " · " + ids.length + " document" + (ids.length > 1 ? "s" : "")
+      : "Sources : " + ids.length + " document" + (ids.length > 1 ? "s" : "");
+    btn.classList.remove("none");
+    btn.title = "Modifier les sources actives de cette conversation";
+  }
+  if (!note) return;
+  if (ids !== null && !ids.length) {
+    note.textContent = "Aucune source sélectionnée — réponses sans contexte documentaire.";
+    note.hidden = false;
+  } else {
+    note.hidden = true;
+  }
+}
+
+async function loadConversationSources(convId) {
+  if (!convId) return;
+  try {
+    const d = await jf("/api/tutor/conversations/" + encodeURIComponent(convId) + "/sources");
+    S.activeBookIds = (d.book_ids || []).slice();
+  } catch (e) {
+    S.activeBookIds = null;   // dégradation : périmètre par défaut
+  }
+  updateSourcesUI();
+}
+
+function updateSrcCount() {
+  const n = S.popoverSel.size;
+  $("srcCount").textContent = n + " document" + (n > 1 ? "s" : "") + " actif" + (n > 1 ? "s" : "");
+}
+
+async function openSourcesModal() {
+  S.popoverSel = new Set(S.activeBookIds || []);
+  // Périmètre jamais consulté + conversation connue : charger ce qui est stocké.
+  if (S.activeBookIds === null && S.activeConversationId) {
+    await loadConversationSources(S.activeConversationId);
+    S.popoverSel = new Set(S.activeBookIds || []);
+  }
+  $("srcSearchIn").value = "";
+  await ensureLibrary();                       // livres du domaine actif prêts
+  if (S.activeId) {
+    await loadDomainBooks(S.activeId);          // memberships résolus pour l'arbre
+  }
+  renderTree($("srcTreeBox"), "pop");
+  updateSrcCount();
+  $("sourcesModal").hidden = false;
+  $("srcSearchIn").focus();
+}
+
+function closeSourcesModal() {
+  $("sourcesModal").hidden = true;
+}
+
+async function applySources() {
+  S.activeBookIds = [...S.popoverSel];
+  if (S.activeConversationId) {
+    try {
+      await sf("/api/tutor/conversations/" + encodeURIComponent(S.activeConversationId) + "/sources", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ book_ids: S.activeBookIds }),
+      });
+    } catch (e) { /* journalisé : la sélection locale reste appliquée côté UI */ }
+  }
+  updateSourcesUI();
+  closeSourcesModal();
+  toast(S.activeBookIds.length
+    ? "Sources actives : " + S.activeBookIds.length + " document" + (S.activeBookIds.length > 1 ? "s" : "") + "."
+    : "Aucune source active — le tuteur répondra sans contexte documentaire.");
+}
+
+/* ==================================== conversations persistantes (US1) === */
+function fmtWhen(ts) {
+  const n = Number(ts);
+  if (!n) return "";
+  try {
+    return new Date(n * 1000).toLocaleString("fr-FR",
+      { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+  } catch (e) { return ""; }
+}
+
+async function loadConversations() {
+  try {
+    const data = await jf("/api/tutor/conversations");
+    S.conversations = data.conversations || [];
+  } catch (e) {
+    S.conversations = [];
+    $("convList").innerHTML = '<div class="empty-note">Conversations indisponibles.</div>';
+    return;
+  }
+  renderConvList();
+}
+
+function renderConvList() {
+  const box = $("convList");
+  box.innerHTML = "";
+  if (!S.conversations.length) {
+    box.innerHTML = '<div class="empty-note">Aucune conversation.<br>Cliquez « ＋ Nouvelle » pour démarrer.</div>';
+    return;
+  }
+  for (const c of S.conversations) {
+    const el = document.createElement("div");
+    el.className = "conv-item" + (c.id === S.activeConversationId ? " active" : "");
+    el.setAttribute("role", "option");
+    el.setAttribute("aria-selected", c.id === S.activeConversationId ? "true" : "false");
+    const subjName = c.subject_name || "espace supprimé";
+    el.innerHTML =
+      '<div class="ci-top">' +
+        '<span class="ci-title">' + esc(c.title || "Sans titre") + "</span>" +
+        '<span class="ci-actions">' +
+          '<button class="ci-act ren" title="Renommer" aria-label="Renommer cette conversation">✎</button>' +
+          '<button class="ci-act del" title="Supprimer" aria-label="Supprimer cette conversation">×</button>' +
+        "</span>" +
+      "</div>" +
+      '<div class="ci-meta"><span>' + esc(subjName) + "</span>" +
+        "<span>" + esc(fmtWhen(c.updated_at || c.started_at)) + "</span>" +
+        "<span>" + (c.message_count != null ? c.message_count + " msg" : "") + "</span>" +
+        (c.active_sources ? "<span>" + c.active_sources + " source" + (c.active_sources > 1 ? "s" : "") + "</span>" : "") +
+      "</div>";
+
+    el.addEventListener("click", (e) => {
+      if (e.target.closest(".ci-act")) return;
+      openConversation(c.id);
+    });
+    el.querySelector(".ren").addEventListener("click", () => beginInlineRename(el, c));
+    el.querySelector(".del").addEventListener("click", () => deleteConversation(c));
+    box.appendChild(el);
+  }
+}
+
+function beginInlineRename(itemEl, conv) {
+  const titleSpan = itemEl.querySelector(".ci-title");
+  if (titleSpan.querySelector("input")) return;
+  const old = conv.title || "Sans titre";
+  titleSpan.innerHTML = '<input type="text" value="' + esc(old) + '" aria-label="Nouveau titre">';
+  const input = titleSpan.querySelector("input");
+  input.focus();
+  input.select();
+  let done = false;
+  const commit = async () => {
+    if (done) return;
+    done = true;
+    const v = input.value.trim();
+    if (!v || v === old) { renderConvList(); return; }
+    try {
+      const r = await sf("/api/tutor/conversations/" + encodeURIComponent(conv.id), {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: v }),
+      });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      conv.title = v;
+      toast("Conversation renommée.");
+    } catch (e) { /* journalisé */ }
+    loadConversations();
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); commit(); }
+    if (e.key === "Escape") { done = true; renderConvList(); }
+  });
+  input.addEventListener("blur", commit);
+}
+
+async function deleteConversation(conv) {
+  if (!confirm("Supprimer définitivement « " + (conv.title || "Sans titre") +
+      " » et tout son historique ?")) return;
+  try {
+    const r = await sf("/api/tutor/conversations/" + encodeURIComponent(conv.id), { method: "DELETE" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    toast("Conversation supprimée.");
+    if (conv.id === S.activeConversationId) {
+      S.activeConversationId = null;
+      S.activeBookIds = null;
+      resetThread();
+      updateSourcesUI();
+    }
+    loadConversations();
+  } catch (e) { /* journalisé */ }
+}
+
+function toggleNewConvForm(force) {
+  const f = $("newConvForm");
+  const show = force != null ? force : f.hidden;
+  f.hidden = !show;
+  if (show) { $("newConvTitle").value = ""; $("newConvTitle").focus(); }
+}
+
+async function createConversation() {
+  const title = $("newConvTitle").value.trim();
+  try {
+    const payload = {};
+    if (title) payload.title = title;
+    if (S.activeId) payload.subject_id = S.activeId;
+    const r = await sf("/api/tutor/conversations", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      let detail = "HTTP " + r.status;
+      try { const j = await r.json(); if (j && j.detail) detail = String(j.detail); } catch (_) {}
+      throw new Error(detail);
+    }
+    const data = await r.json();
+    const conv = data.conversation || {};
+    toggleNewConvForm(false);
+    toast("Conversation créée" + (conv.title && conv.title !== "Sans titre" ? " : « " + conv.title + " »" : "") + ".");
+    if (conv.subject_id && conv.subject_id !== S.activeId) {
+      const t = S.subjects.find(s => s.id === conv.subject_id);
+      if (t) { $("spaceSelect").value = t.id; onSpaceChange(); }
+    }
+    await loadConversations();
+    if (conv.id) openConversation(conv.id);
+  } catch (e) { /* journalisé */ }
+}
+
+/** Ouvre une conversation : espace restauré, historique rejoué, sources chargées. */
+async function openConversation(convId) {
+  const token = ++openConversation._tok || (openConversation._tok = 1);
+  S.activeConversationId = convId;
+  const meta = S.conversations.find(c => c.id === convId);
+
+  // FR-008 : l'espace associé est restauré tel quel.
+  if (meta && meta.subject_id && meta.subject_id !== S.activeId &&
+      S.subjects.some(s => s.id === meta.subject_id)) {
+    $("spaceSelect").value = meta.subject_id;
+    onSpaceChange();
+  }
+
+  resetThread('<div class="big">' + esc(meta ? (meta.title || "Sans titre") : "Conversation") + "</div>Histoire vide — posez votre première question.");
+
+  // Rejeu de l'historique (tolérant : selon le backend, messages inclus ou non).
+  try {
+    const d = await jf("/api/tutor/conversations/" + encodeURIComponent(convId));
+    const conv = d.conversation || d;
+    const msgs = conv.messages || [];
+    if (token !== openConversation._tok) return;   // une autre conversation a été ouverte entre-temps
+    if (msgs.length) {
+      hideThreadEmpty();
+      for (const m of msgs) {
+        const role = String(m.role || "").toLowerCase();
+        const text = m.content != null ? m.content : (m.text || "");
+        addPlainBubble(role, text);
+      }
+      scrollThread();
+    }
+  } catch (e) { /* dégradation : fil vide mais conversation utilisable */ }
+
+  await loadConversationSources(convId);   // restaure le périmètre + indicateur
+  renderConvList();
+}
+
+function addPlainBubble(role, text) {
+  if (!text) return;
+  const isUser = role === "user" || role === "student" || role === "élève";
+  const wrap = document.createElement("div");
+  wrap.className = "msg " + (isUser ? "msg-student" : "msg-tutor");
+  const b = document.createElement("div");
+  b.className = isUser ? "bubble-student" : "bubble-tutor";
+  b.textContent = text;
+  wrap.appendChild(b);
+  $("thread").appendChild(wrap);
+}
+
+/* ============================================ WebSocket tuteur + fil ===== */
+let tutorWs = null;
+let pendingAsk = null;
+let currentBubble = null;
+let hintCounter = 0;
+let _nextBubbleKind = "answer";   // « answer » | « hint » — consommé au frame start
+
+function ensureWs() {
+  if (tutorWs && (tutorWs.readyState === WebSocket.OPEN || tutorWs.readyState === WebSocket.CONNECTING)) {
+    return tutorWs;
+  }
+  const proto = location.protocol === "https:" ? "wss://" : "ws://";
+  tutorWs = new WebSocket(proto + location.host + "/ws/tutor");
+  tutorWs.onopen = () => {
+    if (pendingAsk) { tutorWs.send(JSON.stringify(pendingAsk)); pendingAsk = null; }
+  };
+  tutorWs.onmessage = (e) => {
+    try { handleTutorFrame(JSON.parse(e.data)); }
+    catch (err) { reportError("message WS illisible", err && err.stack); }
+  };
+  tutorWs.onerror = () => {
+    reportError("connexion WebSocket au tuteur interrompue");
+    setStatus("connexion perdue");
+  };
+  tutorWs.onclose = () => { tutorWs = null; };
+  return tutorWs;
+}
+
+function sendAsk(frame) {
+  const ws = ensureWs();
+  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
+  else pendingAsk = frame;
+}
+
+function buildAskFrame(question) {
+  const f = {
+    type: "ask",
+    question,
+    subject_id: S.activeId || undefined,
+    socratic: $("pedSocratic").checked,
+    level: $("pedLevel").value,
+    think: $("pedThink").checked,
+  };
+  // US4 : conversation associée + périmètre explicite (prioritaire côté serveur).
+  if (S.activeConversationId) f.conversation_id = S.activeConversationId;
+  if (S.activeBookIds !== null) f.book_ids = [...S.activeBookIds];
+  else {
+    // Séance rapide hors conversation : continuité héritée par session_id.
+    const lastSid = S.sessionIds[S.activeId];
+    if (lastSid) f.session_id = lastSid;
+  }
+  return f;
+}
+
+function setBusy(b) {
+  S.busy = b;
+  $("sendBtn").disabled = b;
+  $("micBtn").disabled = b;
+  $("cancelBtn").hidden = !b;
+}
+
+/* ------------------------------------------------------------- rendu du fil */
+const THREAD_EMPTY_DEFAULT =
+  'Votre conversation commence ici.<br>Posez vos questions : avec des sources actives, les réponses sont citées page par page ; sans source, le tuteur répond aussi, hors documents.';
+
+function resetThread(emptyHtml) {
+  const th = $("thread");
+  th.innerHTML =
+    '<div class="thread-scope-note" id="threadScopeNote" hidden></div>' +
+    '<div class="thread-empty" id="threadEmpty">' +
+      (emptyHtml || THREAD_EMPTY_DEFAULT) + "</div>";
+  currentBubble = null;
+  updateSourcesUI();
+}
+
+function hideThreadEmpty() {
+  const e = $("threadEmpty");
+  if (e) e.remove();
+}
+
+function scrollThread() {
+  const th = $("thread");
+  th.scrollTop = th.scrollHeight;
+}
+
+function addStudentBubble(text) {
+  hideThreadEmpty();
+  const wrap = document.createElement("div");
+  wrap.className = "msg msg-student";
+  const bubble = document.createElement("div");
+  bubble.className = "bubble-student";
+  bubble.textContent = text;
+  wrap.appendChild(bubble);
+  const hintWrap = document.createElement("div");
+  hintWrap.className = "hint-under";
+  const btn = document.createElement("button");
+  btn.className = "btn btn-ghost btn-sm";
+  btn.textContent = "Indice suivant";
+  btn.title = "Demander un indice supplémentaire sans révéler la réponse";
+  btn.setAttribute("aria-label", "Demander un indice supplémentaire pour cette question");
+  btn.addEventListener("click", () => requestHint(text));
+  hintWrap.appendChild(btn);
+  wrap.appendChild(hintWrap);
+  $("thread").appendChild(wrap);
+  scrollThread();
+}
+
+function addNoteBubble(html) {
+  hideThreadEmpty();
+  const wrap = document.createElement("div");
+  wrap.className = "msg msg-note";
+  const b = document.createElement("div");
+  b.className = "bubble-note";
+  b.innerHTML = html;
+  wrap.appendChild(b);
+  $("thread").appendChild(wrap);
+  scrollThread();
+}
+
+function addTutorBubble(kind) {
+  hideThreadEmpty();
+  const wrap = document.createElement("div");
+  wrap.className = "msg msg-tutor";
+  const label = document.createElement("div");
+  label.className = "msg-kind" + (kind === "hint" ? " k-hint" : "");
+  label.textContent = kind === "hint" ? "Indice du tuteur" : "Tuteur — réponse sourcée";
+  const bubble = document.createElement("div");
+  bubble.className = "bubble-tutor";
+  const citeRow = document.createElement("div");
+  citeRow.className = "cite-row";
+  citeRow.hidden = true;
+  const body = document.createElement("div");
+  body.className = "tutor-body";
+  const think = document.createElement("span");
+  think.className = "tutor-think";
+  const text = document.createElement("span");
+  body.appendChild(think);
+  body.appendChild(text);
+  const extra = document.createElement("div");   // définitions / lignes d'erreur
+  const stats = document.createElement("div");
+  stats.className = "msg-stats";
+  bubble.append(citeRow, body, extra, stats);
+  wrap.appendChild(label);
+  wrap.appendChild(bubble);
+  $("thread").appendChild(wrap);
+  currentBubble = { wrap, citeRow, think, text, extra, stats, sources: null };
+  scrollThread();
+  return currentBubble;
+}
+
+function attachSources(bubble, sources) {
+  if (!bubble || !sources || !sources.length) return;   // dégradation : pas de chips
+  bubble.sources = sources;
+  bubble.citeRow.innerHTML = "";
+  sources.forEach((s, i) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "cite-chip";
+    const where = [s.chapter, (s.page != null ? "p. " + s.page : null)].filter(Boolean).join(" · ");
+    chip.title = (s.book || "Source") + (where ? " — " + where : "");
+    chip.setAttribute("aria-label", "Citation " + (i + 1) + " : " + chip.title);
+    chip.innerHTML = '<svg viewBox="0 0 24 24" width="10" height="10" aria-hidden="true"><path d="M4 19V6a2 2 0 0 1 2-2h9l5 5v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="2.4"/></svg>' +
+      (i + 1) + (s.page != null ? " p." + s.page : "");
+    chip.addEventListener("click", () => toggleCiteDetail(bubble, i));
+    bubble.citeRow.appendChild(chip);
+  });
+  bubble.citeRow.hidden = false;
+}
+
+function toggleCiteDetail(bubble, i) {
+  const existing = bubble.extra.querySelector(".cite-detail");
+  if (existing && existing.dataset.idx == i) { existing.remove(); return; }
+  if (existing) existing.remove();
+  const s = bubble.sources[i];
+  const d = document.createElement("div");
+  d.className = "cite-detail";
+  d.dataset.idx = i;
+  const bits = ["Livre : " + (s.book || "?")];
+  if (s.chapter) bits.push("Chapitre : " + s.chapter);
+  if (s.page != null) bits.push("Page : " + s.page);
+  bits.push("Pertinence : " + Number(s.score).toFixed(3));
+  d.textContent = bits.join("\n");
+  bubble.extra.appendChild(d);
+}
+
+/* ------------------------------------------------------------ flux WS reçu */
+/* Stats mises en réserve par génération : survivent à n'importe quel ordre
+   d'arrivée et sont re-rendues au « end ». */
+let _runStats = null;
+
+function formatTokStats(s) {
+  const gen = Math.max(0, Number(s && s.generated_tokens) || 0);
+  const speed = Math.max(0, Number(s && s.tok_s) || 0);
+  const bits = [];
+  if (gen > 0) bits.push(gen + " token" + (gen > 1 ? "s" : ""));
+  if (speed > 0) bits.push(speed.toFixed(1).replace(".", ",") + " tok/s"); // virgule française
+  return bits.join(" · ");
+}
+
+function renderRunStats() {
+  if (!currentBubble || !_runStats) return;
+  const txt = formatTokStats(_runStats);
+  if (txt) currentBubble.stats.textContent = txt;
+}
+
+function handleTutorFrame(f) {
+  switch (f.type) {
+    case "start":
+      if (S.capture) break;
+      _runStats = null;
+      currentBubble = addTutorBubble(_nextBubbleKind);
+      _nextBubbleKind = "answer";
+      setBusy(true);
+      setStatus("génération…");
+      break;
+
+    case "sources":
+      if (S.capture) break;
+      attachSources(currentBubble, f.sources);
+      break;
+
+    case "thinking_delta":
+      if (S.capture) { S.capture.think += f.text || ""; break; }
+      if (currentBubble) currentBubble.think.textContent += f.text || "";
+      scrollThread();
+      break;
+
+    case "content_delta":
+      if (S.capture) { S.capture.text += f.text || ""; break; }
+      if (currentBubble) currentBubble.text.textContent += f.text || "";
+      scrollThread();
+      break;
+
+    case "definition":
+      if (S.capture) { S.capture.text += (f.definition || ""); break; }
+      if (currentBubble && f.definition) {
+        const d = document.createElement("div");
+        d.className = "result";
+        d.textContent = (f.term ? f.term + " : " : "") + f.definition;
+        currentBubble.extra.appendChild(d);
+        scrollThread();
+      }
+      break;
+
+    case "stats":
+      if (S.capture) break;
+      _runStats = f;
+      renderRunStats();
+      break;
+
+    case "end":
+      if (S.capture) { finishCapture(f); break; }
+      if (_runStats) renderRunStats();
+      _runStats = null;
+      if (f.session_id && S.activeId && !S.activeConversationId) {
+        S.sessionIds[S.activeId] = f.session_id;   // continuité séance rapide
+      }
+      setBusy(false);
+      setStatus(f.status === "stopped" ? "annulé" : "prêt");
+      currentBubble = null;
+      break;
+
+    case "error": {
+      if (S.capture) { failCapture(f); break; }
+      if (_runStats) renderRunStats();
+      _runStats = null;
+      setBusy(false);
+      const msg = f.message || f.code || "erreur inconnue";
+      const friendly =
+        f.code === "voice_disabled" ? "Reconnaissance vocale non configurée (whisper)."
+        : f.code === "invalid_audio" ? "Audio invalide."
+        : f.code === "transcribe_failed" ? "Échec de transcription : " + msg
+        : f.code === "busy" ? "Une opération est déjà en cours."
+        : f.code === "no_subject" ? "Aucun espace actif pour le tuteur."
+        : msg;
+      if (currentBubble) {
+        const el = document.createElement("div");
+        el.className = "error-line";
+        el.textContent = friendly;
+        currentBubble.extra.appendChild(el);
+        currentBubble = null;
+      } else {
+        reportError(friendly);
+      }
+      setStatus("erreur");
+      break;
+    }
+
+    case "cancelled":
+      if (S.capture) S.capture = null;
+      _runStats = null;
+      setBusy(false);
+      setStatus("annulé");
+      currentBubble = null;
+      break;
+
+    case "transcript":
+      $("voiceTranscript").value = f.text || "";
+      $("voiceRow").hidden = false;
+      $("voiceTranscript").focus();
+      setStatus("transcription reçue — vérifiez puis envoyez");
+      break;
+
+    default:
+      break;
+  }
+}
+
+/* ----------------------------------------------- question / indice / annuler */
+function askFromThread(question) {
+  if (S.busy) { toast("Une génération est déjà en cours."); return; }
+  sendAsk(buildAskFrame(question));
+  setStatus("génération…");
+}
+
+function submitQuestion() {
+  const q = $("qInput").value.trim();
+  if (!q) return;
+  hintCounter = 0;
+  addStudentBubble(q);
+  $("qInput").value = "";
+  askFromThread(q);
+}
+
+function requestHint(originalQuestion) {
+  if (S.busy) { toast("Une génération est déjà en cours."); return; }
+  if (!originalQuestion) return;
+  hintCounter += 1;
+  const q = "L'élève a posé la question : « " + originalQuestion + " ».\n" +
+    "Donne uniquement un indice supplémentaire (indice n°" + hintCounter +
+    "), sans jamais donner la réponse finale.";
+  addStudentBubble("↪ (demande un indice supplémentaire)");
+  _nextBubbleKind = "hint";
+  sendAsk(buildAskFrame(q));
+  setStatus("indice en préparation…");
+}
+
+function cancelGeneration() {
+  if (tutorWs && tutorWs.readyState === WebSocket.OPEN) {
+    tutorWs.send(JSON.stringify({ type: "cancel" }));
+  }
+}
+
+/* ------------------------------------------- dictée vocale (flux existant) */
+let _recState = null;
+let _recording = false;
+
+function encodeWav(samples, sampleRate) {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+  const writeStr = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, "data");
+  view.setUint32(40, samples.length * 2, true);
+  let off = 44;
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    off += 2;
+  }
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+async function startRecording() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 } });
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  const ctx = new Ctx({ sampleRate: 16000 });
+  const src = ctx.createMediaStreamSource(stream);
+  const node = ctx.createScriptProcessor(4096, 1, 1);
+  const chunks = [];
+  node.onaudioprocess = (e) => { chunks.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
+  src.connect(node);
+  node.connect(ctx.destination);
+  _recState = { stream, ctx, node, chunks };
+}
+
+function stopRecording() {
+  const { stream, ctx, node, chunks } = _recState;
+  stream.getTracks().forEach((t) => t.stop());
+  try { node.disconnect(); ctx.close(); } catch (e) {}
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const samples = new Float32Array(total);
+  let o = 0;
+  for (const c of chunks) { samples.set(c, o); o += c.length; }
+  const blob = encodeWav(samples, 16000);
+  const reader = new FileReader();
+  reader.onload = () => {
+    const b64 = String(reader.result).split(",")[1];
+    const ws = ensureWs();
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "transcribe", audio: b64 }));
+    else reportError("connexion au tuteur indisponible pour la dictée");
+  };
+  reader.readAsDataURL(blob);
+}
+
+async function recordTutor() {
+  if (!_recording) {
+    try {
+      await startRecording();
+      _recording = true;
+      $("micBtn").classList.add("recording");
+      $("micBtn").setAttribute("aria-label", "Arrêter l'enregistrement");
+      setStatus("écoute… parlez puis appuyez à nouveau");
+    } catch (e) {
+      reportError("micro indisponible : " + (e && e.message ? e.message : e), e && e.stack);
+    }
+  } else {
+    _recording = false;
+    $("micBtn").classList.remove("recording");
+    $("micBtn").setAttribute("aria-label", "Dicter une question (micro)");
+    stopRecording();
+  }
+}
+
+function sendVoiceTranscript() {
+  const t = $("voiceTranscript").value.trim();
+  if (!t) { toast("La transcription est vide."); return; }
+  $("voiceRow").hidden = true;
+  addStudentBubble(t);
+  $("qInput").value = "";
+  askFromThread(t);
+}
+/* ================================================== exercice adaptatif === */
+let currentExerciseId = null;
+
+async function genExercise() {
+  const cid = $("exConcept").value;
+  if (!cid) { toast("Choisissez une notion (ou ajoutez-en une)."); return; }
+  setStatus("génération de l'exercice…");
+  try {
+    const r = await sf("/api/tutor/exercises", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ concept_id: cid, difficulty: $("exDifficulty").value }),
+    });
+    if (!r.ok) throw new Error("génération refusée HTTP " + r.status);
+    const ex = await r.json();
+    currentExerciseId = ex.id;
+    $("exMeta").textContent = "Difficulté : " + (ex.difficulty || "?") +
+      (ex.hint_level != null ? " · indices disponibles" : "");
+    $("exStatement").textContent = ex.statement || "(énoncé vide)";
+    $("exHints").innerHTML = "";
+    $("exFeedback").hidden = true;
+    $("exSolutionBox").hidden = true;
+    $("exAnswer").value = "";
+    $("exCard").hidden = false;
+    setStatus("prêt");
+  } catch (e) { /* journalisé */ setStatus("prêt"); }
+}
+
+async function revealExerciseHint() {
+  if (!currentExerciseId) return;
+  try {
+    const data = await jf("/api/tutor/exercises/" + currentExerciseId + "/answers", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answer: "", reveal_hint: true }),
+    });
+    if (data.hint) {
+      const d = document.createElement("div");
+      d.className = "result";
+      d.textContent = "Indice : " + data.hint;
+      $("exHints").appendChild(d);
+    } else {
+      toast("Plus d'indice disponible pour cet exercice.");
+    }
+  } catch (e) { /* journalisé */ }
+}
+
+async function submitExerciseAnswer() {
+  if (!currentExerciseId) return;
+  try {
+    const data = await jf("/api/tutor/exercises/" + currentExerciseId + "/answers", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answer: $("exAnswer").value, reveal_hint: false }),
+    });
+    const fb = $("exFeedback");
+    fb.hidden = false;
+    fb.className = "feedback v-" + (data.verdict || "incorrect");
+    fb.textContent = "Verdict : " + (data.verdict || "—") +
+      (data.feedback ? "\n" + data.feedback : "") +
+      (data.hint ? "\nIndice : " + data.hint : "");
+    loadConceptsAndProgress();
+  } catch (e) { /* journalisé */ }
+}
+
+async function requestSolution() {
+  if (!currentExerciseId) return;
+  try {
+    const data = await jf("/api/tutor/exercises/" + currentExerciseId + "/solution", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ explicit: true }),
+    });
+    const sb = $("exSolutionBox");
+    sb.hidden = false;
+    sb.textContent = "Solution :\n" + (data.solution || "");
+  } catch (e) {
+    toast("Solution refusée par le serveur (doit être demandée explicitement).");
+  }
+}
+
+async function addConcept() {
+  const name = $("exNewConcept").value.trim();
+  if (!name || !S.activeId) { toast("Indiquez un nom de notion."); return; }
+  try {
+    await jf("/api/tutor/subjects/" + S.activeId + "/concepts", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    $("exNewConcept").value = "";
+    toast("Notion ajoutée.");
+    await loadConceptsAndProgress();
+    if ([...$("exConcept").options].some(o => o.textContent === name)) {
+      $("exConcept").value = [...$("exConcept").options].find(o => o.textContent === name).value;
+    }
+  } catch (e) { /* journalisé */ }
+}
+
+/* ======================================================= quiz & examens == */
+let activeQuiz = null;
+let assessTimerHandle = null;
+
+function renderAssessment(quiz, isExam, scopeEcho) {
+  activeQuiz = quiz;
+  setStatus(isExam ? "examen en cours" : "quiz en cours");
+  const box = $("assessFlow");
+  box.innerHTML = "";
+  $("assessResults").hidden = true;
+  if (assessTimerHandle) { clearInterval(assessTimerHandle); assessTimerHandle = null; }
+
+  const head = document.createElement("div");
+  head.className = "hint";
+  head.textContent = (isExam ? "Examen" : "Quiz") + " — " + (quiz.questions || []).length + " questions" +
+    (scopeEcho && (scopeEcho.category_ids || []).length
+      ? " · portée : " + scopeEcho.category_ids.length + " catégorie(s)"
+      : "");
+  box.appendChild(head);
+
+  (quiz.questions || []).forEach((q, i) => {
+    const card = document.createElement("div");
+    card.className = "q-card";
+    card.dataset.qid = q.id;
+    const payload = q.payload || {};
+    let inner = '<div class="q-title">' + (i + 1) + ". " + esc(payload.question || "") + "</div>";
+    if (q.type === "mcq") {
+      (payload.choices || []).forEach((c, ci) => {
+        inner += '<label class="q-choice"><input type="radio" name="q_' + esc(q.id) + '" value="' + ci + '"> ' + esc(c) + "</label>";
+      });
+    } else if (q.type === "true_false") {
+      inner += '<label class="q-choice"><input type="radio" name="q_' + esc(q.id) + '" value="true"> Vrai</label>' +
+        '<label class="q-choice"><input type="radio" name="q_' + esc(q.id) + '" value="false"> Faux</label>';
+    } else if (q.type === "matching") {
+      const pairs = payload.pairs || [];
+      pairs.forEach((p, pi) => {
+        const opts = pairs.map((pp, pj) => '<option value="' + pj + '">' + esc(pp.right) + "</option>").join("");
+        inner += '<div style="margin:4px 0;font-size:13px;">' + esc(p.left) +
+          ' → <select data-match="' + esc(q.id) + '" data-idx="' + pi + '" aria-label="Association pour ' + esc(p.left) + '">' + opts + "</select></div>";
+      });
+    } else {
+      inner += '<textarea data-open="' + esc(q.id) + '" rows="3" placeholder="Votre réponse…"' +
+        (q.type === "code" ? ' style="font-family:var(--mono);"' : "") + "></textarea>";
+    }
+    card.innerHTML = inner;
+    box.appendChild(card);
+  });
+
+  const row = document.createElement("div");
+  row.className = "row-btns";
+  const submit = document.createElement("button");
+  submit.className = "btn btn-primary btn-sm";
+  submit.textContent = "Soumettre mes réponses";
+  submit.addEventListener("click", () => submitAssessment(quiz.id, isExam));
+  row.appendChild(submit);
+  if (isExam) {
+    const note = document.createElement("span");
+    note.className = "hint";
+    note.textContent = "Aide désactivée pendant l'examen.";
+    row.appendChild(note);
+  }
+  box.appendChild(row);
+
+  if (isExam && quiz.time_limit_s) {
+    let remaining = quiz.time_limit_s;
+    const timerEl = $("assessTimer");
+    timerEl.hidden = false;
+    const tick = () => {
+      const m = Math.floor(Math.max(0, remaining) / 60);
+      const s = Math.max(0, remaining) % 60;
+      timerEl.textContent = "Temps restant : " + m + ":" + String(s).padStart(2, "0");
+      if (remaining <= 0) {
+        clearInterval(assessTimerHandle);
+        assessTimerHandle = null;
+        timerEl.textContent = "Temps écoulé — soumission automatique.";
+        submitAssessment(quiz.id, true);
+        return;
+      }
+      remaining -= 1;
+    };
+    tick();
+    assessTimerHandle = setInterval(tick, 1000);
+  } else {
+    $("assessTimer").hidden = true;
+  }
+}
+
+function collectAnswers(quiz) {
+  const answers = {};
+  for (const q of quiz.questions || []) {
+    if (q.type === "mcq") {
+      const el = document.querySelector('input[name="q_' + q.id + '"]:checked');
+      answers[q.id] = el ? parseInt(el.value, 10) : null;
+    } else if (q.type === "true_false") {
+      const el = document.querySelector('input[name="q_' + q.id + '"]:checked');
+      answers[q.id] = el ? el.value === "true" : null;
+    } else if (q.type === "matching") {
+      const sel = document.querySelectorAll('select[data-match="' + q.id + '"]');
+      answers[q.id] = Array.from(sel).map(s => parseInt(s.value, 10));
+    } else {
+      const el = document.querySelector('textarea[data-open="' + q.id + '"]');
+      answers[q.id] = el ? el.value : "";
+    }
+  }
+  return answers;
+}
+
+async function startQuiz() {
+  if (!S.activeId) { toast("Choisissez un espace."); return; }
+  const size = parseInt($("quizSize").value, 10) || 5;
+  const kinds = $("quizKinds").value.split(",").map(s => s.trim()).filter(Boolean);
+  setStatus("génération du quiz…");
+  try {
+    const r = await sf("/api/tutor/subjects/" + S.activeId + "/quizzes", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ size, kinds }),
+    });
+    if (!r.ok) throw new Error("quiz refusé HTTP " + r.status);
+    renderAssessment(await r.json(), false);
+  } catch (e) { /* journalisé */ setStatus("prêt"); }
+}
+
+async function startExam() {
+  if (!S.activeId) { toast("Choisissez un espace."); return; }
+  const size = parseInt($("quizSize").value, 10) || 10;
+  const time = parseInt($("examTime").value, 10) || 600;
+  const category_ids = collectExamScope();
+  setStatus("génération de l'examen…");
+  try {
+    const r = await sf("/api/tutor/subjects/" + S.activeId + "/exams", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ size, time_limit_s: time, category_ids }),
+    });
+    if (!r.ok) throw new Error("examen refusé HTTP " + r.status);
+    const exam = await r.json();
+    renderAssessment(exam, true, exam.scope);
+  } catch (e) { /* journalisé */ setStatus("prêt"); }
+}
+
+async function submitAssessment(quizId, isExam) {
+  if (assessTimerHandle) { clearInterval(assessTimerHandle); assessTimerHandle = null; }
+  if (!activeQuiz) return;
+  const answers = collectAnswers(activeQuiz);
+  setStatus("correction…");
+  try {
+    const r = await sf("/api/tutor/quizzes/" + quizId + "/submit", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answers, hint_requested: false }),
+    });
+    if (!r.ok) throw new Error("soumission refusée HTTP " + r.status);
+    showAssessmentResults(await r.json(), isExam);
+  } catch (e) { /* journalisé */ setStatus("prêt"); }
+}
+
+const VERDICT_LABELS = { correct: "Correct", partial: "Partiel", incorrect: "Incorrect" };
+
+function showAssessmentResults(report, isExam) {
+  setStatus("prêt");
+  for (const pq of (report.per_question || [])) {
+    const card = document.querySelector('.q-card[data-qid="' + pq.question_id + '"]');
+    if (!card) continue;
+    card.classList.add("v-" + (pq.verdict || "incorrect"));
+    card.querySelectorAll("input, textarea, select").forEach(el => { el.disabled = true; });
+    const chip = document.createElement("span");
+    chip.className = "badge " + (pq.verdict === "correct" ? "done" : pq.verdict === "partial" ? "indexing" : "failed");
+    chip.classList.add("verdict-chip");
+    chip.textContent = VERDICT_LABELS[pq.verdict] || pq.verdict;
+    card.querySelector(".q-title").appendChild(chip);
+  }
+  const box = $("assessResults");
+  box.hidden = false;
+  let html = '<div class="score-line">' + Number(report.score).toFixed(1) + "<small style='font-size:14px;color:var(--ink-dim)'>/100</small></div>" +
+    '<div class="hint">' + (isExam ? "Résultat de l'examen" : "Résultat du quiz") +
+    " — les verdicts par question sont affichés ci-dessus.</div>";
+  if (report.strengths && report.strengths.length) {
+    html += '<div class="report-block"><b>Points forts :</b> ' + esc(report.strengths.join(", ")) + "</div>";
+  }
+  if (report.weaknesses && report.weaknesses.length) {
+    html += '<div class="report-block"><b>Explication des lacunes — à revoir :</b> ' + esc(report.weaknesses.join(", ")) + "</div>";
+  }
+  box.innerHTML = html;
+  loadConceptsAndProgress();
+}
+
+/* ============================================ fiches mémo (révisions) ==== */
+async function prepareCourse() {
+  if (!S.activeId) { toast("Choisissez un espace."); return; }
+  setStatus("préparation du cours…");
+  try {
+    const r = await sf("/api/tutor/subjects/" + S.activeId + "/prepare", { method: "POST" });
+    if (!r.ok) throw new Error("préparation refusée HTTP " + r.status);
+    const rep = await r.json();
+    toast("Préparé — fiches +" + rep.flashcards_new + ", glossaire +" + rep.glossary_new +
+      ", notions +" + rep.concepts_new + ", ignorés " + rep.skipped);
+    setStatus("prêt");
+    loadConceptsAndProgress();
+  } catch (e) { /* journalisé */ setStatus("prêt"); }
+}
+
+async function loadDueReviews() {
+  if (!S.activeId) { toast("Choisissez un espace."); return; }
+  try {
+    const data = await jf("/api/tutor/subjects/" + S.activeId + "/reviews/due");
+    dueCards = data.due || [];
+    dueIdx = 0;
+    renderDueCard();
+  } catch (e) { /* journalisé */ }
+}
+
+let dueCards = [];
+let dueIdx = 0;
+
+function renderDueCard() {
+  const box = $("dueFlow");
+  box.innerHTML = "";
+  if (!dueCards.length) {
+    box.innerHTML = '<div class="empty-note">Aucune fiche à réviser.<br>Lancez « Préparer le cours » puis revenez plus tard.</div>';
+    return;
+  }
+  if (dueIdx >= dueCards.length) {
+    box.innerHTML = '<div class="empty-note">Toutes les fiches dues ont été révisées. Bravo !</div>';
+    return;
+  }
+  const card = dueCards[dueIdx];
+  const counter = document.createElement("div");
+  counter.className = "due-counter";
+  counter.textContent = "Fiche " + (dueIdx + 1) + " / " + dueCards.length;
+  const flip = document.createElement("div");
+  flip.className = "flip";
+  flip.tabIndex = 0;
+  flip.setAttribute("role", "button");
+  flip.setAttribute("aria-label", "Carte mémoire — appuyez pour retourner");
+  flip.innerHTML =
+    '<div class="flip-inner">' +
+      '<div class="face front"><div class="face-label">Question</div>' + esc(card.question) + "</div>" +
+      '<div class="face back"><div class="face-label">Réponse</div>' + esc(card.answer) + "</div>" +
+    "</div>";
+  const doFlip = () => {
+    flip.classList.toggle("flipped");
+    flip.setAttribute("aria-pressed", flip.classList.contains("flipped") ? "true" : "false");
+  };
+  flip.addEventListener("click", doFlip);
+  flip.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); doFlip(); }
+  });
+  const row = document.createElement("div");
+  row.className = "row-btns";
+  const ok = document.createElement("button");
+  ok.className = "btn btn-primary btn-sm";
+  ok.textContent = "Je savais";
+  ok.addEventListener("click", () => gradeDueCard(card.id, true));
+  const ko = document.createElement("button");
+  ko.className = "btn btn-danger btn-sm";
+  ko.textContent = "À revoir";
+  ko.addEventListener("click", () => gradeDueCard(card.id, false));
+  row.append(ok, ko);
+  box.append(counter, flip, row);
+}
+
+async function gradeDueCard(flashcardId, success) {
+  try {
+    await sf("/api/tutor/reviews/" + flashcardId + "/grade", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ success }),
+    });
+  } catch (e) { /* best-effort : on avance quand même */ }
+  dueIdx += 1;
+  renderDueCard();
+}
+
+/* ============================== résumé audio — Web Speech API (local) ==== */
+const TTS = { voice: null };
+
+function ttsSupported() { return "speechSynthesis" in window; }
+
+function pickVoice() {
+  if (!ttsSupported()) return;
+  const vs = speechSynthesis.getVoices() || [];
+  TTS.voice =
+    vs.find(v => /^fr[-_]/i.test(v.lang) && /google|thomas|amelie|audrey|marie/i.test(v.name)) ||
+    vs.find(v => /^fr[-_]/i.test(v.lang)) ||
+    vs.find(v => /fr/i.test(v.lang)) || null;
+  $("ttsVoiceInfo").textContent = TTS.voice
+    ? "Voix : " + TTS.voice.name + (TTS.voice.lang ? " (" + TTS.voice.lang + ")" : "")
+    : "Voix française par défaut du navigateur.";
+}
+
+function ttsRateValue() { return parseFloat($("ttsRate").value) || 1; }
+
+function ttsSpeak() {
+  if (!ttsSupported()) { toast("Synthèse vocale non disponible dans ce navigateur."); return; }
+  const txt = ($("ttsText").value || "").trim();
+  if (!txt) { toast("Générez ou saisissez d'abord un texte à écouter."); return; }
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(txt);
+  u.lang = "fr-FR";
+  if (TTS.voice) u.voice = TTS.voice;
+  u.rate = ttsRateValue();
+  u.onend = () => setStatus("prêt");
+  u.onerror = (ev) => { if (ev.error !== "interrupted" && ev.error !== "canceled") reportError("synthèse vocale : " + ev.error); };
+  speechSynthesis.speak(u);
+  setStatus("lecture audio…");
+}
+
+function ttsPauseResume() {
+  if (!ttsSupported()) return;
+  if (speechSynthesis.speaking && !speechSynthesis.paused) {
+    speechSynthesis.pause();
+    setStatus("lecture en pause");
+  } else if (speechSynthesis.paused) {
+    speechSynthesis.resume();
+    setStatus("lecture audio…");
+  }
+}
+
+function ttsStop() {
+  if (!ttsSupported()) return;
+  speechSynthesis.cancel();
+  setStatus("prêt");
+}
+
+function generateAudioSummary() {
+  const cid = $("ttsNotion").value;
+  if (!cid || !S.activeId) { toast("Choisissez une notion (préparez le cours si besoin)."); return; }
+  if (S.busy) { toast("Une génération est déjà en cours."); return; }
+  const opt = $("ttsNotion").selectedOptions[0];
+  const name = opt ? opt.textContent : "la notion";
+  S.capture = { text: "", think: "" };
+  sendAsk({
+    type: "ask",
+    subject_id: S.activeId,
+    question: "Rédige un résumé de révision audio de la notion « " + name +
+      " » : une phrase de définition, cinq points clés maximum, puis un exemple concret. " +
+      "Réponds en texte continu adapté à une écoute vocale, sans puces ni markdown.",
+    socratic: false,
+    level: "intermediate",
+    think: false,
+  });
+  setStatus("résumé audio en génération…");
+}
+
+function finishCapture(endFrame) {
+  const cap = S.capture;
+  S.capture = null;
+  setBusy(false);
+  const txt = (cap && cap.text ? cap.text : "").trim();
+  if (txt) {
+    $("ttsText").value = txt;
+    toast("Résumé prêt — appuyez sur Lire.");
+  } else {
+    toast("Le résumé n'a rien renvoyé ; saisissez votre texte manuellement.");
+  }
+  setStatus("prêt");
+}
+
+function failCapture(errFrame) {
+  S.capture = null;
+  setBusy(false);
+  reportError("échec du résumé audio : " + (errFrame && (errFrame.message || errFrame.code) || "?"));
+  setStatus("prêt");
+}
+
+/* ============================================ explorer les connaissances == */
+function requireNotionInput() {
+  const n = $("expNotion").value.trim();
+  if (!n) { toast("Saisissez une notion d'abord."); return null; }
+  return n;
+}
+
+async function locateNotion() {
+  const sid = S.activeId;
+  const notion = requireNotionInput();
+  if (!sid || !notion) return;
+  setStatus("localisation…");
+  try {
+    const data = await jf("/api/tutor/subjects/" + sid + "/locate?notion=" + encodeURIComponent(notion));
+    const box = $("locateOut");
+    box.innerHTML = "";
+    const rows = data.results || [];
+    if (!rows.length) { box.innerHTML = '<div class="empty-note">Aucun passage trouvé.</div>'; }
+    const byBook = {};
+    for (const row of rows) (byBook[row.book] = byBook[row.book] || []).push(row);
+    for (const [book, items] of Object.entries(byBook)) {
+      const h = document.createElement("div");
+      h.className = "src-group-head";
+      h.textContent = book;
+      box.appendChild(h);
+      for (const it of items) {
+        const d = document.createElement("div");
+        d.className = "result";
+        const chap = it.chapter ? " — chapitre " + it.chapter : "";
+        const pg = it.page != null ? ", p. " + it.page : "";
+        d.textContent = "[" + Number(it.score).toFixed(3) + chap + pg + "]\n" + it.text;
+        box.appendChild(d);
+      }
+    }
+    setStatus("prêt");
+  } catch (e) { /* journalisé */ setStatus("prêt"); }
+}
+
+async function rankBooks() {
+  const sid = S.activeId;
+  const notion = requireNotionInput();
+  if (!sid || !notion) return;
+  setStatus("classement…");
+  try {
+    const data = await jf("/api/tutor/subjects/" + sid + "/rank-books?notion=" + encodeURIComponent(notion));
+    const box = $("rankOut");
+    box.innerHTML = "";
+    const rows = data.results || [];
+    if (!rows.length) { box.innerHTML = '<div class="empty-note">Aucun livre pertinent.</div>'; }
+    for (const row of rows) {
+      const d = document.createElement("div");
+      d.className = "result";
+      d.textContent = row.book + " — score " + Number(row.score).toFixed(3);
+      box.appendChild(d);
+    }
+    setStatus("prêt");
+  } catch (e) { /* journalisé */ setStatus("prêt"); }
+}
+
+async function compareNotion() {
+  const sid = S.activeId;
+  const notion = requireNotionInput();
+  if (!sid || !notion) return;
+  setStatus("comparaison…");
+  $("compareBox").hidden = false;
+  $("compareAnswer").textContent = "";
+  $("compareSources").innerHTML = "";
+  try {
+    const r = await sf("/api/tutor/subjects/" + sid + "/compare", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notion }),
+    });
+    if (!r.ok) throw new Error("comparaison refusée HTTP " + r.status);
+    await readNdjson(r, (frame) => {
+      if (frame.type === "sources") renderCompareSources(frame.sources);
+      else if (frame.type === "content_delta") $("compareAnswer").textContent += frame.text;
+      else if (frame.type === "thinking_delta") $("compareAnswer").innerHTML +=
+        '<span class="tutor-think">' + esc(frame.text) + "</span>";
+      else if (frame.type === "error") reportError(frame.message || frame.code || "erreur comparaison");
+    });
+    setStatus("prêt");
+  } catch (e) { /* journalisé */ setStatus("prêt"); }
+}
+
+function renderCompareSources(sources) {
+  const box = $("compareSources");
+  box.innerHTML = "";
+  if (!sources || !sources.length) return;
+  for (const s of sources) {
+    const d = document.createElement("div");
+    d.className = "result";
+    const chap = s.chapter ? " — chapitre " + s.chapter : "";
+    const pg = s.page != null ? ", p. " + s.page : "";
+    d.textContent = "[Livre " + (s.book || "?") + chap + pg + "] (score " + Number(s.score).toFixed(3) + ")";
+    box.appendChild(d);
+  }
+}
+
+async function readNdjson(response, onFrame) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (line) onFrame(JSON.parse(line));
+    }
+  }
+}
+
+async function loadGlossary() {
+  const sid = S.activeId;
+  if (!sid) return;
+  try {
+    const data = await jf("/api/tutor/subjects/" + sid + "/glossary");
+    const box = $("glossList");
+    box.innerHTML = "";
+    const terms = data.terms || [];
+    if (!terms.length) {
+      box.innerHTML = '<div class="empty-note">Aucun terme. Lancez « Préparer le cours » dans Apprentissage.</div>';
+      return;
+    }
+    for (const t of terms) {
+      const cardEl = document.createElement("div");
+      cardEl.className = "term-card";
+      cardEl.innerHTML =
+        '<div style="font-weight:700;">' + esc(t.term) + "</div>" +
+        '<div class="hint" style="margin-top:3px;">' + esc(t.definition) + "</div>" +
+        '<button class="btn btn-ghost btn-sm" style="margin-top:4px;">Expliquer davantage</button>' +
+        '<div class="explain" style="margin-top:6px;" hidden></div>';
+      cardEl.querySelector("button").addEventListener("click", () =>
+        explainTerm(sid, t.term, cardEl.querySelector(".explain")));
+      box.appendChild(cardEl);
+    }
+  } catch (e) { /* journalisé */ }
+}
+
+async function explainTerm(sid, term, target) {
+  target.hidden = false;
+  target.textContent = "explication…";
+  try {
+    const r = await sf("/api/tutor/subjects/" + sid + "/glossary/" + encodeURIComponent(term) + "/explain");
+    if (!r.ok) throw new Error("explication refusée HTTP " + r.status);
+    let answer = "";
+    await readNdjson(r, (f) => {
+      if (f.type === "content_delta" || f.type === "delta" || f.type === "definition") answer += f.text || "";
+    });
+    target.textContent = answer || "(aucune explication renvoyée)";
+  } catch (e) {
+    target.textContent = "échec de l'explication.";
+  }
+}
+
+async function loadKnowledgeMap() {
+  const sid = S.activeId;
+  if (!sid) return;
+  try {
+    const data = await jf("/api/tutor/subjects/" + sid + "/map");
+    renderKnowledgeMap($("mapOut"), data);
+  } catch (e) { /* journalisé */ }
+}
+
+function renderKnowledgeMap(box, data) {
+  box.innerHTML = "";
+  const nodes = data.nodes || [];
+  const edges = data.edges || [];
+  if (!nodes.length) {
+    box.innerHTML = '<div class="empty-note">Aucune relation entre notions.<br>Lancez « Préparer le cours » dans Apprentissage.</div>';
+    return;
+  }
+  const W = 600, H = 420, cx = W / 2, cy = H / 2, R = Math.min(W, H) / 2 - 60;
+  const pos = {};
+  nodes.forEach((n, i) => {
+    const ang = (2 * Math.PI * i) / nodes.length - Math.PI / 2;
+    pos[n.id] = { x: cx + R * Math.cos(ang), y: cy + R * Math.sin(ang) };
+  });
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+  svg.style.width = "100%";
+  svg.style.maxWidth = "620px";
+  for (const e of edges) {
+    const a = pos[e.from_concept_id], b = pos[e.to_concept_id];
+    if (!a || !b) continue;
+    const line = document.createElementNS(ns, "line");
+    line.setAttribute("x1", a.x.toFixed(1)); line.setAttribute("y1", a.y.toFixed(1));
+    line.setAttribute("x2", b.x.toFixed(1)); line.setAttribute("y2", b.y.toFixed(1));
+    line.setAttribute("stroke", "var(--accent-line)");
+    line.setAttribute("stroke-width", "1.6");
+    const title = document.createElementNS(ns, "title");
+    title.textContent = e.relation || "";
+    line.appendChild(title);
+    svg.appendChild(line);
+  }
+  for (const n of nodes) {
+    const p = pos[n.id];
+    const c = document.createElementNS(ns, "circle");
+    c.setAttribute("cx", p.x.toFixed(1)); c.setAttribute("cy", p.y.toFixed(1)); c.setAttribute("r", "7");
+    c.setAttribute("fill", "var(--accent)");
+    svg.appendChild(c);
+    const t = document.createElementNS(ns, "text");
+    t.setAttribute("x", p.x.toFixed(1)); t.setAttribute("y", (p.y + 20).toFixed(1));
+    t.setAttribute("font-size", "11.5");
+    t.setAttribute("text-anchor", "middle");
+    t.setAttribute("fill", "currentColor");
+    t.textContent = n.name;
+    svg.appendChild(t);
+  }
+  box.appendChild(svg);
+}
+
+/* ============================================ recherche sémantique ======= */
+function openSearchModal() {
+  $("searchModal").hidden = false;
+  $("searchQuery").focus();
+}
+function closeSearchModal() {
+  $("searchModal").hidden = true;
+  $("openSearchBtn").focus();
+}
+
+async function runSemanticSearch() {
+  const subj = activeSubject();
+  const q = $("searchQuery").value.trim();
+  if (!subj || !q) { toast("Choisissez un espace et saisissez une question."); return; }
+  const box = $("searchResults");
+  box.innerHTML = '<div class="hint">recherche…</div>';
+  try {
+    const r = await sf("/api/tutor/search", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subject: subj.name, query: q, k: 6 }),
+    });
+    if (!r.ok) throw new Error("recherche refusée HTTP " + r.status);
+    const data = await r.json();
+    const results = data.results || [];
+    box.innerHTML = "";
+    if (!results.length) {
+      box.innerHTML = '<div class="empty-note">Aucun fragment trouvé — élargissez la formulation.</div>';
+      return;
+    }
+    for (const res of results) {
+      const d = document.createElement("div");
+      d.className = "result";
+      const where = [
+        res.book_title || res.book_id,
+        res.chapter ? "chap. " + res.chapter : null,
+        res.page != null ? "p. " + res.page : null,
+      ].filter(Boolean).join(" · ");
+      d.textContent = "[" + Number(res.score).toFixed(3) + "]" + (where ? " " + where + "\n" : "\n") + res.text;
+      box.appendChild(d);
+    }
+  } catch (e) {
+    box.innerHTML = '<div class="empty-note">La recherche a échoué.</div>';
+  }
+}
+
+/* ================================================== tableau de bord ====== */
+/* Composition côté navigateur depuis les endpoints existants (research §6). */
+function dashCard(title, innerHtml, footLabel, onClick) {
+  const el = document.createElement("div");
+  el.className = "dash-card clickable";
+  el.innerHTML = "<h3>" + esc(title) + "</h3>" + innerHtml +
+    (footLabel ? '<div class="dc-foot">' + esc(footLabel) + " →</div>" : "");
+  el.addEventListener("click", onClick);
+  return el;
+}
+
+async function loadDashboard() {
+  const grid = $("dashGrid");
+  const hero = $("dashHero");
+  const hasSpace = !!activeSubject();
+  hero.hidden = hasSpace;
+  grid.innerHTML = "";
+  const cards = [];
+
+  // Révisions dues
+  if (hasSpace) {
+    try {
+      const d = await jf("/api/tutor/subjects/" + S.activeId + "/reviews/due");
+      const n = (d.due || []).length;
+      cards.push(dashCard("À réviser aujourd'hui",
+        n ? '<div class="dc-num">' + n + "</div><div class='dc-line'>fiche" + (n > 1 ? "s" : "") + " due" + (n > 1 ? "s" : "") + "</div>"
+          : "<div class='dc-line'>Rien à réviser — tout est à jour.</div>",
+        "Ouvrir Apprentissage", () => navigate("apprentissage")));
+    } catch (e) { /* carte omise */ }
+
+    // Notion la plus fragile
+    try {
+      const rows = Object.values(S.progressByConcept);
+      if (rows.length) {
+        const w = rows.slice().sort((a, b) => (a.score ?? 100) - (b.score ?? 100))[0];
+        cards.push(dashCard("Notion en cours",
+          '<div class="dc-num">' + Math.round(w.score ?? 0) + "%</div><div class='dc-line'>" + esc(w.concept) + "</div>",
+          "Continuer en Apprentissage", () => navigate("apprentissage")));
+      }
+    } catch (e) { /* carte omise */ }
+  }
+
+  // Conversations récentes
+  try {
+    if (!S.conversations.length) await loadConversations();
+    for (const c of S.conversations.slice(0, 3)) {
+      cards.push(dashCard("Conversation récente",
+        "<div class='dc-line' style='font-weight:600;'>" + esc(c.title || "Sans titre") + "</div>" +
+        "<div class='dc-line' style='font-size:11.5px;color:var(--ink-dim)'>" +
+        esc(c.subject_name || "espace supprimé") + " · " + esc(fmtWhen(c.updated_at || c.started_at)) + "</div>",
+        "Reprendre la discussion", async () => {
+          navigate("conversations");
+          openConversation(c.id);
+        }));
+    }
+  } catch (e) { /* cartes omises */ }
+
+  // Dernières sources ajoutées
+  if (hasSpace) {
+    try {
+      const books = (S.books.length ? S.books : await loadBooksStatusesThenReturn())
+        .slice().sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+      for (const b of books.slice(0, 3)) {
+        const [stL, stC] = STATUS_LABELS[docStatus(b)] || [docStatus(b), "pending"];
+        cards.push(dashCard("Source ajoutée",
+          "<div class='dc-line' style='font-weight:600;'>" + esc(b.title) + "</div>" +
+          '<div class="dc-line"><span class="badge ' + stC + '">' + esc(stL) + "</span></div>",
+          "Voir dans la Bibliothèque", () => navigate("bibliotheque")));
+      }
+    } catch (e) { /* cartes omises */ }
+
+    // Prochaine évaluation : aucune planification n'existe — état vide honnête.
+    cards.push(dashCard("Prochaine évaluation",
+      "<div class='dc-line'>Aucune évaluation planifiée.</div><div class='dc-line' style='color:var(--ink-dim)'>Générez un quiz ou un examen quand vous voulez vous tester.</div>",
+      "Aller aux Quiz / Examens", () => navigate("quiz")));
+  }
+
+  if (!cards.length) {
+    grid.innerHTML = '<div class="empty-note">Aucune donnée à afficher pour l\'instant.</div>';
+    return;
+  }
+  for (const c of cards) grid.appendChild(c);
+}
+
+/** Variante qui retourne les livres plutôt que de seulement rafraîchir. */
+async function loadBooksStatusesThenReturn() {
+  await loadBooksStatuses();
+  return S.books;
+}
+
+/* =================================================================== câblage */
+function wireAll() {
+  // Navigation principale (routage hash natif)
+  document.querySelectorAll(".mainnav .navbtn[data-route]").forEach(btn => {
+    btn.addEventListener("click", () => navigate(btn.dataset.route));
+  });
+  window.addEventListener("hashchange", applyRoute);
+
+  // En-tête global
+  $("spaceSelect").addEventListener("change", onSpaceChange);
+  $("modelEmbedding").addEventListener("change", (e) => putModel("embedding", e.target.value));
+  $("modelLLM").addEventListener("change", (e) => putModel("llm", e.target.value));
+
+  // Conversations
+  $("newConvBtn").addEventListener("click", () => toggleNewConvForm());
+  $("newConvForm").addEventListener("submit", (e) => { e.preventDefault(); createConversation(); });
+  $("newConvCancel").addEventListener("click", () => toggleNewConvForm(false));
+  $("sourcesBtn").addEventListener("click", openSourcesModal);
+
+  // Composer / vocal
+  $("composerForm").addEventListener("submit", (e) => { e.preventDefault(); submitQuestion(); });
+  $("qInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitQuestion(); }
+  });
+  $("cancelBtn").addEventListener("click", cancelGeneration);
+  $("micBtn").addEventListener("click", recordTutor);
+  $("voiceSendBtn").addEventListener("click", sendVoiceTranscript);
+  $("voiceCancelBtn").addEventListener("click", () => { $("voiceRow").hidden = true; });
+
+  // Bibliothèque
+  $("addSourceBtn").addEventListener("click", () => toggleImportPanel());
+  $("impBtn").addEventListener("click", importSource);
+  $("impFile").addEventListener("change", refreshImportSuggestion);
+  $("autoClassifyBtn").addEventListener("click", autoClassify);
+  $("srcSearch").addEventListener("input", () => renderLibrary());
+  $("openSearchBtn").addEventListener("click", openSearchModal);
+
+  // Apprentissage
+  $("notionSelect").addEventListener("change", updateMastery);
+  $("prepareBtn").addEventListener("click", prepareCourse);
+  $("dueLoadBtn").addEventListener("click", loadDueReviews);
+  $("ttsGenBtn").addEventListener("click", generateAudioSummary);
+  $("ttsPlayBtn").addEventListener("click", ttsSpeak);
+  $("ttsPauseBtn").addEventListener("click", ttsPauseResume);
+  $("ttsStopBtn").addEventListener("click", ttsStop);
+  $("ttsRate").addEventListener("input", () => {
+    $("ttsRateVal").textContent = ttsRateValue().toFixed(2) + "×";
+  });
+
+  // Entraîner
+  $("exGenBtn").addEventListener("click", genExercise);
+  $("exHintBtn").addEventListener("click", revealExerciseHint);
+  $("exSubmitBtn").addEventListener("click", submitExerciseAnswer);
+  $("exSolutionBtn").addEventListener("click", requestSolution);
+  $("exAddConceptBtn").addEventListener("click", addConcept);
+  $("exNewConcept").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addConcept(); } });
+
+  // Quiz / Examens
+  $("quizStartBtn").addEventListener("click", startQuiz);
+  $("examStartBtn").addEventListener("click", startExam);
+
+  // Progression
+  $("followRefreshBtn").addEventListener("click", () => { loadConversations(); loadConceptsAndProgress(); });
+
+  // Explorer
+  $("expLocateBtn").addEventListener("click", locateNotion);
+  $("expRankBtn").addEventListener("click", rankBooks);
+  $("expCompareBtn").addEventListener("click", compareNotion);
+  $("glossLoadBtn").addEventListener("click", loadGlossary);
+  $("mapLoadBtn").addEventListener("click", loadKnowledgeMap);
+  $("expNotion").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); locateNotion(); } });
+
+  // Modale recherche sémantique
+  $("searchCloseBtn").addEventListener("click", closeSearchModal);
+  $("searchGoBtn").addEventListener("click", runSemanticSearch);
+  $("searchModal").addEventListener("click", (e) => { if (e.target === $("searchModal")) closeSearchModal(); });
+  $("searchQuery").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); runSemanticSearch(); } });
+
+  // Modale catégories (déplacement / rangement)
+  $("catCloseBtn").addEventListener("click", closeCatModal);
+  $("catSaveBtn").addEventListener("click", saveCatEdits);
+  $("catCreateBtn").addEventListener("click", createCategoryInline);
+  $("catNewName").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); createCategoryInline(); }
+  });
+  $("catModal").addEventListener("click", (e) => { if (e.target === $("catModal")) closeCatModal(); });
+
+  // Modale sources actives
+  $("srcCloseBtn").addEventListener("click", closeSourcesModal);
+  $("srcCancelBtn").addEventListener("click", closeSourcesModal);
+  $("srcApplyBtn").addEventListener("click", applySources);
+  $("sourcesModal").addEventListener("click", (e) => { if (e.target === $("sourcesModal")) closeSourcesModal(); });
+  $("srcSearchIn").addEventListener("input", () => renderTree($("srcTreeBox"), "pop"));
+
+  // Tableau de bord — raccourcis première utilisation
+  $("heroImportBtn").addEventListener("click", () => { navigate("bibliotheque"); toggleImportPanel(true); });
+  $("heroConvBtn").addEventListener("click", () => { navigate("conversations"); toggleNewConvForm(true); });
+
+  // Échap ferme toute modale visible.
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (!$("searchModal").hidden) closeSearchModal();
+    if (!$("catModal").hidden) closeCatModal();
+    if (!$("sourcesModal").hidden) closeSourcesModal();
+  });
+
+  // Synthèse vocale
+  if (ttsSupported()) {
+    pickVoice();
+    if (typeof speechSynthesis.addEventListener === "function") {
+      speechSynthesis.addEventListener("voiceschanged", pickVoice);
+    }
+    speechSynthesis.onvoiceschanged = pickVoice;   // Safari legacy
+  } else {
+    $("ttsVoiceInfo").textContent = "Synthèse vocale indisponible dans ce navigateur.";
+    for (const id of ["ttsPlayBtn", "ttsPauseBtn", "ttsStopBtn"]) $(id).disabled = true;
+  }
+}
+
+/* =================================================================== init */
+wireAll();
+loadSelection();
+applyRoute();
+loadEngineBadge();
+loadModels();
+loadSubjects();
+
+
 
 </script>
 </body>

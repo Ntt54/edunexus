@@ -51,8 +51,8 @@ UI = `src/ollama_tutor/web/static/tutor.html`.
 - [X] T010 [US1] Implémenter `ConversationService` dans `src/ollama_tutor/tutor/conversations.py` : create (session vierge), list (TOUTES les sessions triées updated_at desc, avec subject_name/message_count/active_sources), rename, delete (cascade messages + sources via store, journalisée `_log_error` si échec)
 - [X] T011 [US1] Routes REST dans `src/ollama_tutor/web/server.py` : GET/POST `/api/tutor/conversations`, GET/PATCH/DELETE `/api/tutor/conversations/{id}` (formes exactes de contracts/api.md §1 ; 404 inconnue)
 - [X] T012 [US1] Tests contrat `tests/contract/test_conversations_api.py` : CRUD complet, 404, renommage persistant, suppression cascade (messages + sources), aucune autre conversation affectée
-- [ ] T013 [US1] UI vue Conversations dans `src/ollama_tutor/web/static/tutor.html` : liste (titre/espace/date/nb messages), boutons créer/renommer (inline)/supprimer (confirm), ouverture → historique rejoué via mécanisme `resume` existant ; état par conversation restauré
-- [ ] T014 [US1] Test intégration `tests/integration/test_conversations_persist.py` : créer 2 conversations + messages via TestClient/WS, redémarrer l'app (nouvelle create_app), rouvrir → historiques distincts intacts
+- [X] T013 [US1] UI vue Conversations dans `src/ollama_tutor/web/static/tutor.html` : liste (titre/espace/date/nb messages), boutons créer/renommer (inline)/supprimer (confirm), ouverture → historique rejoué via mécanisme `resume` existant ; état par conversation restauré
+- [X] T014 [US1] Test intégration `tests/integration/test_conversations_persist.py` : créer 2 conversations + messages via TestClient/WS, redémarrer l'app (nouvelle create_app), rouvrir → historiques distincts intacts
 
 **Checkpoint**: MVP livrable — conversations utilisables au quotidien.
 
@@ -64,11 +64,11 @@ UI = `src/ollama_tutor/web/static/tutor.html`.
 
 **Independent Test**: 3 PDF rangés dans 2 catégories → arborescence correcte, recherche par titre fonctionnelle, compteurs exacts.
 
-- [ ] T015 [P] [US2] Vue Bibliothèque arborescente dans `src/ollama_tutor/web/static/tutor.html` : regroupement Domaine (subjects) ▸ Catégorie ▸ Documents depuis endpoints existants, pliage/dépliage, compteur par nœud
-- [ ] T016 [P] [US2] Recherche par titre filtrant l'arbre avec chemin hiérarchique affiché + état vide explicite (aucun résultat) dans `tutor.html`
-- [ ] T017 [US2] Statut d'indexation temps réel par document (badge `indexing|ready|error`) via polling `GET /api/tutor/index-status` existant dans `tutor.html`
-- [ ] T018 [US2] Déplacement de document vers une autre catégorie (membership PUT existant) + confirmation obligatoire à la suppression d'un conteneur non vide avec choix du devenir, dans `tutor.html`
-- [ ] T019 [US2] Test contrat `tests/contract/test_library_move.py` : déplacement conserve le statut `ready` et ne déclenche aucune ré-indexation ni perte de chunks
+- [X] T015 [P] [US2] Vue Bibliothèque arborescente dans `src/ollama_tutor/web/static/tutor.html` : regroupement Domaine (subjects) ▸ Catégorie ▸ Documents depuis endpoints existants, pliage/dépliage, compteur par nœud
+- [X] T016 [P] [US2] Recherche par titre filtrant l'arbre avec chemin hiérarchique affiché + état vide explicite (aucun résultat) dans `tutor.html`
+- [X] T017 [US2] Statut d'indexation temps réel par document (badge `indexing|ready|error`) via polling `GET /api/tutor/index-status` existant dans `tutor.html`
+- [X] T018 [US2] Déplacement de document vers une autre catégorie (membership PUT existant) + confirmation obligatoire à la suppression d'un conteneur non vide avec choix du devenir, dans `tutor.html`
+- [X] T019 [US2] Test contrat `tests/contract/test_library_move.py` : déplacement conserve le statut `ready` et ne déclenche aucune ré-indexation ni perte de chunks
 
 **Checkpoint**: gestionnaire de connaissances utilisable seul.
 
@@ -80,9 +80,9 @@ UI = `src/ollama_tutor/web/static/tutor.html`.
 
 **Independent Test**: catégorie cochée = tous ses docs cochés ; décocher un doc → conteneur partiel ; doc multi-catégories = état unique.
 
-- [ ] T020 [US3] Module d'état de sélection client dans `src/ollama_tutor/web/static/tutor.html` (`S.selection` : Set de book_ids, dédupliqué quelle que soit la catégorie) + cases documents
-- [ ] T021 [US3] Cases conteneurs tri-états (tout/partiel/vide) avec action coche-tout/décoche-tout + compteur global « documents actifs » dans `tutor.html`
-- [ ] T022 [US3] Validation : `node --check` + parcours manuel S4 du quickstart (sélection groupe, partielle, multi-catégories)
+- [X] T020 [US3] Module d'état de sélection client dans `src/ollama_tutor/web/static/tutor.html` (`S.selection` : Set de book_ids, dédupliqué quelle que soit la catégorie) + cases documents
+- [X] T021 [US3] Cases conteneurs tri-états (tout/partiel/vide) avec action coche-tout/décoche-tout + compteur global « documents actifs » dans `tutor.html`
+- [X] T022 [US3] Validation : `node --check` + parcours manuel S4 du quickstart (sélection groupe, partielle, multi-catégories)
 
 **Checkpoint**: sélection exploitable ; prépare US4 sans dépendance backend nouvelle.
 
@@ -100,7 +100,7 @@ UI = `src/ollama_tutor/web/static/tutor.html`.
 - [X] T024 [US4] Filtre `book_ids` optionnel dans `src/ollama_tutor/tutor/retrieval.py` (filtrage passages avant scoring) + paramètre transmis par `service.ask()` dans `src/ollama_tutor/tutor/service.py`
 - [X] T025 [US4] Routes GET/PUT `/api/tutor/conversations/{id}/sources` dans `src/ollama_tutor/web/server.py` (contrat api.md §2 ; dédupliqué, ids inconnus ignorés)
 - [X] T026 [US4] Tests contrat `tests/contract/test_rag_scope.py` : question couverte par livre hors sélection ⇒ aucune citation de ce livre ; liste vide ⇒ mode sans contexte ; périmètre prioritaire sur défaut
-- [ ] T027 [US4] UI sélecteur popover « Sources : … » dans `src/ollama_tutor/web/static/tutor.html` : recherche, arborescence avec cases, Annuler/Appliquer, bouton résumé permanent (« Java · 4 documents »), indicateur « Aucune source active », persistance par conversation
+- [X] T027 [US4] UI sélecteur popover « Sources : … » dans `src/ollama_tutor/web/static/tutor.html` : recherche, arborescence avec cases, Annuler/Appliquer, bouton résumé permanent (« Java · 4 documents »), indicateur « Aucune source active », persistance par conversation
 
 **Checkpoint**: RAG scopé opérationnel de bout en bout.
 
@@ -114,10 +114,10 @@ UI = `src/ollama_tutor/web/static/tutor.html`.
 
 **Dépendance**: Phases 3–6 (les vues à relocaliser existent).
 
-- [ ] T028 [US5] Coquille de routage par hash (`#/accueil`, `#/conversations`, `#/bibliotheque`, `#/apprentissage`, `#/entrainer`, `#/quiz`, `#/progression`, `#/explorer`) + barre de navigation persistante + sections vues masquées/montées dans `src/ollama_tutor/web/static/tutor.html`
-- [ ] T029 [US5] Relocaliser les blocs existants selon la matrice de `research.md` §5 (import/recherche → Bibliothèque ; chat/vocal/réglages → Conversations ; notions/révisions → Apprentissage ; exercices → Entraîner ; quiz/examens → Quiz/Examens ; progress → Progression ; glossaire/comparer/carte/localiser/rank → Explorer) dans `tutor.html`
-- [ ] T030 [US5] Préservation d'état inter-vues (exercice en cours, filtres, position) + navigation compacte responsive dans `tutor.html`
-- [ ] T031 [US5] Audit final : grep croisé endpoints ↔ server.py, `node --check`, matrice « zéro perte » revérée élément par élément
+- [X] T028 [US5] Coquille de routage par hash (`#/accueil`, `#/conversations`, `#/bibliotheque`, `#/apprentissage`, `#/entrainer`, `#/quiz`, `#/progression`, `#/explorer`) + barre de navigation persistante + sections vues masquées/montées dans `src/ollama_tutor/web/static/tutor.html`
+- [X] T029 [US5] Relocaliser les blocs existants selon la matrice de `research.md` §5 (import/recherche → Bibliothèque ; chat/vocal/réglages → Conversations ; notions/révisions → Apprentissage ; exercices → Entraîner ; quiz/examens → Quiz/Examens ; progress → Progression ; glossaire/comparer/carte/localiser/rank → Explorer) dans `tutor.html`
+- [X] T030 [US5] Préservation d'état inter-vues (exercice en cours, filtres, position) + navigation compacte responsive dans `tutor.html`
+- [X] T031 [US5] Audit final : grep croisé endpoints ↔ server.py, `node --check`, matrice « zéro perte » revérée élément par élément
 
 **Checkpoint**: plateforme naviguable complète.
 
@@ -129,8 +129,8 @@ UI = `src/ollama_tutor/web/static/tutor.html`.
 
 **Independent Test**: données d'exemple → chaque carte affiche et mène à son espace ; première utilisation → cartes vides propres.
 
-- [ ] T032 [US6] Vue Accueil dans `src/ollama_tutor/web/static/tutor.html` : composition des endpoints existants (gaps/progress, conversations, books, examens) en cartes résumé
-- [ ] T033 [US6] Cartes cliquables vers leur espace + états vides « première utilisation » (inviter import/conversation) dans `tutor.html`
+- [X] T032 [US6] Vue Accueil dans `src/ollama_tutor/web/static/tutor.html` : composition des endpoints existants (gaps/progress, conversations, books, examens) en cartes résumé
+- [X] T033 [US6] Cartes cliquables vers leur espace + états vides « première utilisation » (inviter import/conversation) dans `tutor.html`
 
 ---
 
@@ -140,23 +140,23 @@ UI = `src/ollama_tutor/web/static/tutor.html`.
 
 **Independent Test**: titre explicite → proposition cohérente applicable en un clic ; modification possible.
 
-- [ ] T034 [US7] Suggestion de catégorie à l'import par correspondance floue titre ↔ catégories existantes (sans appel LLM) dans le panneau d'import de `src/ollama_tutor/web/static/tutor.html` (accepter / choisir autre)
-- [ ] T035 [US7] Vérifier non-régression de la classification par lots existante (« Classer automatiquement ») après intégration — parcours manuel + tests existants verts
+- [X] T034 [US7] Suggestion de catégorie à l'import par correspondance floue titre ↔ catégories existantes (sans appel LLM) dans le panneau d'import de `src/ollama_tutor/web/static/tutor.html` (accepter / choisir autre)
+- [X] T035 [US7] Vérifier non-régression de la classification par lots existante (« Classer automatiquement ») après intégration — parcours manuel + tests existants verts
 
 ---
 
 ## Phase 10: US8 — Emplacement Parcours réservé (P3)
 
-- [ ] T036 [US8] Entrée « Parcours » dans la navigation, désactivée avec badge « à venir », + commentaire architecture pointant data-model.md §Parcours dans `src/ollama_tutor/web/static/tutor.html`
+- [X] T036 [US8] Entrée « Parcours » dans la navigation, désactivée avec badge « à venir », + commentaire architecture pointant data-model.md §Parcours dans `src/ollama_tutor/web/static/tutor.html`
 
 ---
 
 ## Phase 11: Polish & Cross-Cutting
 
-- [ ] T037 Audit final de la matrice de relocalisation (research.md §5) : chaque fonctionnalité actuelle accessible exactement une fois, aucune régression (liste de contrôle manuelle + suite)
-- [ ] T038 [P] Relancer `./benchmark.sh` (chemins de rendu touchés) et comparer tok/s à la baseline (3,83 tok/s API)
-- [ ] T039 Suite complète verte + quickstart S1–S8 passés manuellement et cochés
-- [ ] T040 Mettre à jour `README.md` et `AGENTS.md` (navigation multi-espaces, commande edunexus, port 9215 déjà documentés — compléter si écart)
+- [X] T037 Audit final de la matrice de relocalisation (research.md §5) : chaque fonctionnalité actuelle accessible exactement une fois, aucune régression (liste de contrôle manuelle + suite)
+- [X] T038 [P] Relancer `./benchmark.sh` (chemins de rendu touchés) et comparer tok/s à la baseline (3,83 tok/s API)
+- [X] T039 Suite complète verte + quickstart S1–S8 passés manuellement et cochés
+- [X] T040 Mettre à jour `README.md` et `AGENTS.md` (navigation multi-espaces, commande edunexus, port 9215 déjà documentés — compléter si écart)
 
 ---
 

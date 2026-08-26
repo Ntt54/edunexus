@@ -1644,6 +1644,36 @@ class LibraryStore:
         )
         return [r["book_id"] for r in rows]
 
+    def append_conversation_message(
+        self, session_id: str, role: str, text: str
+    ) -> None:
+        """Append ``{role, text, ts}`` au transcript JSON de la conversation.
+
+        Crée ``<tutor_dir>/transcripts/<id>.json`` au premier message et met
+        ``transcript_path`` à jour si vide. Best-effort : ne lève jamais vers
+        le run (perte de journal préférable à une réponse cassée).
+        """
+        session = self.get_tutoring_session(session_id)
+        if session is None:
+            return
+        tdir = self.tutor_dir / "transcripts"
+        tdir.mkdir(parents=True, exist_ok=True)
+        p = tdir / f"{session_id}.json"
+        try:
+            data = json.loads(p.read_text(encoding="utf-8")) if p.is_file() else []
+            if not isinstance(data, list):
+                data = []
+            data.append({"role": role, "text": text, "ts": time.time()})
+            p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            if not session.transcript_path:
+                self._conn.execute(
+                    "UPDATE tutoring_sessions SET transcript_path = ? WHERE id = ?",
+                    (str(p), session_id),
+                )
+                self._conn.commit()
+        except OSError:
+            pass
+
     def create_tutoring_session(
         self,
         subject_id: str,

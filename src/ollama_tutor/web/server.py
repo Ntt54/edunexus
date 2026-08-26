@@ -1353,6 +1353,26 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             "subject_id": sess.subject_id,
         }}
 
+    @app.get("/api/tutor/conversations/{conversation_id}")
+    async def conversation_get(conversation_id: str) -> dict[str, Any]:
+        sess = tutor_store.get_tutoring_session(conversation_id)
+        if sess is None:
+            raise HTTPException(status_code=404, detail="Conversation inconnue")
+        frames = tutor_store.get_session_transcript(conversation_id)
+        messages = [
+            {"role": str(f.get("role", "")), "text": str(f.get("text", ""))}
+            for f in frames
+            if isinstance(f, dict) and f.get("role")
+        ]
+        return {
+            "conversation": {
+                "id": sess.id,
+                "title": sess.title or "",
+                "subject_id": sess.subject_id,
+            },
+            "messages": messages,
+        }
+
     @app.patch("/api/tutor/conversations/{conversation_id}")
     async def conversations_rename(
         conversation_id: str, payload: ConversationRename
