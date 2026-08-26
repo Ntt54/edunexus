@@ -346,6 +346,16 @@ class Config:
         self._data.setdefault("tutor", {})["top_k"] = max(1, min(20, value))
         self._schedule_save()
 
+    @property
+    def tutor_reranking_enabled(self) -> bool:
+        """Enable post-retrieval reranking (US12, default False)."""
+        return self._data.get("tutor", {}).get("reranking_enabled", False)
+
+    @tutor_reranking_enabled.setter
+    def tutor_reranking_enabled(self, value: bool) -> None:
+        self._data.setdefault("tutor", {})["reranking_enabled"] = value
+        self._schedule_save()
+
     # ------------------------------------------------------------------
     # Fournisseur LLM (B1 multi-fournisseur)
     # ------------------------------------------------------------------
@@ -548,4 +558,5 @@ class Config:
             "ocr_dpi": self.tutor_ocr_dpi,
             "pdftoppm_bin": self.tutor_pdftoppm_bin,
             "max_parallel_embed": self.tutor_max_parallel_embed,
+            "reranking_enabled": self.tutor_reranking_enabled,
         }

@@ -27,6 +27,7 @@ from .store import LibraryStore
 import re
 
 from .vector import NumpyVectorIndex, ScoredChunk
+from .reranker import SimpleReranker
 
 # Retrieval floor (research D11): chunks below this cosine score are dropped.
 DEFAULT_FLOOR = 0.25
@@ -225,13 +226,16 @@ async def retrieve_hybrid(
     model: str,
     k: int = 5,
     book_ids: list[str] | None = None,
+    reranker: SimpleReranker | None = None,
 ) -> list[dict[str, Any]]:
     """Hybrid BM25 + cosine retrieval fused via RRF.
 
     1. Cosine (semantic) search via the existing ``Retriever``.
     2. BM25 (lexical) search over all subject chunks.
     3. Fuse both ranked lists with ``reciprocal_rank_fusion``.
-    4. Return top-*k* results as dicts with transparency keys:
+    4. *(US12)* When a *reranker* is supplied, apply post-retrieval
+       reranking on the fused result list before returning.
+    5. Return top-*k* results as dicts with transparency keys:
        ``chunk_id, text, score (fused), cosine_score, bm25_score``.
     """
     # --- Build a temporary Retriever for the cosine path ---
@@ -294,6 +298,30 @@ async def retrieve_hybrid(
             "cosine_score": round(cosine_map.get(cid, 0.0), 4),
             "bm25_score": round(bm25_map.get(cid, 0.0), 4),
         })
+
+    # --- US12: optional post-retrieval reranking ---
+    if reranker is not None and results:
+        # Convert dicts → ScoredChunk so the reranker can operate on them.
+        sc_candidates: list[ScoredChunk] = []
+        for d in results:
+            sc_candidates.append(ScoredChunk(
+                chunk_id=d["chunk_id"],
+                book_id="",
+                book_title="",
+                chapter=None,
+                page=None,
+                score=d["score"],
+                text=d["text"],
+            ))
+        reranked = reranker.rerank(question, sc_candidates, top_k=k)
+        # Rebuild the result dicts preserving per-method scores.
+        sc_index = {d["chunk_id"]: d for d in results}
+        results = []
+        for sc in reranked:
+            orig = sc_index.get(sc.chunk_id)
+            if orig is not None:
+                results.append(orig)
+
     return results
 
 
@@ -307,12 +335,14 @@ class Retriever:
         model: str,
         floor: float = DEFAULT_FLOOR,
         max_context_chars: int = DEFAULT_MAX_CONTEXT_CHARS,
+        reranker: SimpleReranker | None = None,
     ) -> None:
         self.store = store
         self.client = client
         self.model = model
         self.floor = floor
         self.max_context_chars = max_context_chars
+        self.reranker = reranker
         # subject_id -> (NumpyVectorIndex, {chunk_id: row}, {book_id: title})
         self._cache: dict[str, tuple[NumpyVectorIndex, dict[str, dict], dict[str, str]]] = {}
 
@@ -364,6 +394,9 @@ class Retriever:
         search_k = max(k, 24) * 3 if scope is not None else k
         scored = idx.search(vectors[0], search_k, floor=self.floor)
         out: list[ScoredChunk] = []
+        # When reranking, over-fetch so the reranker has a broader pool to
+        # reorder; otherwise collect exactly *k* candidates.
+        fetch_k = k * 3 if self.reranker is not None else k
         for cid, score in scored:
             r = meta[cid]
             book_id = str(r["book_id"])
@@ -378,8 +411,13 @@ class Retriever:
                 score=score,
                 text=r["text"],
             ))
-            if len(out) >= k:
+            if len(out) >= fetch_k:
                 break
+
+        # --- US12: optional post-retrieval reranking ---
+        if self.reranker is not None and out:
+            out = self.reranker.rerank(question, out, top_k=k)
+
         return out
 
     def assemble_context(self, chunks: list[ScoredChunk], max_chars: int | None = None) -> str:
@@ -475,4 +513,111 @@ class Retriever:
             chunks.sort(key=lambda c: c.score, reverse=True)
             result[bid] = chunks[:k_per_book]
         return result
+
+
+# ------------------------------------------------------------------
+# US10 — Citation validation (T058, FR-004 SC-004)
+# ------------------------------------------------------------------
+
+# Patterns that match citation references in LLM responses.
+# Covers the mechanical ``[Livre X — ...]`` format emitted by
+# ``assemble_context_blocks``, English ``[Book X ...]``, and
+# markdown-bold variants like ``**[Livre X]**``.
+# The full match (including prefix) is returned for transparent reporting.
+_CITATION_RE = re.compile(
+    r"(?:\*\*)?"           # optional markdown bold opener
+    r"\["                  # opening bracket
+    r"(?:Livre|Book)\s+"   # standard prefix (FR/EN)
+    r"[^]]+"               # citation body (everything until ']')
+    r"\]"                  # closing bracket
+    r"(?:\*\*)?",          # optional markdown bold closer
+    re.IGNORECASE,
+)
+
+
+def _normalise_citation(raw: str) -> str:
+    """Strip brackets, whitespace, trailing punctuation and lower-case for comparison.
+
+    The input can be a full citation like ``[Livre Chimie Générale — p. 12]``
+    or just the inner body.  The output is a plain lowercase string that can
+    be compared against normalised source keys.
+    """
+    s = raw.strip().strip("[]").rstrip(".,;:]").strip().lower()
+    # Normalise long dashes (em-dash, en-dash) to a single " — " for matching.
+    s = re.sub(r"\s*[-–—]\s*", " — ", s)
+    # Collapse multiple spaces.
+    s = re.sub(r"\s{2,}", " ", s)
+    return s
+
+
+def _source_key(source: dict[str, Any]) -> str:
+    """Build a normalised lookup key from a source dict.
+
+    A source dict typically has ``book``, optionally ``chapter`` and ``page``.
+    The key is ``"livre x — chapitre y — p. z"`` (lower-cased) so it matches
+    what ``_normalise_citation`` produces from LLM output.
+    """
+    book = str(source.get("book", "")).strip().lower()
+    parts = [f"livre {book}"]
+    chapter = source.get("chapter")
+    if chapter:
+        parts.append(f"chapitre {str(chapter).lower()}")
+    page = source.get("page")
+    if page is not None:
+        parts.append(f"p. {page}")
+    return " — ".join(parts)
+
+
+def _book_only_key(source: dict[str, Any]) -> str:
+    """Return just the lowered book title for partial matching."""
+    return str(source.get("book", "")).strip().lower()
+
+
+def validate_citations(
+    response_text: str,
+    available_sources: list[dict[str, Any]],
+) -> tuple[list[str], list[str]]:
+    """Validate citation references in *response_text* against *available_sources*.
+
+    Extracts ``[Livre X ...]`` / ``[Book X ...]`` patterns (including
+    markdown-bold wrappers) from the response and checks each against the
+    source list.  A citation is **valid** when its book name matches the book
+    of an available source; **invalid** otherwise.
+
+    Returns ``(valid_citations, invalid_citations)`` — each is a list of the
+    raw citation strings as they appeared in the text.
+
+    This function is UI-framework-free (no textual / fastapi imports).
+    """
+    if not response_text:
+        return [], []
+
+    matches = _CITATION_RE.findall(response_text)
+    if not matches:
+        return [], []
+
+    # Build lookup sets from available sources.
+    book_keys = {_book_only_key(s) for s in available_sources}
+    full_keys = {_source_key(s) for s in available_sources}
+
+    valid: list[str] = []
+    invalid: list[str] = []
+
+    for citation_text in matches:
+        norm = _normalise_citation(citation_text)
+        # Check 1 — exact full-key match (book + chapter + page).
+        # Check 2 — book-only match (looser, but still a known source).
+        if norm in full_keys or norm in book_keys:
+            valid.append(citation_text)
+        else:
+            # Try partial: does the normalised body contain any source book name?
+            matched_book = any(
+                bk and bk in norm for bk in book_keys if bk
+            )
+            if matched_book:
+                valid.append(citation_text)
+            else:
+                invalid.append(citation_text)
+
+    return valid, invalid
 

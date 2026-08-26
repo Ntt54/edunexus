@@ -306,15 +306,16 @@ def parse_quiz_question_response(text: str, kind: str) -> dict[str, Any]:
     """Parse an LLM quiz-question JSON into ``(payload, answer)`` pieces."""
     data = _extract_json(text)
     kind = kind or "open"
+    question_text = str(data.get("question", "")).strip()
     if kind == "mcq":
         choices = data.get("choices", []) or []
         choices = [str(c) for c in choices][:4]
         while len(choices) < 2:
             choices.append("")
-        payload = {"choices": choices}
+        payload = {"question": question_text, "choices": choices}
         answer = {"index": int(data.get("answer_index", 0) or 0)}
     elif kind == "true_false":
-        payload = {}
+        payload = {"question": question_text}
         answer = {"value": bool(data.get("answer", False))}
     elif kind == "matching":
         pairs = data.get("pairs", []) or []
@@ -325,10 +326,10 @@ def parse_quiz_question_response(text: str, kind: str) -> dict[str, Any]:
                     {"left": str(p.get("left", "")), "right": str(p.get("right", ""))}
                 )
         order = data.get("answer_order", []) or list(range(len(norm_pairs)))
-        payload = {"pairs": norm_pairs}
+        payload = {"question": question_text, "pairs": norm_pairs}
         answer = {"order": [int(x) for x in order][: len(norm_pairs)]}
     else:  # open / code
-        payload = {"language": str(data.get("language", "python") or "python")}
+        payload = {"question": question_text, "language": str(data.get("language", "python") or "python")}
         answer = {"text": str(data.get("model_answer", "") or "")}
     return {"payload": payload, "answer": answer}
 
@@ -382,6 +383,59 @@ class QuizReport:
 # Kept separate from ``progress.D7_WEIGHTS`` so the US4 weight test stays exact.
 _QUIZ_DELTA = 10.0
 _EXAM_DELTA = 8.0
+
+
+def _answer_to_text(qtype: str, payload: dict[str, Any], answer: dict[str, Any]) -> str:
+    """Convert a stored correct answer to a human-readable string (T062)."""
+    if qtype == "mcq":
+        choices = payload.get("choices", [])
+        idx = answer.get("index", -1)
+        if 0 <= idx < len(choices):
+            return str(choices[idx])
+        return str(idx)
+    elif qtype == "true_false":
+        return "Vrai" if answer.get("value") else "Faux"
+    elif qtype == "matching":
+        pairs = payload.get("pairs", [])
+        order = answer.get("order", [])
+        parts = []
+        for i, left_idx in enumerate(order):
+            if i < len(pairs):
+                left = pairs[i].get("left", "")
+                right_idx = left_idx if isinstance(left_idx, int) and left_idx < len(pairs) else i
+                right = pairs[right_idx].get("right", "") if right_idx < len(pairs) else ""
+                parts.append(f"{left} → {right}")
+        return "; ".join(parts)
+    else:  # open / code
+        return str(answer.get("text", ""))
+
+
+def _response_to_text(qtype: str, payload: dict[str, Any], response: Any) -> str:
+    """Convert a learner's response to a human-readable string (T062)."""
+    if qtype == "mcq":
+        choices = payload.get("choices", [])
+        try:
+            idx = int(response)
+            if 0 <= idx < len(choices):
+                return str(choices[idx])
+        except (TypeError, ValueError):
+            pass
+        return str(response)
+    elif qtype == "true_false":
+        return "Vrai" if response else "Faux"
+    elif qtype == "matching":
+        pairs = payload.get("pairs", [])
+        order = list(response) if isinstance(response, (list, tuple)) else []
+        parts = []
+        for i, left_idx in enumerate(order):
+            if i < len(pairs):
+                left = pairs[i].get("left", "")
+                right_idx = left_idx if isinstance(left_idx, int) and left_idx < len(pairs) else i
+                right = pairs[right_idx].get("right", "") if right_idx < len(pairs) else ""
+                parts.append(f"{left} → {right}")
+        return "; ".join(parts)
+    else:  # open / code
+        return str(response)
 
 
 class QuizEngine:
@@ -555,6 +609,19 @@ class QuizEngine:
         per_question: list[dict[str, Any]] = []
         total_points = 0.0
         earned = 0.0
+
+        # Pre-resolve concept names for error recording (T062).
+        concept_ids_needed = {q.get("concept_id") for q in questions if q.get("concept_id")}
+        concept_name_map: dict[str, str] = {}
+        if concept_ids_needed:
+            ids_list = list(concept_ids_needed)
+            placeholders = ",".join("?" for _ in ids_list)
+            rows = self.store._conn.execute(
+                f"SELECT id, name FROM concepts WHERE id IN ({placeholders})",
+                ids_list,
+            ).fetchall()
+            concept_name_map = {r["id"]: r["name"] for r in rows}
+
         for q in questions:
             qid = q["id"]
             points = float(q.get("points") or 0.0)
@@ -578,6 +645,22 @@ class QuizEngine:
                 "awarded": awarded,
                 "points": points,
             })
+            # T062: record error for incorrect/partial answers in error_history.
+            if verdict in ("incorrect", "partial") and concept_id:
+                q_payload = q.get("payload") or {}
+                q_answer = q.get("answer") or {}
+                concept_name = concept_name_map.get(concept_id, concept_id)
+                question_text = q_payload.get("question", "")
+                correct_answer_text = _answer_to_text(q["type"], q_payload, q_answer)
+                given_answer_text = _response_to_text(q["type"], q_payload, response)
+                self.store.record_error(
+                    subject_id=quiz["subject_id"],
+                    concept_name=concept_name,
+                    question_text=question_text,
+                    given_answer=given_answer_text,
+                    correct_answer=correct_answer_text,
+                    error_type=verdict,
+                )
             self._insert_answer(QuizAnswer(
                 question_id=qid, verdict=verdict,
                 response={"value": response}, awarded=awarded,

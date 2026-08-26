@@ -343,6 +343,15 @@ class LibraryStore:
                 completed_at TEXT,
                 FOREIGN KEY (path_id) REFERENCES learning_paths(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS learner_profile (
+                id TEXT PRIMARY KEY,
+                total_xp INTEGER DEFAULT 0,
+                current_streak INTEGER DEFAULT 0,
+                longest_streak INTEGER DEFAULT 0,
+                last_active_date TEXT,
+                badges_json TEXT DEFAULT '[]'
+            );
             """
         )
         # Error history (Feature 007 — US11)
@@ -2196,6 +2205,94 @@ class LibraryStore:
     def set_subject_domain(self, subject_id: str, domain: str) -> None:
         self._conn.execute("UPDATE subjects SET domain = ? WHERE id = ?", (domain, subject_id))
         self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Gamification — learner profile (US15 / T086-T087)
+    # ------------------------------------------------------------------
+
+    _PROFILE_ID = "default"
+
+    def _ensure_profile(self) -> None:
+        """Insert a default learner_profile row if none exists."""
+        row = self._conn.execute(
+            "SELECT id FROM learner_profile WHERE id = ?",
+            (self._PROFILE_ID,),
+        ).fetchone()
+        if row is None:
+            self._conn.execute(
+                "INSERT INTO learner_profile (id, total_xp, current_streak, "
+                "longest_streak, last_active_date, badges_json) "
+                "VALUES (?, 0, 0, 0, NULL, '[]')",
+                (self._PROFILE_ID,),
+            )
+            self._conn.commit()
+
+    def add_xp(self, amount: int) -> int:
+        """Add *amount* XP to the learner profile; returns new total."""
+        self._ensure_profile()
+        self._conn.execute(
+            "UPDATE learner_profile SET total_xp = total_xp + ? WHERE id = ?",
+            (amount, self._PROFILE_ID),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT total_xp FROM learner_profile WHERE id = ?",
+            (self._PROFILE_ID,),
+        ).fetchone()
+        return int(row["total_xp"])
+
+    def update_streak(self) -> int:
+        """Update the daily streak based on today's date; returns new streak."""
+        self._ensure_profile()
+        today = date.today().isoformat()
+        row = self._conn.execute(
+            "SELECT current_streak, longest_streak, last_active_date "
+            "FROM learner_profile WHERE id = ?",
+            (self._PROFILE_ID,),
+        ).fetchone()
+        current_streak = int(row["current_streak"])
+        longest_streak = int(row["longest_streak"])
+        last_active = row["last_active_date"]
+
+        if last_active == today:
+            # Already active today — no change.
+            new_streak = current_streak
+        elif last_active is not None:
+            from datetime import timedelta
+
+            last_date = date.fromisoformat(last_active)
+            delta = (date.today() - last_date).days
+            if delta == 1:
+                new_streak = current_streak + 1
+            else:
+                new_streak = 1
+        else:
+            new_streak = 1
+
+        new_longest = max(longest_streak, new_streak)
+        self._conn.execute(
+            "UPDATE learner_profile SET current_streak = ?, longest_streak = ?, "
+            "last_active_date = ? WHERE id = ?",
+            (new_streak, new_longest, today, self._PROFILE_ID),
+        )
+        self._conn.commit()
+        return new_streak
+
+    def get_learner_profile(self) -> dict[str, Any]:
+        """Return the full learner profile as a dict."""
+        self._ensure_profile()
+        row = self._conn.execute(
+            "SELECT * FROM learner_profile WHERE id = ?",
+            (self._PROFILE_ID,),
+        ).fetchone()
+        d = dict(row)
+        # Deserialize badges_json.
+        try:
+            d["badges"] = json.loads(d.pop("badges_json", "[]"))
+        except (json.JSONDecodeError, TypeError):
+            d["badges"] = []
+            d.pop("badges_json", None)
+        return d
 
     # ------------------------------------------------------------------
     # Maintenance

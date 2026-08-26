@@ -228,6 +228,21 @@ class ProjectCreate(BaseModel):
     root: str
 
 
+class ExamImportRequest(BaseModel):
+    paths: list[str]
+
+
+class ExamAnalyzeRequest(BaseModel):
+    exam_text: str
+
+
+class ExamResolveRequest(BaseModel):
+    question_statement: str
+    concepts: list[str] = []
+    hint_level: int = 0
+    rag_context: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
@@ -856,6 +871,20 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             ]
         }
 
+    @app.get("/api/tutor/subjects/{subject_id}/errors")
+    @app.get("/api/tutor/errors")
+    async def tutor_error_history(
+        subject_id: str = "",
+        concept_name: str = "",
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Return detailed error history for a subject (US11, T065)."""
+        sid = _resolve_tutor_subject(subject_id)
+        errors = tutor_service.get_error_history(
+            sid, concept_name=concept_name or None, limit=limit
+        )
+        return {"errors": errors}
+
     @app.put("/api/tutor/subjects/{subject_id}/path")
     @app.put("/api/tutor/path")
     async def tutor_path(subject_id: str = "", payload: TutorPathRequest = TutorPathRequest()) -> dict[str, Any]:
@@ -867,6 +896,30 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                 for c in concepts
             ]
         }
+
+    @app.post("/api/tutor/subjects/{subject_id}/auto-path")
+    async def tutor_auto_path(subject_id: str) -> dict[str, Any]:
+        """Auto-generate a learning path from concepts and diagnostic gaps (US13 / T076).
+
+        Calls the LLM to order concepts by pedagogical dependency, creating a
+        LearningPath with PathStep entries. Gaps are prioritised.
+        """
+        try:
+            path = await tutor_service.auto_generate_path(subject_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="sujet introuvable ou aucun concept")
+        except Exception as exc:
+            _log_error(
+                config,
+                "auto-path",
+                f"Génération automatique de parcours impossible : {exc}",
+                traceback.format_exc(),
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="Le moteur LLM est injoignable — la génération de parcours est indisponible.",
+            )
+        return path
 
     # ------------------------------------------------------------------
     # REST: tutor revision (004-local-ai-tutor, US5) — thin transport only
@@ -960,6 +1013,44 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         if data is None:
             raise HTTPException(status_code=404, detail="quiz introuvable")
         return data
+
+    # ------------------------------------------------------------------
+    # REST: US14 — Mode Épreuve (T083): exam document import & resolution
+    # ------------------------------------------------------------------
+
+    @app.post("/api/tutor/exam/import")
+    async def exam_import(payload: ExamImportRequest) -> dict[str, Any]:
+        """Import exam document(s) by file paths and return parsed text (T083)."""
+        if not payload.paths:
+            raise HTTPException(status_code=400, detail="paths requis")
+        try:
+            exam_text = tutor_service.parse_exam_document(payload.paths)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"exam_text": exam_text}
+
+    @app.post("/api/tutor/exam/analyze")
+    async def exam_analyze(payload: ExamAnalyzeRequest) -> dict[str, Any]:
+        """Analyze exam OCR text and return extracted questions (T083)."""
+        if not payload.exam_text.strip():
+            raise HTTPException(status_code=400, detail="exam_text requis")
+        questions = await tutor_service.analyze_exam(payload.exam_text)
+        return {"questions": questions}
+
+    @app.post("/api/tutor/exam/questions/{question_id}/resolve")
+    async def exam_resolve_question(
+        question_id: str, payload: ExamResolveRequest
+    ) -> dict[str, Any]:
+        """Resolve an exam question: full answer or progressive hint (T083)."""
+        result = await tutor_service.resolve_exam_question(
+            payload.question_statement,
+            payload.concepts,
+            hint_level=payload.hint_level,
+            rag_context=payload.rag_context,
+        )
+        return result
 
     # ------------------------------------------------------------------
     # REST: tutor session memory & continuity (004-local-ai-tutor, US6) — T045
@@ -1658,6 +1749,15 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         return {"ok": True, "message": "Redémarrage en cours…"}
 
     # ------------------------------------------------------------------
+    # REST: learner profile / gamification (US15)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/tutor/profile")
+    async def tutor_profile() -> dict[str, Any]:
+        """Return the learner profile with XP, streak and badges (US15)."""
+        return {"profile": tutor_store.get_learner_profile()}
+
+    # ------------------------------------------------------------------
     # WebSocket: tutor grounded Q&A (004-local-ai-tutor, US2)
     # ------------------------------------------------------------------
 
@@ -1778,6 +1878,13 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                             "prompt_tokens": frame.get("prompt_tokens", 0),
                             "generated_tokens": frame.get("generated_tokens", 0),
                             "tok_s": frame.get("tok_s", 0.0),
+                        })
+                    elif ftype == "citation_warnings":
+                        # US10 — T060: surface citation validation warnings to the client.
+                        await safe_send({
+                            "type": "citation_warnings",
+                            "warnings": frame.get("warnings", []),
+                            "valid_citations": frame.get("valid_citations", []),
                         })
                     elif ftype == "error":
                         await safe_send({

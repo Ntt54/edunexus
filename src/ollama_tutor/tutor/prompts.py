@@ -414,6 +414,78 @@ Sois précis, cite les concepts importants. Toute la réponse en français."""
 
 
 # ---------------------------------------------------------------------------
+# US13 — Parcours auto-générés (T074)
+# ---------------------------------------------------------------------------
+
+
+def build_learning_path_prompt(
+    concepts: list[str],
+    gaps: list[str],
+    level: str = "intermediate",
+) -> str:
+    """Build a system prompt asking the LLM to order concepts by pedagogical dependency.
+
+    ``concepts`` is a list of concept names the learner needs to cover.
+    ``gaps`` is a list of weak areas identified from a diagnostic or progress
+    tracker — these should be prioritised (placed earlier in the path).
+    ``level`` is the learner's adaptation level.
+
+    The LLM must return a JSON array of concept names in the recommended
+    learning order, with gap concepts placed first and prerequisite concepts
+    before dependent ones.
+    """
+    level = _normalize_level(level)
+    concept_block = "\n".join(f"- {c}" for c in concepts) if concepts else "(aucun concept)"
+    gap_block = "\n".join(f"- {g}" for g in gaps) if gaps else "(aucun point faible identifié)"
+
+    lines: list[str] = []
+    lines.append(
+        "Tu es un tuteur pédagogique qui conçoit un parcours d'apprentissage "
+        "optimisé en français."
+    )
+    lines.append("")
+    lines.append("Tâche — Ordonner les concepts par dépendance pédagogique :")
+    lines.append(
+        "À partir de la liste de concepts et des points faibles identifiés, "
+        "produis un ordre d'apprentissage optimal."
+    )
+    lines.append("")
+    lines.append(f"Niveau de l'élève : {level}.")
+    lines.append("")
+    lines.append("Concepts à couvrir :")
+    lines.append(concept_block)
+    lines.append("")
+    lines.append("Points faibles identifiés (à prioriser) :")
+    lines.append(gap_block)
+    lines.append("")
+    lines.append("Règles d'ordonnancement :")
+    lines.append(
+        "- Les concepts identifiés comme « points faibles » doivent apparaître "
+        "en priorité (plus tôt dans le parcours)."
+    )
+    lines.append(
+        "- Les concepts prérequis doivent précéder les concepts qui en dépendent."
+    )
+    lines.append(
+        "- Chaque concept de la liste initiale DOIT apparaître exactement une fois "
+        "dans la réponse."
+    )
+    lines.append(
+        "- Si des concepts n'ont aucune dépendance entre eux, garde leur ordre "
+        "original."
+    )
+    lines.append("")
+    lines.append("Réponds STRICTEMENT en JSON, sans aucun texte autour, sous la forme :")
+    lines.append('["Concept 1", "Concept 2", "Concept 3"]')
+    lines.append("")
+    lines.append(
+        "Toute la réponse est en français. Le tableau doit contenir EXACTEMENT "
+        f"{len(concepts)} éléments correspondant aux concepts fournis."
+    )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # US3 — Diagnostic initial / quiz de positionnement (T020)
 # ---------------------------------------------------------------------------
 
@@ -477,3 +549,130 @@ def build_diagnostic_question_prompt(
     )
     lines.append("- Toute la réponse est en français.")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# US14 — Mode Épreuve (T080): exam document analysis prompt
+# ---------------------------------------------------------------------------
+
+
+def build_exam_analysis_prompt(exam_text: str) -> list:
+    """Build prompts asking the LLM to analyze OCR-extracted exam text.
+
+    Returns a list of ``Message`` objects (system + user) that instruct the
+    model to extract numbered questions with their associated concepts from the
+    raw exam text.  The response format is a JSON array of question objects.
+
+    ``exam_text`` is the concatenated text extracted from the exam document(s).
+    """
+    from ..models import Message, MessageRole
+
+    system = (
+        "Tu es un assistant pédagogique expert, spécialisé dans l'analyse "
+        "d'épreuves et d'examens.\n"
+        "Tu réponds toujours en français.\n\n"
+        "Tâche — Analyse de document d'examen :\n"
+        "À partir du texte OCR d'une épreuve (ou d'un examen), identifie et "
+        "extrait chaque question.\n\n"
+        "Contraintes de sortie :\n"
+        "- Réponds UNIQUEMENT par un objet JSON (pas de texte autour).\n"
+        "- L'objet contient une clé \"questions\" associée à un tableau.\n"
+        "- Chaque élément du tableau contient :\n"
+        "  - \"number\" (int) : le numéro de la question telle qu'elle apparaît "
+        "dans le document.\n"
+        "  - \"statement\" (str) : l'énoncé complet de la question.\n"
+        "  - \"concepts\" (list[str]) : les notions/concepts évalués par cette "
+        "question.\n"
+        "  - \"status\" : \"pending\" par défaut.\n\n"
+        "Exemple de forme attendue :\n"
+        '{"questions": [{"number": 1, "statement": "...", "concepts": ["..."], '
+        '"status": "pending"}]}\n\n'
+        "Si le texte ne contient aucune question identifiable, retourne "
+        '{"questions": []}.'
+    )
+
+    user = f"Texte OCR de l'épreuve :\n\n{exam_text}"
+
+    return [
+        Message(role=MessageRole.SYSTEM, content=system),
+        Message(role=MessageRole.USER, content=user),
+    ]
+
+
+def build_exam_resolve_prompt(
+    question_statement: str,
+    concepts: list[str],
+    hint_level: int,
+    rag_context: str = "",
+) -> list:
+    """Build prompts to resolve an exam question (full answer or progressive hint).
+
+    When ``hint_level`` is 0 the model generates a full answer.  For
+    ``hint_level`` > 0 it generates a progressive hint that guides the learner
+    without revealing the complete solution.
+
+    ``rag_context`` is an optional string of retrieved passages to ground the
+    answer (may be empty when no source material is available).
+    """
+    from ..models import Message, MessageRole
+
+    concepts_str = ", ".join(concepts) if concepts else "non spécifié"
+    context_block = (
+        f"\n\nExtraits pertinents :\n{rag_context}" if rag_context else ""
+    )
+
+    if hint_level == 0:
+        system = (
+            "Tu es un tuteur pédagogique expert, spécialisé dans la correction "
+            "et l'explication d'épreuves.\n"
+            "Tu réponds toujours en français.\n\n"
+            "Tâche — Réponse complète à une question d'examen :\n"
+            "Fournis une réponse détaillée, structurée et pédagogique à la "
+            "question posée.\n\n"
+            "Contraintes :\n"
+            "- Si des extraits de livres sont fournis, appuie-toi dessus et "
+            "cite-les entre crochets.\n"
+            "- Sinon, réponds à partir de tes connaissances en précisant que "
+            "ce n'est pas fondé sur les livres de l'élève.\n"
+            "- La réponse doit être complète et autonome."
+        )
+        user = (
+            f"Question : {question_statement}\n"
+            f"Notions évaluées : {concepts_str}"
+            f"{context_block}"
+        )
+    else:
+        level_desc = {
+            1: "une première piste de réflexion très générale (orientation "
+            "sans donner la réponse).",
+            2: "un indice intermédiaire qui précise l'approche à adopter "
+            "mais ne dévoile pas la solution complète.",
+            3: "un indice presque complet qui guide vers la réponse finale "
+            "sans la donner entièrement.",
+        }.get(
+            hint_level,
+            "un indice progressif qui aide l'élève sans révéler la réponse.",
+        )
+        system = (
+            "Tu es un tuteur pédagogique bienveillant, spécialisé dans "
+            "l'accompagnement à la résolution d'épreuves.\n"
+            "Tu réponds toujours en français.\n\n"
+            f"Tâche — Indice de niveau {hint_level} :\n"
+            f"Fournis {level_desc}\n\n"
+            "Contraintes :\n"
+            "- Ne donne JAMAIS la réponse complète dans un indice.\n"
+            "- Formule l'indice comme une question ou une suggestion "
+            "pédagogique.\n"
+            "- Adapte la profondeur au niveau de l'indice demandé."
+        )
+        user = (
+            f"Question : {question_statement}\n"
+            f"Notions évaluées : {concepts_str}\n"
+            f"Niveau d'indice demandé : {hint_level}/3"
+            f"{context_block}"
+        )
+
+    return [
+        Message(role=MessageRole.SYSTEM, content=system),
+        Message(role=MessageRole.USER, content=user),
+    ]

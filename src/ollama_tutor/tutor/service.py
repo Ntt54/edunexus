@@ -49,6 +49,9 @@ from .prompts import (
     build_compare_system_prompt,
     build_compare_user_prompt,
     build_diagnostic_question_prompt,
+    build_exam_analysis_prompt,
+    build_exam_resolve_prompt,
+    build_learning_path_prompt,
     build_revision_sheet_prompt,
     build_summary_prompt,
     build_system_prompt,
@@ -57,7 +60,8 @@ from .prompts import (
     resolve_overrides,
 )
 from .providers.openai_compat import OpenAICompatProvider
-from .retrieval import Retriever
+from .retrieval import Retriever, validate_citations
+from .reranker import SimpleReranker
 from .review import ReviewScheduler
 from .store import LibraryStore
 from .vector import ScoredChunk
@@ -130,7 +134,10 @@ class TutorService:
             )
         else:
             self._llm_client = client
-        self.retriever = Retriever(store, client, self.model)
+        self.retriever = Retriever(
+            store, client, self.model,
+            reranker=SimpleReranker() if getattr(config, "tutor_reranking_enabled", False) else None,
+        )
         self.progress = ProgressTracker(store)
         self.review = ReviewScheduler(store)
         self.quiz_engine = QuizEngine(store, client, config)
@@ -340,8 +347,24 @@ class TutorService:
             if ti:
                 messages.append(Message(role=MessageRole.USER, content=ti))
 
+        # Accumulate the streamed response so we can validate citations once
+        # the full text is available (US10 / T059).
+        _text_parts: list[str] = []
         async for frame in self._stream_llm(messages, model, think, session_id, cancel):
+            if frame.get("type") == "delta":
+                _text_parts.append(frame.get("text", ""))
             yield frame
+
+        # --- US10: citation validation (T059) ---
+        response_text = "".join(_text_parts)
+        if response_text:
+            _valid, _invalid = validate_citations(response_text, sources_frame)
+            if _invalid:
+                yield {
+                    "type": "citation_warnings",
+                    "warnings": _invalid,
+                    "valid_citations": _valid,
+                }
 
     # ------------------------------------------------------------------
     # Chat without sources (Phase 6 UX): model-knowledge answers
@@ -749,8 +772,21 @@ class TutorService:
             )
             # D7 mastery update on the verdict.
             self.progress.record_event(exercise.concept_id, verdict)
+            # T063: record exercise errors in error_history.
+            if verdict in ("incorrect", "partial"):
+                concept = self.store.get_concept(exercise.concept_id)
+                self.store.record_error(
+                    subject_id=exercise.subject_id,
+                    concept_name=concept.name if concept else exercise.concept_id,
+                    question_text=exercise.statement,
+                    given_answer=answer,
+                    correct_answer=exercise.solution,
+                    error_type=verdict,
+                )
             if verdict == "correct":
                 self.store.update_exercise(exercise_id, status="solved")
+                # US15 / T088: +15 XP for a correct exercise answer.
+                self.store.add_xp(15)
 
         # Hint escalation (FR-016/017): auto on incorrect, or on explicit ask.
         revealed_hint: str | None = None
@@ -772,6 +808,19 @@ class TutorService:
             hint=revealed_hint,
             solution=None,
         )
+
+    # ------------------------------------------------------------------
+    # Error history (Feature 007 — US11, T064)
+    # ------------------------------------------------------------------
+
+    def get_error_history(
+        self,
+        subject_id: str,
+        concept_name: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return recent errors for a subject, optionally filtered by concept."""
+        return self.store.get_error_history(subject_id, concept_name, limit)
 
     async def request_solution(self, exercise_id: str) -> str:
         """Return the withheld solution — ONLY when explicitly requested.
@@ -1077,10 +1126,20 @@ class TutorService:
     async def submit_answers(
         self, quiz_id: str, answers: dict[str, Any], hint_requested: bool = False
     ) -> QuizReport:
-        """Correct a quiz/exam submission; enforces exam rules (T040)."""
-        return await self.quiz_engine.submit_answers(
+        """Correct a quiz/exam submission; enforces exam rules (T040).
+
+        US15 / T088: Awards +20 XP for quiz completion and a +10 XP streak
+        bonus when the learner has been active on consecutive days.
+        """
+        report = await self.quiz_engine.submit_answers(
             quiz_id, answers, hint_requested=hint_requested
         )
+        # US15 / T088: gamification — XP for quiz completion + streak bonus.
+        self.store.add_xp(20)
+        streak = self.store.update_streak()
+        if streak > 1:
+            self.store.add_xp(10)
+        return report
 
     def get_quiz(self, quiz_id: str, include_answers: bool = False) -> Any:
         """Return a quiz with its questions (answers only when completed)."""
@@ -1822,6 +1881,110 @@ class TutorService:
         self.store.delete_path_step(step_id)
         return True
 
+    async def auto_generate_path(self, subject_id: str) -> dict[str, Any]:
+        """Auto-generate a learning path from concepts and diagnostic gaps (US13 / T075).
+
+        1. Fetches the subject's concepts and current gaps.
+        2. Calls the LLM via ``build_learning_path_prompt`` to order concepts
+           by pedagogical dependency.
+        3. Creates a ``LearningPath`` with ``PathStep`` entries for each
+           ordered concept.
+        4. Returns the created path as a dict (with steps).
+        """
+        subject = self.store._get_subject(subject_id)
+        concepts = self.store.list_concepts(subject_id)
+        if not concepts:
+            raise KeyError(f"Aucun concept pour la matière : {subject_id}")
+
+        concept_names = [c.name for c in concepts]
+        # Gaps from progress tracker (FR-022).
+        gap_rows = self.progress.get_gaps(subject_id)
+        gap_names = [g.concept.name for g in gap_rows]
+        level = self.config.tutor_level or "intermediate"
+
+        # Build prompt and call LLM for ordered concept list.
+        system_prompt = build_learning_path_prompt(concept_names, gap_names, level)
+        messages = [
+            Message(role=MessageRole.SYSTEM, content=system_prompt),
+            Message(
+                role=MessageRole.USER,
+                content=(
+                    f"Ordonne les concepts de la matière « {subject.name} » "
+                    f"({len(concept_names)} concepts) en un parcours d'apprentissage optimal."
+                ),
+            ),
+        ]
+        options = OllamaOptions(num_ctx=max(8192, self.config.options.num_ctx or 0))
+        raw = await self._llm_collect(messages, options)
+
+        # Parse the LLM response: expect a JSON array of concept names.
+        ordered_names = self._parse_learning_path_response(raw, concept_names)
+
+        # Create the learning path.
+        title = f"Parcours auto-généré — {subject.name}"
+        description = (
+            f"Parcours optimisé pour {len(ordered_names)} concepts"
+            + (f", en priorité sur : {', '.join(gap_names)}" if gap_names else "")
+        )
+        path = self.store.create_learning_path(subject_id, title, description)
+
+        # Build a name→concept lookup for fast access.
+        by_name: dict[str, Any] = {c.name.lower(): c for c in concepts}
+
+        # Create PathSteps in the LLM-ordered sequence.
+        for ordinal, name in enumerate(ordered_names):
+            concept = by_name.get(name.lower())
+            if concept is None:
+                continue  # skip unknown names returned by the LLM
+            self.store.add_path_step(
+                path.id, "concept", concept.id, title=concept.name, ordinal=ordinal
+            )
+
+        # Return the path with its steps.
+        result = path.to_dict()
+        result["steps"] = [s.to_dict() for s in self.store.list_path_steps(path.id)]
+        return result
+
+    @staticmethod
+    def _parse_learning_path_response(raw: str, original_names: list[str]) -> list[str]:
+        """Parse the LLM JSON array response for learning path ordering (T075).
+
+        Returns concept names in the LLM-ordered sequence, filtered to only
+        names present in ``original_names``. Falls back to the original order
+        on parse failure.
+        """
+        import re as _re
+
+        text = (raw or "").strip()
+        # Strip markdown code fences if present.
+        if text.startswith("```"):
+            text = _re.sub(r"^```[A-Za-z0-9_-]*[ \t]*\r?\n?", "", text)
+            text = _re.sub(r"\r?\n?[ \t]*```$", "", text).strip()
+        start = text.find("[")
+        end = text.rfind("]")
+        if start == -1 or end == -1 or end <= start:
+            return list(original_names)  # fallback: original order
+        try:
+            arr = json.loads(text[start : end + 1])
+        except (json.JSONDecodeError, ValueError):
+            return list(original_names)
+        if not isinstance(arr, list):
+            return list(original_names)
+        # Filter to known names, preserve LLM order.
+        known = {n.lower() for n in original_names}
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for item in arr:
+            name = str(item or "").strip()
+            if name.lower() in known and name.lower() not in seen:
+                ordered.append(name)
+                seen.add(name.lower())
+        # Append any concepts the LLM missed (preserving original order).
+        for orig in original_names:
+            if orig.lower() not in seen:
+                ordered.append(orig)
+        return ordered
+
     def get_subject_domain(self, subject_id: str) -> str:
         """Get the classified domain for a subject."""
         return self.store.get_subject_domain(subject_id)
@@ -2166,5 +2329,113 @@ class TutorService:
             "weaknesses": weaknesses,
             "suggested_path": suggested,
         }
+
+    # ------------------------------------------------------------------
+    # US14 — Mode Épreuve (T079-T085): exam document import & resolution
+    # ------------------------------------------------------------------
+
+    #: Image extensions handled as OCR stubs (T079).
+    _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp", ".gif"}
+
+    def parse_exam_document(self, paths: list[str]) -> str:
+        """Extract text from a list of exam document file paths (T079).
+
+        PDFs are processed through the existing ``extract_text`` extractor.
+        Images return a raw text placeholder (OCR stub — real OCR is out of
+        scope for this task).  All extracted text segments are concatenated
+        with double-newline separators.
+
+        Raises ``FileNotFoundError`` when any path does not exist and
+        ``ValueError`` for unsupported formats.
+        """
+        segments: list[str] = []
+        for raw_path in paths:
+            p = Path(raw_path)
+            if not p.exists():
+                raise FileNotFoundError(f"No such file: {p}")
+            suffix = p.suffix.lower()
+            if suffix == ".pdf":
+                for text, _meta in extract_text(str(p), fmt="pdf"):
+                    if text:
+                        segments.append(text)
+            elif suffix in self._IMAGE_EXTENSIONS:
+                # OCR stub: return a placeholder so downstream pipeline works.
+                segments.append(
+                    f"[Image OCR non disponible — {p.name}]\n"
+                    f"Contenu image de {p.name} non extractible sans OCR."
+                )
+            elif suffix in {".txt", ".md"}:
+                segments.append(p.read_text(encoding="utf-8", errors="replace"))
+            else:
+                raise ValueError(f"Unsupported exam format: {suffix}")
+        return "\n\n".join(segments)
+
+    async def analyze_exam(self, exam_text: str) -> list[dict[str, Any]]:
+        """Analyze exam OCR text and extract structured questions (T081).
+
+        Sends the exam text through the LLM using ``build_exam_analysis_prompt``
+        and parses the JSON response into a list of question dicts, each
+        containing ``number``, ``statement``, ``concepts``, and ``status``.
+        """
+        messages = build_exam_analysis_prompt(exam_text)
+        options = OllamaOptions(num_ctx=max(8192, self.config.options.num_ctx or 0))
+        raw = await self._llm_collect(messages, options)
+        data = self._parse_exam_json(raw)
+        questions: list[dict[str, Any]] = []
+        for q in data.get("questions", []):
+            questions.append({
+                "number": q.get("number", 0),
+                "statement": q.get("statement", ""),
+                "concepts": q.get("concepts", []),
+                "status": q.get("status", "pending"),
+            })
+        return questions
+
+    @staticmethod
+    def _parse_exam_json(raw: str) -> dict[str, Any]:
+        """Best-effort extraction of the JSON payload from the LLM response."""
+        raw = raw.strip()
+        # Fast path: the entire response is valid JSON.
+        try:
+            obj = json.loads(raw)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+        # Fallback: locate the first { ... } block in the response.
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end > start:
+            try:
+                obj = json.loads(raw[start : end + 1])
+                if isinstance(obj, dict):
+                    return obj
+            except json.JSONDecodeError:
+                pass
+        return {"questions": []}
+
+    async def resolve_exam_question(
+        self,
+        question_statement: str,
+        concepts: list[str],
+        hint_level: int = 0,
+        rag_context: str = "",
+    ) -> dict[str, Any]:
+        """Resolve an exam question: full answer or progressive hint (T082).
+
+        When ``hint_level`` is 0 the LLM generates a full answer.  For
+        ``hint_level`` > 0 it generates a progressive hint (1=gentle nudge,
+        2=intermediate guidance, 3=near-complete hint).  ``rag_context``
+        optionally carries retrieved passages to ground the response.
+
+        Returns ``{"text": str, "hint_level": int}``.
+        """
+        hint_level = max(0, min(hint_level, 3))
+        messages = build_exam_resolve_prompt(
+            question_statement, concepts, hint_level, rag_context
+        )
+        options = OllamaOptions(num_ctx=max(8192, self.config.options.num_ctx or 0))
+        text = await self._llm_collect(messages, options)
+        return {"text": text.strip(), "hint_level": hint_level}
 
 
