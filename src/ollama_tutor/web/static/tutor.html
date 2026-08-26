@@ -4062,7 +4062,7 @@ function wireAll() {
 async function loadReglages() {
   const status = $("reglagesStatus");
   try {
-    const data = await apiJson("/api/tutor/settings");
+    const data = await jf("/api/tutor/settings");
     const o = data.options || {};
     const t = data.tutor || {};
     const form = $("reglagesFormEl");
