@@ -840,6 +840,11 @@ class LibraryStore:
             "SELECT id FROM chunks WHERE book_id = ? ORDER BY ordinal",
             (book_id,),
         ).fetchall()
+        if len(rows) != len(embeddings):
+            raise ValueError(
+                f"Embedding count mismatch: {len(rows)} chunks vs "
+                f"{len(embeddings)} vectors for book {book_id}"
+            )
         n = 0
         for row, vec in zip(rows, embeddings):
             blob = np.array(vec, dtype=np.float32).tobytes() if vec else None
