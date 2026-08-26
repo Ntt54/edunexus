@@ -8,11 +8,18 @@ or above a floor (default 0.25). Retrieved passages are assembled into
 ``[Livre X — chapitre Y, p. Z]`` so the prompt layer can demand exact citations
 (SC-004).
 
+US5 — Recherche hybride BM25 + sémantique :
+Adds ``BM25Index``, ``reciprocal_rank_fusion`` and ``retrieve_hybrid`` to
+combine lexical (BM25) and semantic (cosine) retrieval via Reciprocal Rank
+Fusion.  ``retrieve_hybrid`` is the single entry-point for hybrid search,
+returning enriched dicts with per-method scores for transparency.
+
 UI-framework-free by contract (no textual/fastapi imports).
 """
 
 from __future__ import annotations
 
+import math
 import numpy as np
 from typing import Any
 
@@ -96,6 +103,198 @@ def _keyword_score(text: str, terms: list[str]) -> float:
     denom = max(1, len(words))
     # Scale so a few strong hits stand out without unbounded growth.
     return (raw / denom) * 10.0
+
+
+# ------------------------------------------------------------------
+# US5 — BM25 lexical index (T033)
+# ------------------------------------------------------------------
+
+# BM25 tuning constants (Okapi BM25 defaults).
+_BM25_K1 = 1.5
+_BM25_B = 0.75
+
+
+def _bm25_tokenize(text: str) -> list[str]:
+    """Lowercase tokens stripped of punctuation (>= 2 chars).
+
+    Simpler than ``_tokenize`` — no stopword removal because BM25 IDF
+    already down-weights very common terms.
+    """
+    if not text:
+        return []
+    # Split on any non-alphanumeric / non-accented-letter character.
+    tokens = re.split(r"[^a-z0-9àâäéèêëïîôöùûüç]+", text.lower())
+    return [t for t in tokens if len(t) >= 2]
+
+
+class BM25Index:
+    """Lightweight BM25 index built from chunk dicts.
+
+    Pure-stdlib, no external dependencies — suitable for offline, low-spec
+    machines (≤ 8 GB RAM, research D7).
+    """
+
+    def __init__(self, chunks: list[dict]) -> None:
+        """Build index from chunk dicts (each must have ``id`` and ``text``)."""
+        self._chunks = chunks
+        self._n = len(chunks)
+        # {chunk_id: [tokens]}
+        self._doc_tokens: dict[str, list[str]] = {}
+        # {chunk_id: {term: tf}}
+        self._tf: dict[str, dict[str, int]] = {}
+        # {term: df} — how many documents contain the term
+        self._df: dict[str, int] = {}
+        # Average document length (in tokens).
+        self._avgdl = 0.0
+
+        total_len = 0
+        for ch in chunks:
+            cid = ch["id"]
+            tokens = _bm25_tokenize(ch.get("text", ""))
+            self._doc_tokens[cid] = tokens
+            tf: dict[str, int] = {}
+            for t in tokens:
+                tf[t] = tf.get(t, 0) + 1
+            self._tf[cid] = tf
+            total_len += len(tokens)
+            for t in set(tokens):
+                self._df[t] = self._df.get(t, 0) + 1
+
+        self._avgdl = total_len / max(1, self._n)
+
+    def _idf(self, term: str) -> float:
+        """Compute IDF for *term* using the standard BM25 formula."""
+        df = self._df.get(term, 0)
+        return math.log((self._n - df + 0.5) / (df + 0.5) + 1.0)
+
+    def search(self, query: str, k: int = 10) -> list[tuple[str, float]]:
+        """Return top-k ``(chunk_id, score)`` pairs for the query."""
+        q_tokens = _bm25_tokenize(query)
+        if not q_tokens or not self._chunks:
+            return []
+
+        scores: dict[str, float] = {}
+        for term in q_tokens:
+            idf = self._idf(term)
+            if idf <= 0.0:
+                continue
+            for cid, tf_map in self._tf.items():
+                tf = tf_map.get(term, 0)
+                if tf == 0:
+                    continue
+                dl = len(self._doc_tokens[cid])
+                denom = tf + _BM25_K1 * (1.0 - _BM25_B + _BM25_B * dl / max(1.0, self._avgdl))
+                scores[cid] = scores.get(cid, 0.0) + idf * (tf * (_BM25_K1 + 1.0)) / denom
+
+        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        return ranked[:k]
+
+
+# ------------------------------------------------------------------
+# US5 — Reciprocal Rank Fusion (T034)
+# ------------------------------------------------------------------
+
+def reciprocal_rank_fusion(
+    ranked_lists: list[list[tuple[str, float]]],
+    k: int = 60,
+) -> list[tuple[str, float]]:
+    """Fuse multiple ranked lists with Reciprocal Rank Fusion.
+
+    ``score(d) = Σ 1 / (k + rank_i(d))`` where ``rank_i`` is 1-indexed.
+
+    Returns a single list of ``(chunk_id, fused_score)`` sorted descending
+    by fused score.
+    """
+    agg: dict[str, float] = {}
+    for ranked in ranked_lists:
+        for rank_idx, (cid, _score) in enumerate(ranked):
+            agg[cid] = agg.get(cid, 0.0) + 1.0 / (k + rank_idx + 1)
+    fused = sorted(agg.items(), key=lambda x: x[1], reverse=True)
+    return fused
+
+
+# ------------------------------------------------------------------
+# US5 — Hybrid retrieval entry-point (T035)
+# ------------------------------------------------------------------
+
+async def retrieve_hybrid(
+    subject_id: str,
+    question: str,
+    store: "LibraryStore",
+    client: Any,
+    model: str,
+    k: int = 5,
+    book_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Hybrid BM25 + cosine retrieval fused via RRF.
+
+    1. Cosine (semantic) search via the existing ``Retriever``.
+    2. BM25 (lexical) search over all subject chunks.
+    3. Fuse both ranked lists with ``reciprocal_rank_fusion``.
+    4. Return top-*k* results as dicts with transparency keys:
+       ``chunk_id, text, score (fused), cosine_score, bm25_score``.
+    """
+    # --- Build a temporary Retriever for the cosine path ---
+    retr = Retriever(store=store, client=client, model=model)
+
+    # --- Ranked list 1: cosine (semantic) ---
+    cosine_chunks = await retr.retrieve(subject_id, question, k=k * 3, book_ids=book_ids)
+    cosine_ranked: list[tuple[str, float]] = [
+        (sc.chunk_id, sc.score) for sc in cosine_chunks
+    ]
+    cosine_map: dict[str, float] = {cid: sc for cid, sc in cosine_ranked}
+    cosine_meta: dict[str, ScoredChunk] = {sc.chunk_id: sc for sc in cosine_chunks}
+
+    # --- Ranked list 2: BM25 (lexical) ---
+    # Use all subject chunks (not just embedded ones) so BM25 sees everything.
+    all_rows = store.get_subject_chunks(subject_id)
+    scope = {str(b) for b in book_ids} if book_ids is not None else None
+    if scope is not None:
+        all_rows = [r for r in all_rows if str(r["book_id"]) in scope]
+
+    bm25_index = BM25Index(all_rows)
+    bm25_raw = bm25_index.search(query=question, k=k * 3)
+    # Map raw BM25 scores to a 0..1 range for transparency (normalise by max).
+    bm25_max = bm25_raw[0][1] if bm25_raw else 1.0
+    bm25_ranked: list[tuple[str, float]] = [
+        (cid, sc / bm25_max if bm25_max > 0 else 0.0) for cid, sc in bm25_raw
+    ]
+    bm25_map: dict[str, float] = dict(bm25_ranked)
+
+    # Pre-fetch book titles for enriched output.
+    titles: dict[str, str] = {}
+    for b in store.list_books(subject_id):
+        titles[b.id] = b.title
+
+    # --- Fuse with RRF ---
+    fused = reciprocal_rank_fusion([cosine_ranked, bm25_ranked])
+
+    # --- Assemble top-k result dicts ---
+    # Normalise fused scores so the best score is 1.0.
+    fused_max = fused[0][1] if fused else 1.0
+    results: list[dict[str, Any]] = []
+    for cid, fsc in fused[:k]:
+        # Try cosine meta first, fall back to raw row.
+        meta_row = cosine_meta.get(cid)
+        if meta_row is not None:
+            text = meta_row.text
+            book_id = meta_row.book_id
+        else:
+            # Find in all_rows
+            row_match = next((r for r in all_rows if r["id"] == cid), None)
+            if row_match is None:
+                continue
+            text = row_match.get("text", "")
+            book_id = str(row_match["book_id"])
+
+        results.append({
+            "chunk_id": cid,
+            "text": text,
+            "score": round(fsc / fused_max, 4) if fused_max > 0 else 0.0,
+            "cosine_score": round(cosine_map.get(cid, 0.0), 4),
+            "bm25_score": round(bm25_map.get(cid, 0.0), 4),
+        })
+    return results
 
 
 class Retriever:
