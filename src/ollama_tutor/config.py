@@ -507,6 +507,21 @@ class Config:
         self._data.setdefault("tutor", {})["pdftoppm_bin"] = value
         self._schedule_save()
 
+    # ------------------------------------------------------------------
+    # Parallel embeddings (Feature 006 — llama.cpp --parallel N)
+    # ------------------------------------------------------------------
+
+    @property
+    def tutor_max_parallel_embed(self) -> int:
+        """Max parallel embedding servers (1 = sequential, 2+ = parallel)."""
+        return max(1, min(8, self._data.get("tutor", {}).get("max_parallel_embed", 1)))
+
+    @tutor_max_parallel_embed.setter
+    def tutor_max_parallel_embed(self, value: int) -> None:
+        clamped = max(1, min(8, value))
+        self._data.setdefault("tutor", {})["max_parallel_embed"] = clamped
+        self._schedule_save()
+
     def get_tutor_config_snapshot(self) -> dict[str, Any]:
         """Get a snapshot of the current tutor config for session recording."""
         return {
@@ -532,4 +547,5 @@ class Config:
             "ocr_text_threshold": self.tutor_ocr_text_threshold,
             "ocr_dpi": self.tutor_ocr_dpi,
             "pdftoppm_bin": self.tutor_pdftoppm_bin,
+            "max_parallel_embed": self.tutor_max_parallel_embed,
         }

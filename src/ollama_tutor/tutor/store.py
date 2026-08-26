@@ -28,6 +28,8 @@ from .models import (
     Flashcard,
     GlossaryTerm,
     KnowledgeRelation,
+    LearningPath,
+    PathStep,
     Quiz,
     QuizAnswer,
     QuizQuestion,
@@ -318,6 +320,29 @@ class LibraryStore:
                 book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
                 PRIMARY KEY (conversation_id, book_id)
             );
+
+            CREATE TABLE IF NOT EXISTS learning_paths (
+                id TEXT PRIMARY KEY,
+                subject_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'draft',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS path_steps (
+                id TEXT PRIMARY KEY,
+                path_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                activity_type TEXT NOT NULL,
+                activity_id TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                completed_at TEXT,
+                FOREIGN KEY (path_id) REFERENCES learning_paths(id) ON DELETE CASCADE
+            );
             """
         )
         self._conn.commit()
@@ -381,6 +406,13 @@ class LibraryStore:
         if "updated_at" not in tcols:
             cur.execute(
                 "ALTER TABLE tutoring_sessions ADD COLUMN updated_at REAL"
+            )
+            cur.commit()
+        # Domain classification for adaptive learning (Feature 006).
+        scols2 = {r["name"] for r in cur.execute("PRAGMA table_info(subjects)")}
+        if "domain" not in scols2:
+            cur.execute(
+                "ALTER TABLE subjects ADD COLUMN domain TEXT NOT NULL DEFAULT 'generique'"
             )
             cur.commit()
 
@@ -1928,6 +1960,114 @@ class LibraryStore:
             (subject_id,),
         ).fetchall()
         return [(str(r["concept_id"]), str(r["verdict"])) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Learning paths (Feature 006 — adaptive learning)
+    # ------------------------------------------------------------------
+
+    def create_learning_path(self, subject_id: str, title: str, description: str = "") -> LearningPath:
+        """Create a new learning path for a subject."""
+        path = LearningPath(
+            id=_uid(),
+            subject_id=subject_id,
+            title=title,
+            description=description,
+            created_at=_now_iso(),
+            updated_at=_now_iso(),
+        )
+        self._conn.execute(
+            "INSERT INTO learning_paths (id, subject_id, title, description, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (path.id, path.subject_id, path.title, path.description, path.status, path.created_at, path.updated_at),
+        )
+        self._conn.commit()
+        return path
+
+    def get_learning_path(self, path_id: str) -> LearningPath | None:
+        row = self._conn.execute("SELECT * FROM learning_paths WHERE id = ?", (path_id,)).fetchone()
+        return LearningPath.from_dict(dict(row)) if row is not None else None
+
+    def list_learning_paths(self, subject_id: str) -> list[LearningPath]:
+        rows = self._conn.execute(
+            "SELECT * FROM learning_paths WHERE subject_id = ? ORDER BY created_at DESC", (subject_id,)
+        ).fetchall()
+        return [LearningPath.from_dict(dict(r)) for r in rows]
+
+    def update_learning_path(self, path_id: str, *, title: str | None = None, description: str | None = None, status: str | None = None) -> None:
+        updates: list[str] = []
+        params: list[Any] = []
+        if title is not None:
+            updates.append("title = ?"); params.append(title)
+        if description is not None:
+            updates.append("description = ?"); params.append(description)
+        if status is not None:
+            updates.append("status = ?"); params.append(status)
+        if updates:
+            updates.append("updated_at = ?"); params.append(_now_iso())
+            params.append(path_id)
+            self._conn.execute(f"UPDATE learning_paths SET {', '.join(updates)} WHERE id = ?", params)
+            self._conn.commit()
+
+    def delete_learning_path(self, path_id: str) -> None:
+        self._conn.execute("DELETE FROM learning_paths WHERE id = ?", (path_id,))
+        self._conn.commit()
+
+    def add_path_step(self, path_id: str, activity_type: str, activity_id: str, title: str = "", ordinal: int | None = None) -> PathStep:
+        if ordinal is None:
+            row = self._conn.execute("SELECT COALESCE(MAX(ordinal), -1) + 1 FROM path_steps WHERE path_id = ?", (path_id,)).fetchone()
+            ordinal = row[0] if row else 0
+        step = PathStep(
+            id=_uid(), path_id=path_id, ordinal=ordinal,
+            activity_type=activity_type, activity_id=activity_id, title=title,
+        )
+        self._conn.execute(
+            "INSERT INTO path_steps (id, path_id, ordinal, activity_type, activity_id, title, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (step.id, step.path_id, step.ordinal, step.activity_type, step.activity_id, step.title, step.status),
+        )
+        self._conn.commit()
+        return step
+
+    def list_path_steps(self, path_id: str) -> list[PathStep]:
+        rows = self._conn.execute(
+            "SELECT * FROM path_steps WHERE path_id = ? ORDER BY ordinal", (path_id,)
+        ).fetchall()
+        return [PathStep.from_dict(dict(r)) for r in rows]
+
+    def get_path_step(self, step_id: str) -> PathStep | None:
+        row = self._conn.execute("SELECT * FROM path_steps WHERE id = ?", (step_id,)).fetchone()
+        return PathStep.from_dict(dict(row)) if row is not None else None
+
+    def update_path_step(self, step_id: str, *, status: str | None = None, ordinal: int | None = None) -> None:
+        updates: list[str] = []
+        params: list[Any] = []
+        if status is not None:
+            updates.append("status = ?"); params.append(status)
+            if status == "completed":
+                updates.append("completed_at = ?"); params.append(_now_iso())
+        if ordinal is not None:
+            updates.append("ordinal = ?"); params.append(ordinal)
+        if updates:
+            params.append(step_id)
+            self._conn.execute(f"UPDATE path_steps SET {', '.join(updates)} WHERE id = ?", params)
+            self._conn.commit()
+
+    def delete_path_step(self, step_id: str) -> None:
+        self._conn.execute("DELETE FROM path_steps WHERE id = ?", (step_id,))
+        self._conn.commit()
+
+    def reorder_path_steps(self, path_id: str, step_ids: list[str]) -> None:
+        for idx, sid in enumerate(step_ids):
+            self._conn.execute("UPDATE path_steps SET ordinal = ? WHERE id = ? AND path_id = ?", (idx, sid, path_id))
+        self._conn.commit()
+
+    def get_subject_domain(self, subject_id: str) -> str:
+        row = self._conn.execute("SELECT domain FROM subjects WHERE id = ?", (subject_id,)).fetchone()
+        return str(row["domain"]) if row else "generique"
+
+    def set_subject_domain(self, subject_id: str, domain: str) -> None:
+        self._conn.execute("UPDATE subjects SET domain = ? WHERE id = ?", (domain, subject_id))
+        self._conn.commit()
 
     # ------------------------------------------------------------------
     # Maintenance

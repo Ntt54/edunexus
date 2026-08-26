@@ -1456,6 +1456,114 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         return {"active": n}
 
     # ------------------------------------------------------------------
+    # REST: Learning paths — Parcours (Feature 006 — adaptive learning)
+    # ------------------------------------------------------------------
+
+    @app.post("/api/tutor/paths")
+    async def create_path(request: Request) -> dict[str, Any]:
+        body = await request.json()
+        subject_id = body.get("subject_id") or (
+            tutor_store.active_subject_id
+        )
+        if not subject_id:
+            raise HTTPException(400, "subject_id requis")
+        title = str(body.get("title", "")).strip()
+        if not title:
+            raise HTTPException(400, "title requis")
+        return tutor_service.create_path(subject_id, title, body.get("description", ""))
+
+    @app.get("/api/tutor/paths")
+    async def list_paths(subject_id: str | None = None) -> dict[str, Any]:
+        sid = subject_id or tutor_store.active_subject_id
+        if not sid:
+            raise HTTPException(400, "subject_id requis")
+        return {"paths": tutor_service.list_paths(sid)}
+
+    @app.get("/api/tutor/paths/{path_id}")
+    async def get_path(path_id: str) -> dict[str, Any]:
+        path = tutor_service.get_path(path_id)
+        if path is None:
+            raise HTTPException(404, "Parcours inconnu")
+        return path
+
+    @app.put("/api/tutor/paths/{path_id}")
+    async def update_path(path_id: str, request: Request) -> dict[str, Any]:
+        body = await request.json()
+        path = tutor_service.update_path(
+            path_id,
+            title=body.get("title"),
+            description=body.get("description"),
+            status=body.get("status"),
+        )
+        if path is None:
+            raise HTTPException(404, "Parcours inconnu")
+        return path
+
+    @app.delete("/api/tutor/paths/{path_id}")
+    async def delete_path(path_id: str) -> dict[str, Any]:
+        if not tutor_service.delete_path(path_id):
+            raise HTTPException(404, "Parcours inconnu")
+        return {"ok": True}
+
+    @app.post("/api/tutor/paths/{path_id}/steps")
+    async def add_path_step(path_id: str, request: Request) -> dict[str, Any]:
+        body = await request.json()
+        activity_type = str(body.get("activity_type", "")).strip()
+        activity_id = str(body.get("activity_id", "")).strip()
+        if not activity_type or not activity_id:
+            raise HTTPException(400, "activity_type et activity_id requis")
+        valid = {"concept", "quiz", "exercise", "flashcard_review", "reading"}
+        if activity_type not in valid:
+            raise HTTPException(400, f"activity_type doit être dans {valid}")
+        return tutor_service.add_path_step(
+            path_id, activity_type, activity_id, body.get("title", "")
+        )
+
+    @app.put("/api/tutor/paths/{path_id}/steps/reorder")
+    async def reorder_path_steps(path_id: str, request: Request) -> dict[str, Any]:
+        body = await request.json()
+        step_ids = body.get("step_ids", [])
+        if not step_ids:
+            raise HTTPException(400, "step_ids requis")
+        return {"steps": tutor_service.reorder_path_steps(path_id, step_ids)}
+
+    @app.post("/api/tutor/paths/steps/{step_id}/complete")
+    async def complete_path_step(step_id: str) -> dict[str, Any]:
+        step = tutor_service.complete_path_step(step_id)
+        if step is None:
+            raise HTTPException(404, "Étape inconnue")
+        return step
+
+    @app.delete("/api/tutor/paths/steps/{step_id}")
+    async def delete_path_step(step_id: str) -> dict[str, Any]:
+        if not tutor_service.delete_path_step(step_id):
+            raise HTTPException(404, "Étape inconnue")
+        return {"ok": True}
+
+    # ------------------------------------------------------------------
+    # REST: Domain classification (Feature 006 — adaptive learning)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/tutor/subjects/{subject_id}/domain")
+    async def get_domain(subject_id: str) -> dict[str, Any]:
+        return {"domain": tutor_service.get_subject_domain(subject_id)}
+
+    @app.put("/api/tutor/subjects/{subject_id}/domain")
+    async def set_domain(subject_id: str, request: Request) -> dict[str, Any]:
+        body = await request.json()
+        domain = str(body.get("domain", "generique")).strip()
+        valid = {"programmation", "mathematiques", "sciences", "langues", "generique"}
+        if domain not in valid:
+            raise HTTPException(400, f"domain doit être dans {valid}")
+        tutor_service.set_subject_domain(subject_id, domain)
+        return {"domain": domain}
+
+    @app.post("/api/tutor/subjects/{subject_id}/classify")
+    async def classify_subject(subject_id: str) -> dict[str, Any]:
+        domain = await tutor_service.classify_subject(subject_id)
+        return {"domain": domain}
+
+    # ------------------------------------------------------------------
     # REST: réglages utilisateur (005-platform-ui-library)
     # ------------------------------------------------------------------
 

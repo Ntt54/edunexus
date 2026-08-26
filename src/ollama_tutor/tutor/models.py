@@ -756,3 +756,83 @@ class KnowledgeRelation:
             relation=str(raw.get("relation", "related")),
             source=str(raw.get("source", "indexing")),
         )
+
+
+# ----------------------------------------------------------------------
+# Learning paths (Feature 006 — adaptive learning)
+# ----------------------------------------------------------------------
+
+
+@dataclass
+class LearningPath:
+    """A learning path — ordered sequence of activities (Feature 006)."""
+
+    id: str
+    subject_id: str
+    title: str
+    description: str = ""
+    status: str = "draft"  # draft | active | completed
+    created_at: str = ""
+    updated_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "subject_id": self.subject_id,
+            "title": self.title,
+            "description": self.description,
+            "status": self.status,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "LearningPath":
+        return cls(
+            id=str(raw["id"]),
+            subject_id=str(raw.get("subject_id", "")),
+            title=str(raw.get("title", "")),
+            description=str(raw.get("description", "")),
+            status=str(raw.get("status", "draft")),
+            created_at=str(raw.get("created_at", "")),
+            updated_at=str(raw.get("updated_at", "")),
+        )
+
+
+@dataclass
+class PathStep:
+    """One step in a learning path (Feature 006)."""
+
+    id: str
+    path_id: str
+    ordinal: int
+    activity_type: str  # concept | quiz | exercise | flashcard_review | reading
+    activity_id: str    # ID of the referenced concept/quiz/exercise/flashcard/book
+    title: str = ""
+    status: str = "pending"  # pending | in_progress | completed
+    completed_at: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "path_id": self.path_id,
+            "ordinal": self.ordinal,
+            "activity_type": self.activity_type,
+            "activity_id": self.activity_id,
+            "title": self.title,
+            "status": self.status,
+            "completed_at": self.completed_at,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "PathStep":
+        return cls(
+            id=str(raw["id"]),
+            path_id=str(raw.get("path_id", "")),
+            ordinal=int(raw.get("ordinal", 0)),
+            activity_type=str(raw.get("activity_type", "")),
+            activity_id=str(raw.get("activity_id", "")),
+            title=str(raw.get("title", "")),
+            status=str(raw.get("status", "pending")),
+            completed_at=raw.get("completed_at"),
+        )

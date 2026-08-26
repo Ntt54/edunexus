@@ -1653,3 +1653,88 @@ class TutorService:
             "failed_batches": failed_batches,
             "total_books": total,
         }
+
+    # ------------------------------------------------------------------
+    # Learning paths (Feature 006 — adaptive learning)
+    # ------------------------------------------------------------------
+
+    def create_path(self, subject_id: str, title: str, description: str = "") -> dict:
+        """Create a learning path and return it as a dict."""
+        path = self.store.create_learning_path(subject_id, title, description)
+        return path.to_dict()
+
+    def list_paths(self, subject_id: str) -> list[dict]:
+        """List all learning paths for a subject."""
+        return [p.to_dict() for p in self.store.list_learning_paths(subject_id)]
+
+    def get_path(self, path_id: str) -> dict | None:
+        """Get a learning path with its steps and progress."""
+        path = self.store.get_learning_path(path_id)
+        if path is None:
+            return None
+        d = path.to_dict()
+        steps = [s.to_dict() for s in self.store.list_path_steps(path_id)]
+        d["steps"] = steps
+        if steps:
+            completed = sum(1 for s in steps if s["status"] == "completed")
+            d["progress"] = round(completed / len(steps) * 100, 1)
+        else:
+            d["progress"] = 0.0
+        return d
+
+    def update_path(self, path_id: str, *, title: str | None = None,
+                    description: str | None = None, status: str | None = None) -> dict | None:
+        """Update a learning path."""
+        self.store.update_learning_path(path_id, title=title, description=description, status=status)
+        return self.get_path(path_id)
+
+    def delete_path(self, path_id: str) -> bool:
+        """Delete a learning path and its steps."""
+        path = self.store.get_learning_path(path_id)
+        if path is None:
+            return False
+        self.store.delete_learning_path(path_id)
+        return True
+
+    def add_path_step(self, path_id: str, activity_type: str, activity_id: str,
+                      title: str = "") -> dict:
+        """Add a step to a learning path."""
+        step = self.store.add_path_step(path_id, activity_type, activity_id, title)
+        return step.to_dict()
+
+    def reorder_path_steps(self, path_id: str, step_ids: list[str]) -> list[dict]:
+        """Reorder steps in a learning path."""
+        self.store.reorder_path_steps(path_id, step_ids)
+        return [s.to_dict() for s in self.store.list_path_steps(path_id)]
+
+    def complete_path_step(self, step_id: str) -> dict | None:
+        """Mark a path step as completed."""
+        step = self.store.get_path_step(step_id)
+        if step is None:
+            return None
+        self.store.update_path_step(step_id, status="completed")
+        updated = self.store.get_path_step(step_id)
+        return updated.to_dict() if updated else None
+
+    def delete_path_step(self, step_id: str) -> bool:
+        """Delete a step from a learning path."""
+        step = self.store.get_path_step(step_id)
+        if step is None:
+            return False
+        self.store.delete_path_step(step_id)
+        return True
+
+    def get_subject_domain(self, subject_id: str) -> str:
+        """Get the classified domain for a subject."""
+        return self.store.get_subject_domain(subject_id)
+
+    def set_subject_domain(self, subject_id: str, domain: str) -> None:
+        """Set the domain for a subject (manual override)."""
+        self.store.set_subject_domain(subject_id, domain)
+
+    async def classify_subject(self, subject_id: str) -> str:
+        """Auto-classify a subject's content domain using the hybrid classifier."""
+        from .classifier import classify_subject_chunks
+        return await classify_subject_chunks(
+            self.store, subject_id, self.client, self.config.tutor_model
+        )
