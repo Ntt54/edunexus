@@ -9,14 +9,17 @@ from .base import (
     OCRProvider,
     VectorStore,
 )
+from .gguf_llm import GGUFLLMProvider, create_gguf_llm_provider
 from .ollama_adapter import OllamaEmbeddingProvider, OllamaLLMProvider
 
 __all__ = [
     "DocumentParser",
     "EmbeddingProvider",
+    "GGUFLLMProvider",
     "LLMProvider",
     "OCRProvider",
     "OllamaEmbeddingProvider",
     "OllamaLLMProvider",
     "VectorStore",
+    "create_gguf_llm_provider",
 ]
