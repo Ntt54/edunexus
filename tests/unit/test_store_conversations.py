@@ -62,9 +62,8 @@ def test_rename_conversation(store: LibraryStore):
 
 
 def test_sources_dedup_and_unknown_ignored(store: LibraryStore, tmp_path: Path):
-    _, book = _seed_book(store, tmp_path, "Livre A")
-    sid = store.create_subject("Réseaux").id
-    conv = store.create_tutoring_session(sid)
+    subject, book = _seed_book(store, tmp_path, "Livre A")
+    conv = store.create_tutoring_session(subject.id)
     n = store.set_conversation_sources(conv.id, [book.id, book.id, "inconnu"])
     assert n == 1
     assert store.get_conversation_source_ids(conv.id) == [book.id]
@@ -73,9 +72,8 @@ def test_sources_dedup_and_unknown_ignored(store: LibraryStore, tmp_path: Path):
 def test_delete_conversation_cascades_sources(
     store: LibraryStore, tmp_path: Path
 ):
-    _, book = _seed_book(store, tmp_path, "Livre A")
-    sid = store.create_subject("Réseaux").id
-    conv = store.create_tutoring_session(sid)
+    subject, book = _seed_book(store, tmp_path, "Livre A")
+    conv = store.create_tutoring_session(subject.id)
     store.set_conversation_sources(conv.id, [book.id])
     assert store.delete_conversation(conv.id) is True
     assert store.get_conversation_source_ids(conv.id) == []
@@ -85,9 +83,8 @@ def test_delete_conversation_cascades_sources(
 def test_book_deletion_cleans_sources_via_fk(
     store: LibraryStore, tmp_path: Path
 ):
-    _, book = _seed_book(store, tmp_path, "Livre A")
-    sid = store.create_subject("Réseaux").id
-    conv = store.create_tutoring_session(sid)
+    subject, book = _seed_book(store, tmp_path, "Livre A")
+    conv = store.create_tutoring_session(subject.id)
     store.set_conversation_sources(conv.id, [book.id])
     # Suppression directe du livre : la FK ON DELETE CASCADE doit nettoyer
     # conversation_sources (invariant data-model.md §2).
