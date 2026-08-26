@@ -24,6 +24,7 @@ import binascii
 import datetime
 import json
 import os
+import sys
 import traceback
 import uuid
 from pathlib import Path
@@ -1612,6 +1613,18 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         config.save()  # persistance immédiate (préférence utilisateur)
         return await settings_get()
+
+    @app.post("/api/tutor/restart")
+    async def restart_server() -> dict[str, Any]:
+        """Schedule a server restart via os.execv (same process image)."""
+        import signal
+
+        async def _do_restart() -> None:
+            await asyncio.sleep(0.3)  # allow response to be sent
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+
+        asyncio.ensure_future(_do_restart())
+        return {"ok": True, "message": "Redémarrage en cours…"}
 
     # ------------------------------------------------------------------
     # WebSocket: tutor grounded Q&A (004-local-ai-tutor, US2)
