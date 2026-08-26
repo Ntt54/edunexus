@@ -22,6 +22,9 @@ from .models import (
 )
 
 DEFAULT_BASE_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+# Keep both the generation and embedding models warm during a study session.
+# The request-level value overrides Ollama's server default when supported.
+DEFAULT_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "30m")
 
 
 class OllamaConnectionError(Exception):
@@ -151,11 +154,17 @@ class OllamaClient:
         # same as disabling it (user-visible bug on gemma4:e2b).
         payload["think"] = bool(think)
 
-        if options:
-            # Accept both OllamaOptions instances and plain dicts
-            opts_dict = options.to_dict() if hasattr(options, "to_dict") else dict(options)
-            if opts_dict:
-                payload["options"] = {k: v for k, v in opts_dict.items() if v is not None}
+        # Ollama expects keep_alive at the top level of /api/chat, not in
+        # the nested options object. Keep accepting it through OllamaOptions
+        # so existing configuration and callers remain compatible.
+        opts_dict = options.to_dict() if options is not None and hasattr(options, "to_dict") else dict(options or {})
+        keep_alive = opts_dict.pop("keep_alive", DEFAULT_KEEP_ALIVE)
+        if opts_dict:
+            payload["options"] = {
+                k: v for k, v in opts_dict.items() if v is not None
+            }
+        if keep_alive is not None:
+            payload["keep_alive"] = keep_alive
 
         if format:
             payload["format"] = format
@@ -210,7 +219,13 @@ class OllamaClient:
         except Exception as e:
             raise OllamaConnectionError(f"Unexpected error: {e}")
 
-    async def embed(self, model: str, inputs: list[str]) -> list[list[float]]:
+    async def embed(
+        self,
+        model: str,
+        inputs: list[str],
+        *,
+        keep_alive: str | int | None = DEFAULT_KEEP_ALIVE,
+    ) -> list[list[float]]:
         """Generate embeddings via ``POST /api/embed`` (non-streaming).
 
         Args:
@@ -226,6 +241,8 @@ class OllamaClient:
         """
         client = self._get_client()
         payload: dict[str, Any] = {"model": model, "input": inputs}
+        if keep_alive is not None:
+            payload["keep_alive"] = keep_alive
         try:
             resp = await client.post("/api/embed", json=payload)
         except httpx.ConnectError as e:

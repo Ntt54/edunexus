@@ -130,10 +130,20 @@ class OpenAICompatProvider:
         # top_k is NOT supported by OpenAI — skip it.
         if "num_predict" in opts_dict and opts_dict["num_predict"] is not None:
             payload["max_tokens"] = opts_dict["num_predict"]
-        if "repeat_penalty" in opts_dict and opts_dict["repeat_penalty"] is not None:
-            payload["frequency_penalty"] = opts_dict["repeat_penalty"]
+        # Ollama's repeat_penalty has no equivalent in the standard OpenAI
+        # API; do not mis-map it to frequency_penalty (different semantics).
         if "seed" in opts_dict and opts_dict["seed"] is not None:
             payload["seed"] = opts_dict["seed"]
+        if tools:
+            payload["tools"] = tools
+        if format:
+            payload["response_format"] = (
+                {"type": "json_schema", "json_schema": {
+                    "name": "structured_response", "schema": format
+                }}
+                if isinstance(format, dict)
+                else format
+            )
 
         t_start = time.monotonic()
         state = _StreamState()

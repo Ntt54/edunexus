@@ -64,6 +64,24 @@ def _default_factory(texts: list[str]) -> list[list[float]]:
     return [[float(len(t))] for t in texts]
 
 
+class TrackingEmbedClient(FakeEmbedClient):
+    """Fake provider exposing the actual in-flight request peak."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.active = 0
+        self.peak = 0
+
+    async def embed(self, model: str, texts: list[str]) -> list[list[float]]:
+        self.active += 1
+        self.peak = max(self.peak, self.active)
+        try:
+            await asyncio.sleep(0)
+            return await super().embed(model, texts)
+        finally:
+            self.active -= 1
+
+
 class FakeStore:
     """Minimal cache backing store for embed_texts."""
 
@@ -172,6 +190,21 @@ async def test_parallel_embed_batch_size() -> None:
     # Batch sizes: 3, 3, 1.
     call_sizes = [len(t) for _, t in client.embed_calls]
     assert call_sizes == [3, 3, 1]
+
+
+@pytest.mark.asyncio
+async def test_embed_texts_separates_batch_size_and_concurrency() -> None:
+    chunks = [f"chunk-{i}" for i in range(7)]
+    client = TrackingEmbedClient()
+    store = FakeStore()
+
+    results = await embed_texts(
+        client, "model", chunks, store, batch_size=2, max_concurrency=2
+    )
+
+    assert len(results) == 7
+    assert [len(texts) for _, texts in client.embed_calls] == [2, 2, 2, 1]
+    assert client.peak == 2
 
 
 @pytest.mark.asyncio

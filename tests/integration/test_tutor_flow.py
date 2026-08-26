@@ -40,6 +40,7 @@ class FakeTutorClient:
     def __init__(self, embed_map: dict[str, list[float]], chat_frames: list[dict[str, Any]]):
         self.embed_map = embed_map
         self.chat_frames = chat_frames
+        self.chat_messages: list[list[str]] = []
 
     async def embed(self, model: str, inputs: list[str]) -> list[list[float]]:
         text = inputs[0] if inputs else ""
@@ -49,6 +50,9 @@ class FakeTutorClient:
         return [self.embed_map.get("", [0.0] * DIM)]
 
     async def chat_stream(self, messages, model, *, think=False, options=None, format=None, tools=None):
+        self.chat_messages.append([
+            getattr(message, "content", str(message)) for message in messages
+        ])
         for f in self.chat_frames:
             msg = f.get("message", {})
             if msg.get("thinking"):
@@ -90,11 +94,40 @@ def two_subject_service(tmp_path: Path):
     return TutorService(store, client, config), store
 
 
-async def _collect(service: TutorService, subject_name: str, question: str):
+async def _collect(
+    service: TutorService,
+    subject_name: str,
+    question: str,
+    conversation_id: str | None = None,
+):
     frames = []
-    async for f in service.ask(subject_name, question):
+    async for f in service.ask(
+        subject_name, question, conversation_id=conversation_id
+    ):
         frames.append(f)
     return frames
+
+
+@pytest.mark.asyncio
+async def test_conversation_history_is_bounded_and_reused(two_subject_service, tmp_path: Path):
+    service, store = two_subject_service
+    subject, _book = seed_subject(
+        store, "SujetA", "LivreA", "Contenu propre au sujet A.", VEC_A, tmp_path
+    )
+    conversation = store.create_tutoring_session(subject.id, title="Mémoire")
+
+    await _collect(
+        service, "SujetA", "première question", conversation.id
+    )
+    await _collect(
+        service, "SujetA", "deuxième question", conversation.id
+    )
+
+    second_prompt = service.client.chat_messages[-1]
+    assert any("première question" in content for content in second_prompt)
+    assert any("Réponse ancrée" in content for content in second_prompt)
+    assert "deuxième question" in second_prompt[-1]
+    assert len(second_prompt) <= service._MAX_HISTORY_MESSAGES + 3
 
 
 @pytest.mark.asyncio

@@ -109,7 +109,7 @@ class OptionsUpdate(BaseModel):
     seed: int | None = None
     num_batch: int | None = None
     num_thread: int | None = None
-    keep_alive: str | None = None
+    keep_alive: str | int | None = None
 
 
 class PresetCreate(BaseModel):
@@ -123,6 +123,7 @@ class TutorImportRequest(BaseModel):
     path: str | None = None
     fmt: str | None = None
     background: bool = True
+    queue: bool = False
 
 
 class TutorSearchRequest(BaseModel):
@@ -422,6 +423,14 @@ class SettingsUpdate(BaseModel):
     llm_provider: str | None = None
     llm_base_url: str | None = None
     llm_api_key: str | None = None
+    embed_batch_size: int | None = None
+    max_parallel_embed: int | None = None
+    nightly_enabled: bool | None = None
+    nightly_start_at: str | None = None
+    nightly_stop_at: str | None = None
+    nightly_only_on_ac: bool | None = None
+    nightly_max_runtime_minutes: int | None = None
+    nightly_prepare_enabled: bool | None = None
 
 
 def create_app(config_dir: Path | None = None) -> FastAPI:
@@ -475,15 +484,31 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         embedding_provider=embedding_provider,
         document_parser=document_parser,
     )
+    # Any ``indexing`` row left by a killed process becomes safely resumable.
+    tutor_service.recover_interrupted_indexing()
     # Mastery / gap / path tracker (US4 practice surface).
     tutor_progress = ProgressTracker(tutor_store)
     # Conversations nommées (005-platform-ui-library).
     conversations = ConversationService(tutor_store)
 
+    @app.on_event("startup")
+    async def _startup() -> None:
+        if config.tutor_nightly_enabled:
+            await tutor_service.start_nightly_scheduler()
+
     @app.on_event("shutdown")
     async def _shutdown() -> None:
-        # Let in-flight background indexing finish (bounded) BEFORE tearing
-        # down the clients those tasks use.
+        try:
+            await tutor_service.stop_nightly_scheduler()
+        except Exception:
+            pass
+        # Pause the single persistent queue before tearing down its clients.
+        try:
+            await asyncio.wait_for(tutor_service.stop_index_queue(), timeout=5)
+        except Exception:
+            pass
+        # Let legacy per-import background indexing finish (bounded) BEFORE
+        # tearing down the clients those tasks use.
         pending = [
             t
             for t in getattr(app.state, "tutor_index_tasks", {}).values()
@@ -566,16 +591,29 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         subject: str | None = None
         fmt: str | None = None
         path: str | None = None
+        queue_requested = False
         if "multipart/form-data" in ctype:
             form = await request.form()
             subject = form.get("subject")
             fmt = form.get("fmt")
             upload = form.get("file")
+            queue_requested = str(form.get("queue", "")).lower() in {"1", "true", "yes", "on"}
             if upload is None:
                 raise HTTPException(status_code=400, detail="missing file")
             uploads_dir = config.config_dir / "tutor" / "uploads"
             uploads_dir.mkdir(parents=True, exist_ok=True)
-            dest = uploads_dir / upload.filename
+            raw_filename = str(getattr(upload, "filename", "") or "")
+            # Multipart filenames are client-controlled. Normalize both POSIX
+            # and Windows separators, then keep only the final component so a
+            # value such as ../../outside.pdf cannot escape uploads_dir.
+            safe_filename = Path(raw_filename.replace("\\", "/")).name
+            if not safe_filename or safe_filename in {".", ".."}:
+                raise HTTPException(status_code=400, detail="invalid file name")
+            dest = uploads_dir / safe_filename
+            if dest.exists():
+                dest = uploads_dir / (
+                    f"{dest.stem}-{uuid.uuid4().hex[:8]}{dest.suffix}"
+                )
             dest.write_bytes(await upload.read())
             path = str(dest)
         else:
@@ -583,6 +621,7 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             subject = data.get("subject")
             path = data.get("path")
             fmt = data.get("fmt")
+            queue_requested = bool(data.get("queue", False))
         if not subject or not path:
             raise HTTPException(status_code=400, detail="subject and path required")
 
@@ -600,6 +639,13 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         status = tutor_store.get_book_status(book.id)
         if status == "indexed":
             return {"book_id": book.id, "status": "ready"}
+
+        if queue_requested:
+            # Persistent queue mode leaves the row pending and lets the single
+            # worker claim it in creation order. Starting here means several
+            # rapid imports are accepted without spawning one task per book.
+            await tutor_service.start_index_queue()
+            return {"book_id": book.id, "status": "pending", "queued": True}
 
         tasks: dict[str, asyncio.Task] = getattr(
             app.state, "tutor_index_tasks", None
@@ -686,7 +732,9 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             return {"results": []}
         import numpy as np
 
-        rows = tutor_store.get_indexed_chunks(subj.id)
+        rows = tutor_store.get_indexed_chunks(
+            subj.id, model=tutor_service.model
+        )
         idx = NumpyVectorIndex()
         items = []
         meta: dict[str, Any] = {}
@@ -710,6 +758,60 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                 "score": score,
             })
         return {"results": results}
+
+    @app.get("/api/tutor/index-queue")
+    async def tutor_index_queue_status() -> dict[str, Any]:
+        return tutor_service.index_queue_status()
+
+    @app.post("/api/tutor/index-queue/start")
+    async def tutor_index_queue_start(retry_errors: bool = False) -> dict[str, Any]:
+        return await tutor_service.start_index_queue(retry_errors=retry_errors)
+
+    @app.post("/api/tutor/index-queue/stop")
+    async def tutor_index_queue_stop() -> dict[str, Any]:
+        return await tutor_service.stop_index_queue()
+
+    @app.get("/api/tutor/nightly")
+    async def tutor_nightly_status() -> dict[str, Any]:
+        return tutor_service.nightly_status()
+
+    @app.post("/api/tutor/nightly/start")
+    async def tutor_nightly_start() -> dict[str, Any]:
+        config.tutor_nightly_enabled = True
+        config.save()
+        return await tutor_service.start_nightly_scheduler()
+
+    @app.post("/api/tutor/nightly/stop")
+    async def tutor_nightly_stop() -> dict[str, Any]:
+        config.tutor_nightly_enabled = False
+        config.save()
+        return await tutor_service.stop_nightly_scheduler()
+
+    @app.post("/api/tutor/maintenance")
+    async def tutor_maintenance(request: Request) -> dict[str, Any]:
+        body = await request.json()
+        return tutor_service.run_maintenance(
+            vacuum=bool(body.get("vacuum", False)),
+            backup=bool(body.get("backup", True)),
+        )
+
+    @app.post("/api/tutor/books/{book_id}/retry")
+    async def tutor_retry_book(book_id: str) -> dict[str, Any]:
+        book = tutor_store.get_book(book_id)
+        if book is None:
+            raise HTTPException(status_code=404, detail="livre inconnu")
+        if book.status != "error":
+            raise HTTPException(status_code=409, detail="le livre n'est pas en erreur")
+        tutor_store.retry_book(book_id)
+        await tutor_service.start_index_queue()
+        return {"book_id": book_id, "status": "pending"}
+
+    @app.post("/api/tutor/books/{book_id}/cancel")
+    async def tutor_index_queue_cancel(book_id: str) -> dict[str, Any]:
+        try:
+            return await tutor_service.cancel_queued_book(book_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="livre inconnu") from exc
 
     @app.get("/api/tutor/index-status")
     async def tutor_index_status() -> dict[str, Any]:
@@ -1238,6 +1340,7 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                     status_code=400, detail="embedding doit être une chaîne non vide"
                 )
             config.tutor_embedding_model = payload.embedding.strip()
+            tutor_service.set_embedding_model(config.tutor_embedding_model)
         if payload.llm is not None:
             if not isinstance(payload.llm, str) or not payload.llm.strip():
                 raise HTTPException(
@@ -1551,24 +1654,33 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
     # REST: Learning paths — Parcours (Feature 006 — adaptive learning)
     # ------------------------------------------------------------------
 
+    def _active_subject_id() -> str | None:
+        """Return the selected subject id, if one exists in this store."""
+        active = tutor_store.active_subject()
+        return active.id if active is not None else None
+
     @app.post("/api/tutor/paths")
     async def create_path(request: Request) -> dict[str, Any]:
         body = await request.json()
-        subject_id = body.get("subject_id") or (
-            tutor_store.active_subject_id
-        )
+        subject_id = body.get("subject_id") or _active_subject_id()
         if not subject_id:
-            raise HTTPException(400, "subject_id requis")
+            raise HTTPException(status_code=400, detail="subject_id requis")
         title = str(body.get("title", "")).strip()
         if not title:
-            raise HTTPException(400, "title requis")
-        return tutor_service.create_path(subject_id, title, body.get("description", ""))
+            raise HTTPException(status_code=400, detail="title requis")
+        if tutor_store.get_subject(subject_id) is None:
+            raise HTTPException(status_code=404, detail="Sujet inconnu")
+        return tutor_service.create_path(
+            subject_id, title, body.get("description", "")
+        )
 
     @app.get("/api/tutor/paths")
     async def list_paths(subject_id: str | None = None) -> dict[str, Any]:
-        sid = subject_id or tutor_store.active_subject_id
+        sid = subject_id or _active_subject_id()
         if not sid:
-            raise HTTPException(400, "subject_id requis")
+            raise HTTPException(status_code=400, detail="subject_id requis")
+        if tutor_store.get_subject(sid) is None:
+            raise HTTPException(status_code=404, detail="Sujet inconnu")
         return {"paths": tutor_service.list_paths(sid)}
 
     @app.get("/api/tutor/paths/{path_id}")
@@ -1702,6 +1814,14 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                 "llm_provider": config.llm_provider,
                 "llm_base_url": config.llm_base_url,
                 "llm_api_key": config.llm_api_key,
+                "embed_batch_size": config.tutor_embed_batch_size,
+                "max_parallel_embed": config.tutor_max_parallel_embed,
+                "nightly_enabled": config.tutor_nightly_enabled,
+                "nightly_start_at": config.tutor_nightly_start_at,
+                "nightly_stop_at": config.tutor_nightly_stop_at,
+                "nightly_only_on_ac": config.tutor_nightly_only_on_ac,
+                "nightly_max_runtime_minutes": config.tutor_nightly_max_runtime_minutes,
+                "nightly_prepare_enabled": config.tutor_nightly_prepare_enabled,
             },
         }
 
@@ -1731,9 +1851,29 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                 config.llm_base_url = payload.llm_base_url
             if payload.llm_api_key is not None:
                 config.llm_api_key = payload.llm_api_key
+            if payload.embed_batch_size is not None:
+                config.tutor_embed_batch_size = payload.embed_batch_size
+            if payload.max_parallel_embed is not None:
+                config.tutor_max_parallel_embed = payload.max_parallel_embed
+            if payload.nightly_enabled is not None:
+                config.tutor_nightly_enabled = payload.nightly_enabled
+            if payload.nightly_start_at is not None:
+                config.tutor_nightly_start_at = payload.nightly_start_at
+            if payload.nightly_stop_at is not None:
+                config.tutor_nightly_stop_at = payload.nightly_stop_at
+            if payload.nightly_only_on_ac is not None:
+                config.tutor_nightly_only_on_ac = payload.nightly_only_on_ac
+            if payload.nightly_max_runtime_minutes is not None:
+                config.tutor_nightly_max_runtime_minutes = payload.nightly_max_runtime_minutes
+            if payload.nightly_prepare_enabled is not None:
+                config.tutor_nightly_prepare_enabled = payload.nightly_prepare_enabled
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         config.save()  # persistance immédiate (préférence utilisateur)
+        if config.tutor_nightly_enabled:
+            await tutor_service.start_nightly_scheduler()
+        else:
+            await tutor_service.stop_nightly_scheduler()
         return await settings_get()
 
     @app.post("/api/tutor/restart")

@@ -123,7 +123,9 @@ async def test_chat_stream_maps_options():
     assert captured["temperature"] == 0.7
     assert captured["top_p"] == 0.9
     assert captured["max_tokens"] == 256
-    assert captured["frequency_penalty"] == 1.2
+    # repeat_penalty is Ollama-specific and must not be mis-mapped to
+    # OpenAI's frequency_penalty, which has different semantics.
+    assert "frequency_penalty" not in captured
     assert captured["seed"] == 42
     assert captured["stream"] is True
     await provider.close()

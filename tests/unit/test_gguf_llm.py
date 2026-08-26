@@ -201,7 +201,8 @@ async def test_gguf_llm_chat_stream_maps_options():
     assert captured["temperature"] == 0.5
     assert captured["top_p"] == 0.95
     assert captured["max_tokens"] == 128
-    assert captured["frequency_penalty"] == 1.1
+    assert captured["repeat_penalty"] == 1.1
+    assert "frequency_penalty" not in captured
     assert captured["seed"] == 7
     assert captured["stream"] is True
 

@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 import threading
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -143,6 +144,295 @@ class TutorService:
         self.quiz_engine = QuizEngine(store, client, config)
         self._cancel_flags: dict[str, threading.Event] = {}
         self._threads: dict[str, threading.Thread] = {}
+        # One app-loop worker owns the persistent pending queue. Books are
+        # deliberately processed one at a time on modest CPU/RAM machines.
+        self._index_queue_task: asyncio.Task | None = None
+        self._index_queue_stop: asyncio.Event | None = None
+        self._index_queue_current: str | None = None
+        self._index_queue_completed = 0
+        self._index_queue_errors = 0
+        self._index_queue_started_at: str | None = None
+        self._nightly_scheduler_task: asyncio.Task | None = None
+        self._nightly_last_run: str | None = None
+        self._nightly_last_error: str | None = None
+        self._nightly_last_window_key: str | None = None
+        self._nightly_prepare_status: dict[str, Any] = {}
+
+    def index_queue_status(self) -> dict[str, Any]:
+        """Return a lightweight, persistence-backed queue snapshot."""
+        books = self.store.list_all_books()
+        pending = sum(1 for book in books if book.status == "pending")
+        current = self.store.get_book(self._index_queue_current) if self._index_queue_current else None
+        running = bool(self._index_queue_task and not self._index_queue_task.done())
+        return {
+            "running": running,
+            "paused": not running and pending > 0,
+            "current_book_id": self._index_queue_current,
+            "current_title": current.title if current is not None else None,
+            "pending_count": pending,
+            "completed_count": self._index_queue_completed,
+            "error_count": self._index_queue_errors,
+            "started_at": self._index_queue_started_at,
+        }
+
+    def recover_interrupted_indexing(self) -> int:
+        """Make interrupted books eligible for a later controlled resume."""
+        return self.store.recover_interrupted_indexing()
+
+    async def start_index_queue(self, *, retry_errors: bool = False) -> dict[str, Any]:
+        """Start exactly one worker consuming pending books by creation order."""
+        if self._index_queue_task is not None and not self._index_queue_task.done():
+            return self.index_queue_status()
+        self.store.recover_interrupted_indexing()
+        if retry_errors:
+            for book in self.store.list_all_books():
+                if book.status == "error":
+                    self.store.cancel_indexing(book.id)
+        self._index_queue_stop = asyncio.Event()
+        # Keep counters cumulative so rapid imports that start successive
+        # short worker runs still report the complete session history.
+        self._index_queue_started_at = _now_iso()
+        self._index_queue_task = asyncio.create_task(self._run_index_queue())
+        return self.index_queue_status()
+
+    async def stop_index_queue(self, *, wait: bool = True) -> dict[str, Any]:
+        """Pause the worker; an in-flight book is returned to ``pending``."""
+        task = self._index_queue_task
+        if task is None or task.done():
+            return self.index_queue_status()
+        if self._index_queue_stop is not None:
+            self._index_queue_stop.set()
+        if self._index_queue_current:
+            flag = self._cancel_flags.get(self._index_queue_current)
+            if flag is not None:
+                flag.set()
+        if wait:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        return self.index_queue_status()
+
+    async def cancel_queued_book(self, book_id: str) -> dict[str, Any]:
+        """Cancel one pending/current book and leave it safely resumable."""
+        book = self.store.get_book(book_id)
+        if book is None:
+            raise KeyError(book_id)
+        if book.status not in {"pending", "indexing"}:
+            return {"book_id": book_id, "status": book.status, "cancelled": False}
+        flag = self._cancel_flags.get(book_id)
+        if flag is not None:
+            flag.set()
+        # Purge immediately so the API and the next queue snapshot agree;
+        # _run_index will observe the pending state at its next checkpoint.
+        self.store.cancel_indexing(book_id)
+        return {"book_id": book_id, "status": "pending", "cancelled": True}
+
+    @staticmethod
+    def _retryable_index_error(error: str | None) -> bool:
+        text = (error or "").casefold()
+        return any(token in text for token in (
+            "connection", "timeout", "temporarily", "ollama", "http", "server", "transport"
+        ))
+
+    async def _run_index_queue(self) -> None:
+        """Consume all pending books sequentially until paused or exhausted."""
+        stop = self._index_queue_stop
+        try:
+            while stop is not None and not stop.is_set():
+                books = [
+                    book for book in self.store.list_all_books()
+                    if book.status == "pending"
+                ]
+                if not books:
+                    break
+                book = books[0]
+                subject_id = self.store.get_book_subject_id(book.id)
+                if subject_id is None:
+                    self.store.set_book_error(book.id, "subject missing")
+                    self._index_queue_errors += 1
+                    continue
+                self._index_queue_current = book.id
+                self._cancel_flags[book.id] = threading.Event()
+                try:
+                    await self._run_index(
+                        subject_id, book, Path(book.source_path), book.format
+                    )
+                finally:
+                    self._index_queue_current = None
+                final = self.store.get_book(book.id)
+                if final is not None and final.status == "indexed":
+                    self._index_queue_completed += 1
+                elif final is not None and final.status == "error":
+                    if self._retryable_index_error(final.error) and final.retry_count < 3:
+                        self.store.retry_book(book.id)
+                        await asyncio.sleep(min(30, 2 ** final.retry_count))
+                        continue
+                    self._index_queue_errors += 1
+        finally:
+            self._index_queue_current = None
+            self._index_queue_task = None
+            self._index_queue_stop = None
+
+    def nightly_status(self) -> dict[str, Any]:
+        """Return scheduler state without starting any background work."""
+        now = datetime.now().strftime("%H:%M")
+        start = getattr(self.config, "tutor_nightly_start_at", "23:00")
+        stop = getattr(self.config, "tutor_nightly_stop_at", "07:00")
+        return {
+            "enabled": bool(getattr(self.config, "tutor_nightly_enabled", False)),
+            "scheduler_running": bool(self._nightly_scheduler_task and not self._nightly_scheduler_task.done()),
+            "window_open": self._nightly_window_open(now, start, stop),
+            "on_ac_power": self._on_ac_power(),
+            "start_at": start,
+            "stop_at": stop,
+            "only_on_ac": getattr(self.config, "tutor_nightly_only_on_ac", True),
+            "last_run": self._nightly_last_run,
+            "last_error": self._nightly_last_error,
+            "prepare_enabled": getattr(self.config, "tutor_nightly_prepare_enabled", False),
+            "prepare": self._nightly_prepare_status,
+            "queue": self.index_queue_status(),
+        }
+
+    @staticmethod
+    def _nightly_window_open(now: str, start: str, stop: str) -> bool:
+        """Support normal and overnight windows such as 23:00 → 07:00."""
+        if start == stop:
+            return False
+        if start < stop:
+            return start <= now < stop
+        return now >= start or now < stop
+
+    @staticmethod
+    def _on_ac_power() -> bool:
+        """Best-effort Linux power check; unknown platforms are allowed."""
+        power_dir = Path("/sys/class/power_supply")
+        if not power_dir.exists():
+            return True
+        found = False
+        for online in power_dir.glob("*/online"):
+            try:
+                found = True
+                if online.read_text(encoding="utf-8").strip() == "1":
+                    return True
+            except OSError:
+                continue
+        return True if not found else False
+
+    async def start_nightly_scheduler(self) -> dict[str, Any]:
+        """Start one lightweight in-process clock scheduler when enabled."""
+        if self._nightly_scheduler_task is None or self._nightly_scheduler_task.done():
+            self._nightly_scheduler_task = asyncio.create_task(self._nightly_loop())
+        return self.nightly_status()
+
+    async def stop_nightly_scheduler(self) -> dict[str, Any]:
+        task = self._nightly_scheduler_task
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._nightly_scheduler_task = None
+        return self.nightly_status()
+
+    async def _nightly_loop(self) -> None:
+        """Check the local clock periodically; no external service is used."""
+        while True:
+            try:
+                start = getattr(self.config, "tutor_nightly_start_at", "23:00")
+                stop = getattr(self.config, "tutor_nightly_stop_at", "07:00")
+                now = datetime.now().strftime("%H:%M")
+                allowed_power = not getattr(self.config, "tutor_nightly_only_on_ac", True) or self._on_ac_power()
+                window_key = datetime.now().strftime("%Y-%m-%d")
+                if start > stop and now < stop:
+                    window_key = (datetime.now().date()).isoformat()
+                books = self.store.list_all_books()
+                if (
+                    getattr(self.config, "tutor_nightly_enabled", False)
+                    and self._nightly_window_open(now, start, stop)
+                    and allowed_power
+                    and any(book.status == "pending" for book in books)
+                    and window_key != self._nightly_last_window_key
+                    and not (self._index_queue_task and not self._index_queue_task.done())
+                ):
+                    self._nightly_last_window_key = window_key
+                    await self._run_nightly_cycle()
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._nightly_last_error = f"{type(exc).__name__}: {exc}"
+                await asyncio.sleep(30)
+
+    async def _run_nightly_cycle(self) -> None:
+        started = datetime.now().isoformat(timespec="seconds")
+        self._nightly_last_run = started
+        self._nightly_last_error = None
+        try:
+            await asyncio.wait_for(
+                self.start_index_queue(),
+                timeout=max(1, getattr(self.config, "tutor_nightly_max_runtime_minutes", 420)) * 60,
+            )
+            queue_task = self._index_queue_task
+            if queue_task is not None:
+                await asyncio.wait_for(
+                    queue_task,
+                    timeout=max(1, getattr(self.config, "tutor_nightly_max_runtime_minutes", 420)) * 60,
+                )
+            if getattr(self.config, "tutor_nightly_prepare_enabled", False):
+                for subject in self.store.list_subjects():
+                    try:
+                        report = await self.prepare_knowledge(subject.id)
+                        self._nightly_prepare_status[subject.id] = report.to_dict()
+                    except Exception as exc:
+                        self._nightly_prepare_status[subject.id] = {"error": str(exc)}
+        except asyncio.TimeoutError:
+            await self.stop_index_queue()
+            self._nightly_last_error = "durée maximale nocturne atteinte"
+        except Exception as exc:
+            self._nightly_last_error = f"{type(exc).__name__}: {exc}"
+
+    def run_maintenance(self, *, vacuum: bool = False, backup: bool = True) -> dict[str, Any]:
+        """Run safe local maintenance and optionally create a SQLite backup."""
+        report = self.store.maintenance_report()
+        deleted = self.store.cleanup_orphan_embeddings()
+        backup_path = None
+        if backup:
+            backup_dir = self.config.config_dir / "tutor" / "backups"
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup_path = str(self.store.backup_to(backup_dir / f"library-{stamp}.db"))
+        optimized = self.store.optimize(vacuum=vacuum)
+        return {
+            "before": report,
+            "orphan_embeddings_deleted": deleted,
+            "backup_path": backup_path,
+            "after": optimized,
+        }
+
+    def set_embedding_model(self, model: str) -> None:
+        """Switch the active embedding model and invalidate retrieval caches."""
+        model = model.strip()
+        if not model:
+            raise ValueError("embedding model must be non-empty")
+        self.model = model
+        self.retriever.set_model(model)
+
+    def _generation_options(self) -> OllamaOptions:
+        """Build inference options from persisted settings.
+
+        The previous implementation rebuilt an ``OllamaOptions`` instance with
+        only ``num_ctx`` for every tutor call, silently discarding settings such
+        as ``num_predict``, ``num_thread`` and ``keep_alive``.  A 4096-token
+        context and a 384-token output cap are lighter CPU-oriented defaults;
+        explicit user settings still take precedence.
+        """
+        values = self.config.options.to_dict()
+        if not values.get("num_ctx"):
+            values["num_ctx"] = 4096
+        if not values.get("num_predict"):
+            values["num_predict"] = 384
+        return OllamaOptions(**values)
 
     # ------------------------------------------------------------------
     # Grounded ask (US2): sources-first streamed tutoring answer
@@ -278,6 +568,7 @@ class TutorService:
             scope_book_ids = None
         if conversation_id:
             self.store.touch_conversation(conversation_id)
+        history = self._conversation_history(conversation_id, question)
 
         if mode == "compare":
             async for frame in self._ask_compare(
@@ -304,7 +595,7 @@ class TutorService:
         # usable with an empty library. Grounded mode is unchanged whenever
         # passages ARE retrieved.
         chunks: list[ScoredChunk] = []
-        if self.store.get_indexed_chunks(subject_id):
+        if self.store.get_indexed_chunks(subject_id, model=self.model):
             # 1) Retrieve subject-scoped passages (périmètre conversation si
             # des sources actives sont définies — 005-platform-ui-library).
             chunks = await self.retriever.retrieve(
@@ -320,6 +611,7 @@ class TutorService:
                 level=level,
                 session_id=session_id,
                 cancel=cancel,
+                history=history,
             ):
                 yield frame
             return
@@ -340,6 +632,7 @@ class TutorService:
         user_prompt = build_user_prompt(question, chunks)
         messages = [
             Message(role=MessageRole.SYSTEM, content=system_prompt),
+            *history,
             Message(role=MessageRole.USER, content=user_prompt),
         ]
         if think:
@@ -369,6 +662,45 @@ class TutorService:
     # ------------------------------------------------------------------
     # Chat without sources (Phase 6 UX): model-knowledge answers
     # ------------------------------------------------------------------
+
+    _MAX_HISTORY_MESSAGES = 12
+    _MAX_HISTORY_CHARS = 12000
+
+    def _conversation_history(
+        self, conversation_id: str | None, current_question: str
+    ) -> list[Message]:
+        """Return a bounded prior transcript suitable for an LLM prompt."""
+        if not conversation_id:
+            return []
+        rows = self.store.get_session_transcript(conversation_id)
+        if (
+            rows
+            and rows[-1].get("role") == "user"
+            and rows[-1].get("text") == current_question
+        ):
+            rows = rows[:-1]
+        selected: list[Message] = []
+        total_chars = 0
+        for row in reversed(rows):
+            role = row.get("role")
+            text = str(row.get("text") or "").strip()
+            if role not in ("user", "assistant") or not text:
+                continue
+            if len(selected) >= self._MAX_HISTORY_MESSAGES:
+                break
+            remaining = self._MAX_HISTORY_CHARS - total_chars
+            if remaining <= 0:
+                break
+            text = text[-remaining:]
+            selected.append(
+                Message(
+                    role=MessageRole.USER if role == "user" else MessageRole.ASSISTANT,
+                    content=text,
+                )
+            )
+            total_chars += len(text)
+        selected.reverse()
+        return selected
 
     _UNGROUNDED_NOTE = (
         "(aucune source sélectionnée — réponse sans contexte documentaire)\n\n"
@@ -409,6 +741,7 @@ class TutorService:
         level: str,
         session_id: str | None,
         cancel: asyncio.Event | None = None,
+        history: list[Message] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream an answer from model knowledge (no retrieval, no citations).
 
@@ -425,6 +758,7 @@ class TutorService:
                     subject_name, level, socratic
                 ),
             ),
+            *(history or []),
             Message(role=MessageRole.USER, content=question),
         ]
         ti = build_think_instruction(True) if think else None
@@ -482,7 +816,7 @@ class TutorService:
         chunks; surfaces generation errors as an ``error`` frame followed by an
         ``end`` frame (INVARIANT 5: sources already fired before this runs).
         """
-        options = OllamaOptions(num_ctx=max(8192, self.config.options.num_ctx or 0))
+        options = self._generation_options()
         agen = self._llm_client.chat_stream(
             messages, model, think=think, options=options
         ).__aiter__()
@@ -670,7 +1004,7 @@ class TutorService:
         self, model: str, messages: list[Message]
     ) -> str:
         """Non-streaming LLM call for revision sheet generation."""
-        options = OllamaOptions(num_ctx=max(8192, self.config.options.num_ctx or 0))
+        options = self._generation_options()
         parts: list[str] = []
         async for ev in self._llm_client.chat_stream(
             messages, model, options=options
@@ -715,7 +1049,7 @@ class TutorService:
         level = level or self.config.tutor_level
         past_errors = self._collect_past_errors(concept_id)
         messages = build_exercise_prompt(concept.name, difficulty, level, past_errors)
-        options = OllamaOptions(num_ctx=max(8192, self.config.options.num_ctx or 0))
+        options = self._generation_options()
         text = await self._llm_collect(messages, options)
         data = parse_exercise_response(text)
         exercise = Exercise(
@@ -758,7 +1092,7 @@ class TutorService:
         feedback = ""
         if answer:
             messages = build_grade_prompt(exercise, answer)
-            options = OllamaOptions(num_ctx=max(8192, self.config.options.num_ctx or 0))
+            options = self._generation_options()
             text = await self._llm_collect(messages, options)
             verdict, feedback = parse_grade_response(text)
             self.store.add_attempt(
@@ -846,7 +1180,7 @@ class TutorService:
         ``delta``/``reasoning``/``stats``/``end`` frames like ``ask``.
         """
         messages = build_code_analysis_prompt(code, context, execution_result)
-        options = OllamaOptions(num_ctx=max(8192, self.config.options.num_ctx or 0))
+        options = self._generation_options()
         agen = self._llm_client.chat_stream(
             messages, self.config.tutor_model, options=options
         ).__aiter__()
@@ -1594,12 +1928,24 @@ class TutorService:
                 return
 
             chunk_texts = [c["text"] for c in chunk_dicts]
+            batch_size = getattr(self.config, "tutor_embed_batch_size", 16)
+            max_concurrency = getattr(self.config, "tutor_max_parallel_embed", 1)
+            self.store.update_index_progress(book_id, 0, len(chunk_texts))
 
             if self.embedding_provider is not None:
-                embeddings = await self._embed_with_provider(chunk_texts)
+                embeddings = await self._embed_with_provider(
+                    chunk_texts,
+                    batch_size=batch_size,
+                    max_concurrency=max_concurrency,
+                )
             else:
                 embeddings = await embed_texts(
-                    self.client, self.model, chunk_texts, self.store
+                    self.client,
+                    self.model,
+                    chunk_texts,
+                    self.store,
+                    batch_size=batch_size,
+                    max_concurrency=max_concurrency,
                 )
             if self._is_cancelled(book_id):
                 self.store.cancel_indexing(book_id)
@@ -1609,6 +1955,9 @@ class TutorService:
                 subject_id, book_id, chunk_dicts, embeddings, self.model
             )
             self.store.mark_indexed(book_id, len(chunk_dicts))
+            # A subject index is cached after the first question. Invalidate it
+            # so newly indexed books/chunks become searchable immediately.
+            self.retriever.invalidate(subject_id)
         except (
             GGUFEmbeddingError,
             DoclingOCRError,
@@ -1645,7 +1994,13 @@ class TutorService:
             except Exception:
                 pass
 
-    async def _embed_with_provider(self, chunks: list[str]) -> list[list[float]]:
+    async def _embed_with_provider(
+        self,
+        chunks: list[str],
+        *,
+        batch_size: int = 16,
+        max_concurrency: int = 1,
+    ) -> list[list[float]]:
         """Embed via the configured provider inside the SAME sha256-hash cache.
 
         Cache hits are reused without a provider call; only misses are sent
@@ -1664,11 +2019,22 @@ class TutorService:
                 to_embed.append((i, text))
 
         if to_embed:
-            texts = [t for _, t in to_embed]
-            vectors = await self.embedding_provider.embed(texts)
-            for (i, _), vec in zip(to_embed, vectors):
-                self.store.add_embedding(_hash_text(chunks[i], self.model), self.model, vec)
-                results[i] = vec
+            batches = [
+                to_embed[start : start + max(1, int(batch_size))]
+                for start in range(0, len(to_embed), max(1, int(batch_size)))
+            ]
+            semaphore = asyncio.Semaphore(max(1, int(max_concurrency)))
+
+            async def _embed_batch(batch: list[tuple[int, str]]) -> list[tuple[int, list[float]]]:
+                async with semaphore:
+                    vectors = await self.embedding_provider.embed([t for _, t in batch])
+                    return [(i, vec) for (i, _), vec in zip(batch, vectors)]
+
+            batch_results = await asyncio.gather(*[_embed_batch(batch) for batch in batches])
+            for batch_pairs in batch_results:
+                for i, vec in batch_pairs:
+                    self.store.add_embedding(_hash_text(chunks[i], self.model), self.model, vec)
+                    results[i] = vec
 
         return [r if r is not None else [] for r in results]
 
@@ -1770,7 +2136,7 @@ class TutorService:
         assignments: list[dict[str, Any]] = []
         categories_created: list[str] = []
         failed_batches: list[int] = []
-        options = OllamaOptions(num_ctx=max(8192, self.config.options.num_ctx or 0))
+        options = self._generation_options()
 
         for index, start in enumerate(range(0, total, batch_size)):
             batch = books[start : start + batch_size]
@@ -1914,7 +2280,7 @@ class TutorService:
                 ),
             ),
         ]
-        options = OllamaOptions(num_ctx=max(8192, self.config.options.num_ctx or 0))
+        options = self._generation_options()
         raw = await self._llm_collect(messages, options)
 
         # Parse the LLM response: expect a JSON array of concept names.
@@ -2009,9 +2375,13 @@ class TutorService:
         book = self.store.get_book(book_id)
         if book is None:
             raise KeyError(f"Livre introuvable : {book_id}")
-        # Retrieve chunks for the book
+        # Books are linked to subjects through the subject_books join table;
+        # Book itself intentionally has no subject_id field.
+        subject_id = self.store.get_book_subject_id(book_id)
+        if subject_id is None:
+            raise KeyError(f"Livre non rattaché à un sujet : {book_id}")
         raw_chunks = self.store.get_chunks_by_provenance(
-            book.subject_id, book_id, chapter
+            subject_id, book_id, chapter
         )
         texts = [c["text"] for c in raw_chunks if c.get("text")]
         if not texts:
@@ -2024,7 +2394,7 @@ class TutorService:
         ]
         parts: list[str] = []
         async for ev in self._llm_client.chat_stream(
-            messages, model, options=OllamaOptions(num_ctx=max(8192, self.config.options.num_ctx or 0))
+            messages, model, options=self._generation_options()
         ):
             if ev.kind == "content":
                 parts.append(ev.text)
@@ -2136,7 +2506,7 @@ class TutorService:
         self, model: str, messages: list[Message]
     ) -> str:
         """Non-streaming LLM call for diagnostic question generation."""
-        options = OllamaOptions(num_ctx=max(8192, self.config.options.num_ctx or 0))
+        options = self._generation_options()
         parts: list[str] = []
         async for ev in self._llm_client.chat_stream(
             messages, model, options=options
@@ -2378,7 +2748,7 @@ class TutorService:
         containing ``number``, ``statement``, ``concepts``, and ``status``.
         """
         messages = build_exam_analysis_prompt(exam_text)
-        options = OllamaOptions(num_ctx=max(8192, self.config.options.num_ctx or 0))
+        options = self._generation_options()
         raw = await self._llm_collect(messages, options)
         data = self._parse_exam_json(raw)
         questions: list[dict[str, Any]] = []
@@ -2434,7 +2804,7 @@ class TutorService:
         messages = build_exam_resolve_prompt(
             question_statement, concepts, hint_level, rag_context
         )
-        options = OllamaOptions(num_ctx=max(8192, self.config.options.num_ctx or 0))
+        options = self._generation_options()
         text = await self._llm_collect(messages, options)
         return {"text": text.strip(), "hint_level": hint_level}
 

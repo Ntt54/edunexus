@@ -139,10 +139,22 @@ class GGUFLLMProvider:
             payload["top_p"] = opts_dict["top_p"]
         if "num_predict" in opts_dict and opts_dict["num_predict"] is not None:
             payload["max_tokens"] = opts_dict["num_predict"]
+        # llama-server exposes repeat_penalty as its own extension; mapping
+        # it to frequency_penalty would change the meaning of the setting.
         if "repeat_penalty" in opts_dict and opts_dict["repeat_penalty"] is not None:
-            payload["frequency_penalty"] = opts_dict["repeat_penalty"]
+            payload["repeat_penalty"] = opts_dict["repeat_penalty"]
         if "seed" in opts_dict and opts_dict["seed"] is not None:
             payload["seed"] = opts_dict["seed"]
+        if tools:
+            payload["tools"] = tools
+        if format:
+            payload["response_format"] = (
+                {"type": "json_schema", "json_schema": {
+                    "name": "structured_response", "schema": format
+                }}
+                if isinstance(format, dict)
+                else format
+            )
 
         t_start = time.monotonic()
         state = _LLMStreamState()

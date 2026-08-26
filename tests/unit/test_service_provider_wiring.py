@@ -141,6 +141,19 @@ def test_failing_gguf_provider_surfaces_named_error(tmp_path: Path) -> None:
     # No silent fallback: the legacy client was never asked to embed.
 
 
+def test_set_embedding_model_updates_retriever_and_clears_cache(
+    tmp_path: Path,
+) -> None:
+    svc, store = _make_service(tmp_path)
+    svc.retriever._cache["subject"] = (None, {}, {})  # type: ignore[assignment]
+
+    svc.set_embedding_model("new-embedding-model")
+
+    assert svc.model == "new-embedding-model"
+    assert svc.retriever.model == "new-embedding-model"
+    assert svc.retriever._cache == {}
+
+
 def test_legacy_path_untouched_when_provider_none(tmp_path: Path) -> None:
     client = DummyClient()
     svc, store = _make_service(tmp_path, client=client)

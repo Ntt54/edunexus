@@ -34,6 +34,28 @@ def _make_counting_embed_transport(dim: int = 4):
     return httpx.MockTransport(handler), state
 
 
+def test_retriever_cache_is_invalidated_after_indexing(tmp_path: Path) -> None:
+    store = LibraryStore(tmp_path)
+    transport, _state = _make_counting_embed_transport()
+    client = OllamaClient(transport=transport)
+    config = Config(config_dir=tmp_path)
+    service = TutorService(store, client, config)
+
+    first = tmp_path / "first.txt"
+    first.write_text("alpha lesson " * 40, encoding="utf-8")
+    service.import_and_index("Math", str(first), background=False)
+    subject = store.list_subjects()[0]
+    _idx, first_meta, _titles = service.retriever._index_for(subject.id)
+    assert first_meta
+
+    second = tmp_path / "second.txt"
+    second.write_text("beta lesson " * 40, encoding="utf-8")
+    service.import_and_index("Math", str(second), background=False)
+
+    _idx, current_meta, _titles = service.retriever._index_for(subject.id)
+    assert any("beta lesson" in row["text"] for row in current_meta.values())
+
+
 def test_import_index_dedup_delete(tmp_path: Path) -> None:
     store = LibraryStore(tmp_path)
     transport, state = _make_counting_embed_transport()

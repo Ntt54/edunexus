@@ -10,6 +10,17 @@ from typing import Any
 
 from .models import OllamaOptions, Preset
 
+
+def _valid_hhmm(value: str, fallback: str) -> str:
+    try:
+        hour, minute = (int(part) for part in str(value).split(":", 1))
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f"{hour:02d}:{minute:02d}"
+    except (TypeError, ValueError):
+        pass
+    return fallback
+
+
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "ollama-tui"
 
 _VALID_TUTOR_LEVELS = {"beginner", "intermediate", "advanced", "expert"}
@@ -65,11 +76,20 @@ class Config:
             return
         self._write_files()
 
+    @staticmethod
+    def _atomic_write_json(path: Path, value: Any) -> None:
+        """Write JSON through a sibling temporary file, then replace atomically."""
+        tmp = path.with_name(f".{path.name}.tmp")
+        tmp.write_text(
+            json.dumps(value, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+
     def _write_files(self) -> None:
-        """Actually write the files to disk."""
-        self.config_file.write_text(json.dumps(self._data, indent=2, ensure_ascii=False))
-        raw = [p.to_dict() for p in self._presets]
-        self.presets_file.write_text(json.dumps(raw, indent=2, ensure_ascii=False))
+        """Persist configuration files without leaving partial JSON behind."""
+        self._atomic_write_json(self.config_file, self._data)
+        self._atomic_write_json(self.presets_file, [p.to_dict() for p in self._presets])
 
     def save(self) -> None:
         """Immediate save (for shutdown/flush)."""
@@ -518,18 +538,92 @@ class Config:
         self._schedule_save()
 
     # ------------------------------------------------------------------
-    # Parallel embeddings (Feature 006 — llama.cpp --parallel N)
+    # Embedding batch/parallelism (Feature 006)
     # ------------------------------------------------------------------
 
     @property
+    def tutor_embed_batch_size(self) -> int:
+        """Number of chunks sent in one embedding request (default 16)."""
+        raw = self._data.get("tutor", {}).get("embed_batch_size", 16)
+        try:
+            return max(1, min(64, int(raw)))
+        except (TypeError, ValueError):
+            return 16
+
+    @tutor_embed_batch_size.setter
+    def tutor_embed_batch_size(self, value: int) -> None:
+        self._data.setdefault("tutor", {})["embed_batch_size"] = max(
+            1, min(64, int(value))
+        )
+        self._schedule_save()
+
+    @property
     def tutor_max_parallel_embed(self) -> int:
-        """Max parallel embedding servers (1 = sequential, 2+ = parallel)."""
+        """Maximum simultaneous embedding requests (1 = safest CPU default)."""
         return max(1, min(8, self._data.get("tutor", {}).get("max_parallel_embed", 1)))
 
     @tutor_max_parallel_embed.setter
     def tutor_max_parallel_embed(self, value: int) -> None:
         clamped = max(1, min(8, value))
         self._data.setdefault("tutor", {})["max_parallel_embed"] = clamped
+        self._schedule_save()
+
+    @property
+    def tutor_nightly_enabled(self) -> bool:
+        return bool(self._data.get("tutor", {}).get("nightly_enabled", False))
+
+    @tutor_nightly_enabled.setter
+    def tutor_nightly_enabled(self, value: bool) -> None:
+        self._data.setdefault("tutor", {})["nightly_enabled"] = bool(value)
+        self._schedule_save()
+
+    @property
+    def tutor_nightly_start_at(self) -> str:
+        return str(self._data.get("tutor", {}).get("nightly_start_at", "23:00"))
+
+    @tutor_nightly_start_at.setter
+    def tutor_nightly_start_at(self, value: str) -> None:
+        self._data.setdefault("tutor", {})["nightly_start_at"] = _valid_hhmm(value, "23:00")
+        self._schedule_save()
+
+    @property
+    def tutor_nightly_stop_at(self) -> str:
+        return str(self._data.get("tutor", {}).get("nightly_stop_at", "07:00"))
+
+    @tutor_nightly_stop_at.setter
+    def tutor_nightly_stop_at(self, value: str) -> None:
+        self._data.setdefault("tutor", {})["nightly_stop_at"] = _valid_hhmm(value, "07:00")
+        self._schedule_save()
+
+    @property
+    def tutor_nightly_only_on_ac(self) -> bool:
+        return bool(self._data.get("tutor", {}).get("nightly_only_on_ac", True))
+
+    @tutor_nightly_only_on_ac.setter
+    def tutor_nightly_only_on_ac(self, value: bool) -> None:
+        self._data.setdefault("tutor", {})["nightly_only_on_ac"] = bool(value)
+        self._schedule_save()
+
+    @property
+    def tutor_nightly_max_runtime_minutes(self) -> int:
+        raw = self._data.get("tutor", {}).get("nightly_max_runtime_minutes", 420)
+        try:
+            return max(1, min(1440, int(raw)))
+        except (TypeError, ValueError):
+            return 420
+
+    @tutor_nightly_max_runtime_minutes.setter
+    def tutor_nightly_max_runtime_minutes(self, value: int) -> None:
+        self._data.setdefault("tutor", {})["nightly_max_runtime_minutes"] = max(1, min(1440, int(value)))
+        self._schedule_save()
+
+    @property
+    def tutor_nightly_prepare_enabled(self) -> bool:
+        return bool(self._data.get("tutor", {}).get("nightly_prepare_enabled", False))
+
+    @tutor_nightly_prepare_enabled.setter
+    def tutor_nightly_prepare_enabled(self, value: bool) -> None:
+        self._data.setdefault("tutor", {})["nightly_prepare_enabled"] = bool(value)
         self._schedule_save()
 
     def get_tutor_config_snapshot(self) -> dict[str, Any]:
@@ -557,6 +651,13 @@ class Config:
             "ocr_text_threshold": self.tutor_ocr_text_threshold,
             "ocr_dpi": self.tutor_ocr_dpi,
             "pdftoppm_bin": self.tutor_pdftoppm_bin,
+            "embed_batch_size": self.tutor_embed_batch_size,
             "max_parallel_embed": self.tutor_max_parallel_embed,
+            "nightly_enabled": self.tutor_nightly_enabled,
+            "nightly_start_at": self.tutor_nightly_start_at,
+            "nightly_stop_at": self.tutor_nightly_stop_at,
+            "nightly_only_on_ac": self.tutor_nightly_only_on_ac,
+            "nightly_max_runtime_minutes": self.tutor_nightly_max_runtime_minutes,
+            "nightly_prepare_enabled": self.tutor_nightly_prepare_enabled,
             "reranking_enabled": self.tutor_reranking_enabled,
         }

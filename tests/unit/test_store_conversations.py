@@ -7,6 +7,7 @@ conversation (créer/lister/renommer/supprimer).
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -78,6 +79,30 @@ def test_delete_conversation_cascades_sources(
     assert store.delete_conversation(conv.id) is True
     assert store.get_conversation_source_ids(conv.id) == []
     assert store.delete_conversation(conv.id) is False
+
+
+def test_concurrent_transcript_appends_are_atomic(store: LibraryStore):
+    sid = store.create_subject("Réseaux").id
+    conv = store.create_tutoring_session(sid)
+    barrier = threading.Barrier(2)
+
+    def append_many(role: str) -> None:
+        barrier.wait()
+        for i in range(20):
+            store.append_conversation_message(conv.id, role, f"{role}-{i}")
+
+    threads = [
+        threading.Thread(target=append_many, args=("user",)),
+        threading.Thread(target=append_many, args=("assistant",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    transcript = store.get_session_transcript(conv.id)
+    assert len(transcript) == 40
+    assert {row["role"] for row in transcript} == {"user", "assistant"}
 
 
 def test_book_deletion_cleans_sources_via_fk(

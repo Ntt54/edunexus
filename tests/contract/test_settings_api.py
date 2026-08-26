@@ -44,9 +44,21 @@ def test_get_settings_shape(client):
     assert r.status_code == 200
     data = r.json()
     assert isinstance(data["options"], dict)
+    assert data["tutor"]["embed_batch_size"] == 16
+    assert data["tutor"]["max_parallel_embed"] == 1
+    assert data["tutor"]["nightly_enabled"] is False
+    assert data["tutor"]["nightly_start_at"] == "23:00"
+    assert data["tutor"]["nightly_stop_at"] == "07:00"
+    assert data["tutor"]["nightly_only_on_ac"] is True
+    assert data["tutor"]["nightly_max_runtime_minutes"] == 420
+    assert data["tutor"]["nightly_prepare_enabled"] is False
     assert set(data["tutor"]) == {
         "think", "socratic", "level", "top_k",
         "llm_provider", "llm_base_url", "llm_api_key",
+        "embed_batch_size", "max_parallel_embed",
+        "nightly_enabled", "nightly_start_at", "nightly_stop_at",
+        "nightly_only_on_ac", "nightly_max_runtime_minutes",
+        "nightly_prepare_enabled",
     }
 
 

@@ -25,8 +25,9 @@ Interface web autonome (`tutor.html`) accessible via `http://127.0.0.1:9215/tuto
 16. [Configuration multi-fournisseurs](#16-configuration-multi-fournisseurs)
 17. [Recherche hybride BM25 + sémantique](#17-recherche-hybride-bm25--sémantique)
 18. [Extraction métadonnées](#18-extraction-métadonnées)
-19. [Embeddings parallèles](#19-embeddings-parallèles)
-20. [Sécurité & architecture](#20-sécurité--architecture)
+19. [Embeddings bornés et file nocturne](#19-embeddings-bornés-et-file-nocturne)
+20. [Automatisations locales](#20-automatisations-locales)
+21. [Sécurité & architecture](#21-sécurité--architecture)
 
 ---
 
@@ -75,7 +76,9 @@ Interface web autonome (`tutor.html`) accessible via `http://127.0.0.1:9215/tuto
 - **Stockage** : tables SQLite `books`, `subjects`, `categories`, `chunks`, `embeddings` dans `store.py`
 - **Classification** : `classifier.py` — hybride règles + LLM (lots de 25 titres)
 - **Routes** : `GET /api/tutor/books`, `DELETE /api/tutor/book/{id}`, `POST /api/tutor/import`
-- **UI** : `renderLibrary()` dans `tutor.html` avec comptages temps réel
+- **File nocturne** : `GET /api/tutor/index-queue`, `POST /api/tutor/index-queue/start`,
+  `POST /api/tutor/index-queue/stop`, `POST /api/tutor/books/{id}/cancel`.
+- **UI** : `renderLibrary()` dans `tutor.html` avec comptages temps réel et panneau de file
 
 ---
 
@@ -106,7 +109,9 @@ Fichier → extract_text() → (texte, metadata) tuples
 
 - **Extracteurs** : `extractors.py` — `extract_text()` retourne `Iterable[tuple[str, dict]]` (US9)
 - **Chunking** : `chunk_text_structured(text, max_chars=1200, overlap=200)` — détection paragraphes, fusion titres, sous-découpe phrases (US4)
-- **Indexation** : `_run_index()` dans `service.py` — thread séparé avec cancellation
+- **Indexation** : `_run_index()` dans `service.py` ; la file nocturne utilise un worker
+  asyncio unique, ordonné par `created_at`, et réutilise les lignes `pending` de SQLite.
+  Les lignes `indexing` orphelines sont remises en `pending` au démarrage.
 - **Métadonnées** : colonnes `chapter`, `section`, `page` dans la table `chunks` (US9)
 - **Table document_metadata** : `store.py` — paires clé/valeur par livre
 
@@ -477,27 +482,66 @@ Fichier → extract_text() → (texte, metadata) tuples
 
 ---
 
-## 19. Embeddings parallèles
+## 19. Embeddings bornés et file nocturne
 
-**User Story** : US8 — Embeddings concurrents via llama-server.
+**User Story** : US8 — Indexation locale de plusieurs livres sans parallélisme agressif.
 
 ### Fonctionnalités
 
-- llama-server démarré avec `--parallel N` (configurable 1-8)
-- Envoi de batches parallèles via `asyncio.gather`
-- Compatibilité ascendante : `max_parallel_embed=1` = comportement original
+- `embed_batch_size` contrôle le nombre de fragments par requête (défaut 16, borné 1–64).
+- `max_parallel_embed` contrôle séparément le nombre de requêtes simultanées ; un
+  `asyncio.Semaphore` impose effectivement cette limite (défaut 1 sur CPU modeste).
+- Le worker nocturne traite un seul livre à la fois, dans l’ordre `created_at`.
+- Les livres restent persistés en `pending`, sont reprenables après redémarrage et
+  peuvent être mis en pause ou annulés sans conserver de fragments partiels.
 
 ### Implémentation
 
-- **Manager** : `LlamaServerManager.start()` dans `llama_server.py` — flag `--parallel {N}` ajouté à argv
-- **Embeddings** : `embed_texts()` dans `embeddings.py` — parameter `max_parallel_embed`, batches par `asyncio.gather`
-- **Config** : `tutor_max_parallel_embed` (int, défaut 1) dans `config.py`
-- **Tests** : `test_parallel_embed.py` — 8 tests
-- **Commit** : `552e343`
+- **Embeddings** : `embed_texts()` et `_embed_with_provider()` dans `embeddings.py`/
+  `service.py`, avec cache par hash+modèle, lots ordonnés et sémaphore.
+- **Worker** : `TutorService.start_index_queue()` / `stop_index_queue()` dans `service.py`.
+- **SQLite** : `recover_interrupted_indexing()` et `update_index_progress()` dans `store.py`.
+- **API** : endpoints `/api/tutor/index-queue*` et `/api/tutor/books/{id}/cancel`.
+- **Tests** : batching, cache, limite de concurrence, imports multiples et reprise.
 
 ---
 
-## 20. Sécurité & architecture
+## 20. Automatisations locales
+
+### Réindexation différentielle
+
+Lorsqu’un fichier est réimporté au même chemin, EduNexus compare son fingerprint au livre existant. Si le contenu est inchangé, l’import reste un no-op. Si le fichier a changé, le même identifiant de livre est conservé, les chunks précédents sont purgés et le livre repasse dans la file `pending`. Les fragments inchangés peuvent néanmoins réutiliser le cache d’embeddings par hash et modèle.
+
+### Planificateur local
+
+Le planificateur asyncio reste dans le processus EduNexus et vérifie périodiquement la fenêtre horaire locale. Il peut être limité au secteur sous Linux, possède une durée maximale et ne démarre qu’un cycle par fenêtre. Il n’utilise aucun service cloud ni dépendance système obligatoire.
+
+| Réglage | Défaut | Fonction |
+|---|---:|---|
+| `nightly_enabled` | `false` | Active le planificateur. |
+| `nightly_start_at` / `nightly_stop_at` | `23:00` / `07:00` | Définit la fenêtre locale, y compris les fenêtres traversant minuit. |
+| `nightly_only_on_ac` | `true` | Évite de charger la machine sur batterie lorsque l’information système est disponible. |
+| `nightly_max_runtime_minutes` | `420` | Borne la durée d’un cycle. |
+| `nightly_prepare_enabled` | `false` | Lance ensuite `prepare_knowledge()` pour concepts, flashcards, glossaire et relations. |
+
+### Reprise et maintenance
+
+Les erreurs transitoires contenant des indices de transport, timeout, HTTP, serveur ou Ollama sont retentées au plus trois fois avec un délai croissant. Les erreurs persistantes restent visibles en `error` et peuvent être relancées manuellement via `POST /api/tutor/books/{id}/retry`.
+
+La maintenance vérifie `PRAGMA integrity_check`, compte les embeddings orphelins, supprime uniquement ceux qui ne sont plus référencés, exécute `PRAGMA optimize` et peut réaliser un `VACUUM`. Une sauvegarde cohérente de `library.db` est créée avec l’API native SQLite avant l’optimisation.
+
+### Routes
+
+| Route | Usage |
+|---|---|
+| `GET /api/tutor/nightly` | État du planificateur, fenêtre, secteur, dernière exécution et préparation pédagogique. |
+| `POST /api/tutor/nightly/start` / `stop` | Active ou désactive le planificateur immédiatement. |
+| `POST /api/tutor/maintenance` | Maintenance et sauvegarde locales ; `vacuum` est optionnel. |
+| `POST /api/tutor/books/{id}/retry` | Replace un livre en erreur dans la file. |
+
+---
+
+## 21. Sécurité & architecture
 
 ### Constitution v1.0.0
 

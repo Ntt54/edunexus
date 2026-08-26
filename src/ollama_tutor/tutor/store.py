@@ -63,6 +63,7 @@ class LibraryStore:
         # connections share the DB safely; check_same_thread is relaxed so a
         # connection is never migrated across threads.
         self._local = threading.local()
+        self._transcript_lock = threading.RLock()
         self._create_schema()
         self._migrate()
         self._active_id: str | None = None
@@ -74,6 +75,8 @@ class LibraryStore:
             conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("PRAGMA foreign_keys=ON")
             self._local.conn = conn
         return conn
@@ -383,6 +386,28 @@ class LibraryStore:
             );
             """
         )
+        # Foreign-key joins and subject-scoped retrieval are hot paths. These
+        # indexes are idempotent and also get created for existing databases.
+        cur.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_subject_books_book
+                ON subject_books(book_id);
+            CREATE INDEX IF NOT EXISTS idx_chunks_subject_book
+                ON chunks(subject_id, book_id);
+            CREATE INDEX IF NOT EXISTS idx_chunks_book_ordinal
+                ON chunks(book_id, ordinal);
+            CREATE INDEX IF NOT EXISTS idx_books_status
+                ON books(status);
+            CREATE INDEX IF NOT EXISTS idx_concepts_subject
+                ON concepts(subject_id);
+            CREATE INDEX IF NOT EXISTS idx_exercises_subject_concept
+                ON exercises(subject_id, concept_id);
+            CREATE INDEX IF NOT EXISTS idx_sessions_subject_activity
+                ON tutoring_sessions(subject_id, last_active_at);
+            CREATE INDEX IF NOT EXISTS idx_error_history_subject_created
+                ON error_history(subject_id, created_at);
+            """
+        )
         self._conn.commit()
 
     def _migrate(self) -> None:
@@ -408,6 +433,15 @@ class LibraryStore:
             )
             cur.commit()
         bcols = {r["name"] for r in cur.execute("PRAGMA table_info(books)")}
+        if "retry_count" not in bcols:
+            cur.execute("ALTER TABLE books ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
+            cur.commit()
+        if "next_retry_at" not in bcols:
+            cur.execute("ALTER TABLE books ADD COLUMN next_retry_at TEXT")
+            cur.commit()
+        if "last_error_at" not in bcols:
+            cur.execute("ALTER TABLE books ADD COLUMN last_error_at TEXT")
+            cur.commit()
         if "is_temp" not in bcols:
             cur.execute(
                 "ALTER TABLE books ADD COLUMN is_temp INTEGER NOT NULL DEFAULT 0"
@@ -453,6 +487,14 @@ class LibraryStore:
                 "ALTER TABLE subjects ADD COLUMN domain TEXT NOT NULL DEFAULT 'generique'"
             )
             cur.commit()
+
+        # This column is added by the migration above on older databases, so
+        # create its index only after the column is guaranteed to exist.
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunks_subject_embedding_model "
+            "ON chunks(subject_id, embedding_model)"
+        )
+        cur.commit()
 
     # ------------------------------------------------------------------
     # Error history (Feature 007 — US11)
@@ -734,13 +776,18 @@ class LibraryStore:
         ).fetchone()
         return Subject.from_dict(dict(row)) if row is not None else None
 
-    def _get_subject(self, subject_id: str) -> Subject:
+    def get_subject(self, subject_id: str) -> Subject | None:
+        """Return a subject by id, or ``None`` when it does not exist."""
         row = self._conn.execute(
             "SELECT * FROM subjects WHERE id = ?", (subject_id,)
         ).fetchone()
-        if row is None:
+        return Subject.from_dict(dict(row)) if row is not None else None
+
+    def _get_subject(self, subject_id: str) -> Subject:
+        subject = self.get_subject(subject_id)
+        if subject is None:
             raise KeyError(f"Unknown subject: {subject_id}")
-        return Subject.from_dict(dict(row))
+        return subject
 
     # ------------------------------------------------------------------
     # Documents (minimal import lifecycle; extended in later lanes)
@@ -771,6 +818,31 @@ class LibraryStore:
         else:
             raw = p.read_bytes().hex()
         fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+        existing_path = self._conn.execute(
+            "SELECT b.* FROM books b JOIN subject_books sb ON sb.book_id = b.id "
+            "WHERE sb.subject_id = ? AND b.source_path = ? LIMIT 1",
+            (subject_id, str(p)),
+        ).fetchone()
+        if existing_path is not None:
+            current = Book.from_dict(dict(existing_path))
+            if current.fingerprint == fingerprint:
+                return current
+            collision = self._conn.execute(
+                "SELECT id FROM books WHERE fingerprint = ? AND id <> ? LIMIT 1",
+                (fingerprint, current.id),
+            ).fetchone()
+            if collision is None:
+                self._conn.execute("DELETE FROM chunks WHERE book_id = ?", (current.id,))
+                self._conn.execute(
+                    "UPDATE books SET title = ?, format = ?, fingerprint = ?, "
+                    "status = 'pending', error = NULL, chunks_done = 0, "
+                    "chunks_total = 0, retry_count = 0, next_retry_at = NULL, "
+                    "last_error_at = NULL WHERE id = ?",
+                    (p.stem, fmt, fingerprint, current.id),
+                )
+                self._conn.commit()
+                return self.get_book(current.id)
 
         existing = self._conn.execute(
             "SELECT b.* FROM books b "
@@ -834,6 +906,37 @@ class LibraryStore:
     # Indexing (T014): chunks, embeddings cache, status transitions
     # ------------------------------------------------------------------
 
+    def recover_interrupted_indexing(self) -> int:
+        """Return orphaned ``indexing`` rows to the persistent queue.
+
+        Partial chunks are purged so a process interruption cannot leave a
+        book in a misleading half-indexed state.
+        """
+        rows = self._conn.execute(
+            "SELECT id FROM books WHERE status = 'indexing'"
+        ).fetchall()
+        if not rows:
+            return 0
+        ids = [row["id"] for row in rows]
+        self._conn.executemany(
+            "DELETE FROM chunks WHERE book_id = ?", [(book_id,) for book_id in ids]
+        )
+        self._conn.executemany(
+            "UPDATE books SET status = 'pending', error = NULL, "
+            "chunks_done = 0, chunks_total = 0 WHERE id = ?",
+            [(book_id,) for book_id in ids],
+        )
+        self._conn.commit()
+        return len(ids)
+
+    def update_index_progress(self, book_id: str, done: int, total: int) -> None:
+        """Persist bounded progress while a book is being indexed."""
+        self._conn.execute(
+            "UPDATE books SET chunks_done = ?, chunks_total = ? WHERE id = ?",
+            (max(0, int(done)), max(0, int(total)), book_id),
+        )
+        self._conn.commit()
+
     def mark_indexing(self, book_id: str) -> None:
         """Flip a book to ``indexing`` (D5/D6)."""
         self._conn.execute(
@@ -854,10 +957,63 @@ class LibraryStore:
     def set_book_error(self, book_id: str, msg: str) -> None:
         """Record a failure on the book row (T014)."""
         self._conn.execute(
-            "UPDATE books SET status = 'error', error = ? WHERE id = ?",
-            (msg, book_id),
+            "UPDATE books SET status = 'error', error = ?, retry_count = retry_count + 1, "
+            "last_error_at = ? WHERE id = ?",
+            (msg, _now_iso(), book_id),
         )
         self._conn.commit()
+
+    def retry_book(self, book_id: str) -> None:
+        """Return one failed book to the queue without deleting its source."""
+        self._conn.execute(
+            "UPDATE books SET status = 'pending', error = NULL, next_retry_at = NULL "
+            "WHERE id = ? AND status = 'error'",
+            (book_id,),
+        )
+        self._conn.commit()
+
+    def maintenance_report(self) -> dict[str, Any]:
+        """Check SQLite and count safe-to-clean embedding cache rows."""
+        integrity = [str(row[0]) for row in self._conn.execute("PRAGMA integrity_check")]
+        orphan_row = self._conn.execute(
+            "SELECT COUNT(*) FROM embeddings e WHERE NOT EXISTS "
+            "(SELECT 1 FROM chunks c WHERE c.text_hash = e.text_hash "
+            "AND (c.embedding_model = e.model OR c.embedding_model IS NULL))"
+        ).fetchone()
+        return {
+            "integrity": integrity,
+            "ok": integrity == ["ok"],
+            "orphan_embeddings": int(orphan_row[0] if orphan_row else 0),
+        }
+
+    def cleanup_orphan_embeddings(self) -> int:
+        """Delete only cache vectors no longer referenced by any chunk."""
+        cur = self._conn.execute(
+            "DELETE FROM embeddings WHERE NOT EXISTS "
+            "(SELECT 1 FROM chunks c WHERE c.text_hash = embeddings.text_hash "
+            "AND (c.embedding_model = embeddings.model OR c.embedding_model IS NULL))"
+        )
+        self._conn.commit()
+        return int(cur.rowcount if cur.rowcount >= 0 else 0)
+
+    def optimize(self, *, vacuum: bool = False) -> dict[str, Any]:
+        """Run low-risk SQLite optimization and optional explicit VACUUM."""
+        self._conn.execute("PRAGMA optimize")
+        self._conn.commit()
+        if vacuum:
+            self._conn.execute("VACUUM")
+        return self.maintenance_report()
+
+    def backup_to(self, destination: Path) -> Path:
+        """Create a consistent SQLite backup using the native backup API."""
+        destination = Path(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        target = sqlite3.connect(str(destination))
+        try:
+            self._conn.backup(target)
+        finally:
+            target.close()
+        return destination
 
     def get_book_status(self, book_id: str) -> str | None:
         """Return the current book status, or ``None`` if unknown (T014)."""
@@ -1912,20 +2068,28 @@ class LibraryStore:
         tdir = self.tutor_dir / "transcripts"
         tdir.mkdir(parents=True, exist_ok=True)
         p = tdir / f"{session_id}.json"
-        try:
-            data = json.loads(p.read_text(encoding="utf-8")) if p.is_file() else []
-            if not isinstance(data, list):
-                data = []
-            data.append({"role": role, "text": text, "ts": time.time()})
-            p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-            if not session.transcript_path:
-                self._conn.execute(
-                    "UPDATE tutoring_sessions SET transcript_path = ? WHERE id = ?",
-                    (str(p), session_id),
+        # The same LibraryStore can serve request and indexing threads. A
+        # read-modify-write transcript update must therefore be serialized;
+        # replace() keeps readers from observing a half-written JSON file.
+        with self._transcript_lock:
+            try:
+                data = json.loads(p.read_text(encoding="utf-8")) if p.is_file() else []
+                if not isinstance(data, list):
+                    data = []
+                data.append({"role": role, "text": text, "ts": time.time()})
+                tmp = p.with_name(p.name + ".tmp")
+                tmp.write_text(
+                    json.dumps(data, ensure_ascii=False), encoding="utf-8"
                 )
-                self._conn.commit()
-        except OSError:
-            pass
+                tmp.replace(p)
+                if not session.transcript_path:
+                    self._conn.execute(
+                        "UPDATE tutoring_sessions SET transcript_path = ? WHERE id = ?",
+                        (str(p), session_id),
+                    )
+                    self._conn.commit()
+            except (OSError, json.JSONDecodeError, TypeError):
+                pass
 
     def create_tutoring_session(
         self,

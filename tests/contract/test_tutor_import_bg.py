@@ -129,6 +129,36 @@ def _wait_status(
 # ---------------------------------------------------------------------------
 
 
+def test_queue_imports_are_consumed_by_one_persistent_worker(
+    tmp_path: Path, client: TestClient
+) -> None:
+    first = tmp_path / "first.pdf"
+    second = tmp_path / "second.pdf"
+    _minimal_pdf(first, "First queued book")
+    _minimal_pdf(second, "Second queued book")
+
+    responses = []
+    for path in (first, second):
+        response = client.post(
+            "/api/tutor/import",
+            files={"file": (path.name, path.read_bytes(), "application/pdf")},
+            data={"subject": "Queue", "queue": "true"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "pending"
+        assert body["queued"] is True
+        responses.append(body)
+
+    for body in responses:
+        _wait_status(client, body["book_id"], "ready")
+    queue = client.get("/api/tutor/index-queue").json()
+    assert queue["running"] is False
+    assert queue["pending_count"] == 0
+    assert queue["completed_count"] == 2
+    assert queue["error_count"] == 0
+
+
 def test_multipart_pdf_import_creates_book(tmp_path: Path, client: TestClient) -> None:
     pdf = tmp_path / "test.pdf"
     _minimal_pdf(pdf)
@@ -152,6 +182,53 @@ def test_multipart_pdf_import_creates_book(tmp_path: Path, client: TestClient) -
     # And the PDF indexes end-to-end through the multipart path.
     rows = _wait_status(client, body["book_id"], "ready")
     assert rows[0]["title"] == "test"
+
+
+def test_queue_cancel_returns_current_book_to_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gate = threading.Event()
+    GatedClient.gate = gate
+    monkeypatch.setattr(web_server, "OllamaClient", GatedClient)
+    app = web_server.create_app(config_dir=tmp_path / "config")
+    pdf = tmp_path / "blocked.pdf"
+    _minimal_pdf(pdf)
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/tutor/import",
+            files={"file": (pdf.name, pdf.read_bytes(), "application/pdf")},
+            data={"subject": "Queue", "queue": "true"},
+        )
+        assert r.status_code == 200
+        book_id = r.json()["book_id"]
+        deadline = time.time() + 2
+        while time.time() < deadline and not c.get("/api/tutor/index-queue").json()["running"]:
+            time.sleep(0.01)
+        cancelled = c.post(f"/api/tutor/books/{book_id}/cancel")
+        assert cancelled.status_code == 200
+        assert cancelled.json()["status"] == "pending"
+        assert c.get("/api/tutor/books").json()["books"][0]["status"] == "pending"
+        gate.set()
+
+
+def test_multipart_filename_cannot_escape_uploads_dir(
+    tmp_path: Path, client: TestClient
+) -> None:
+    pdf = tmp_path / "safe-source.pdf"
+    _minimal_pdf(pdf)
+    r = client.post(
+        "/api/tutor/import",
+        files={"file": ("../../outside.pdf", pdf.read_bytes(), "application/pdf")},
+        data={"subject": "Security"},
+    )
+    assert r.status_code == 200
+
+    uploads_dir = tmp_path / "config" / "tutor" / "uploads"
+    saved = list(uploads_dir.glob("*.pdf"))
+    assert len(saved) == 1
+    assert saved[0].parent == uploads_dir
+    assert saved[0].name == "outside.pdf"
+    assert not (tmp_path / "outside.pdf").exists()
 
 
 def test_multipart_without_file_is_400(client: TestClient) -> None:

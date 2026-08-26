@@ -23,6 +23,9 @@ async def embed_texts(
     chunks: list[str],
     store,
     max_parallel_embed: int = 1,
+    *,
+    batch_size: int | None = None,
+    max_concurrency: int | None = None,
 ) -> list[list[float]]:
     """Embed ``chunks`` via ``client.embed``, caching each by text hash.
 
@@ -31,9 +34,10 @@ async def embed_texts(
     call; only cache misses are sent to ``client.embed`` (batched). New
     vectors are written back via ``store.add_embedding``.
 
-    When *max_parallel_embed* > 1, cache misses are split into batches
-    of that size and sent concurrently via ``asyncio.gather`` (US8:
-    llama-server ``--parallel N`` allows N simultaneous requests).
+    ``batch_size`` controls the number of chunks in one request. The
+    independent ``max_concurrency`` control is enforced with a semaphore.
+    ``max_parallel_embed`` remains a backwards-compatible shorthand for the
+    old API; explicit keyword arguments take precedence.
     """
     results: list[list[float] | None] = []
     to_embed: list[tuple[int, str]] = []
@@ -46,35 +50,38 @@ async def embed_texts(
             to_embed.append((i, text))
 
     if to_embed:
-        batch_size = max(1, max_parallel_embed)
-        if batch_size <= 1 or len(to_embed) <= batch_size:
-            # Single-batch path (original behaviour).
-            texts = [t for _, t in to_embed]
-            vectors = await client.embed(model, texts)
-            for (i, _), vec in zip(to_embed, vectors):
-                store.add_embedding(_hash_text(chunks[i], model), model, vec)
-                results[i] = vec
+        if batch_size is None and max_concurrency is None:
+            # Backwards-compatible mode: the old parameter was both the batch
+            # size and the concurrency setting.
+            effective_batch_size = (
+                len(to_embed) if max_parallel_embed <= 1 else max_parallel_embed
+            )
+            effective_concurrency = max(1, max_parallel_embed)
         else:
-            # Parallel-batch path: split into ``batch_size`` chunks and
-            # fire them concurrently.
-            batches: list[list[tuple[int, str]]] = []
-            for start in range(0, len(to_embed), batch_size):
-                batches.append(to_embed[start : start + batch_size])
+            effective_batch_size = max(1, int(batch_size or 16))
+            effective_concurrency = max(1, int(max_concurrency or 1))
 
-            async def _embed_batch(
-                batch: list[tuple[int, str]],
-            ) -> list[tuple[int, list[float]]]:
+        batches: list[list[tuple[int, str]]] = []
+        for start in range(0, len(to_embed), effective_batch_size):
+            batches.append(to_embed[start : start + effective_batch_size])
+
+        semaphore = asyncio.Semaphore(effective_concurrency)
+
+        async def _embed_batch(
+            batch: list[tuple[int, str]],
+        ) -> list[tuple[int, list[float]]]:
+            async with semaphore:
                 texts = [t for _, t in batch]
                 vectors = await client.embed(model, texts)
                 return [(i, vec) for (i, _), vec in zip(batch, vectors)]
 
-            batch_results = await asyncio.gather(
-                *[_embed_batch(b) for b in batches]
-            )
-            for batch_pairs in batch_results:
-                for i, vec in batch_pairs:
-                    store.add_embedding(_hash_text(chunks[i], model), model, vec)
-                    results[i] = vec
+        batch_results = await asyncio.gather(
+            *[_embed_batch(batch) for batch in batches]
+        )
+        for batch_pairs in batch_results:
+            for i, vec in batch_pairs:
+                store.add_embedding(_hash_text(chunks[i], model), model, vec)
+                results[i] = vec
 
     return [r if r is not None else [] for r in results]
 
@@ -128,7 +135,12 @@ class NumpyVectorIndex:
         if np.any(nonzero):
             dots = self._matrix @ q
             sims[nonzero] = dots[nonzero] / denom[nonzero]
-        order = np.argsort(-sims)
+        limit = min(k, len(self._ids))
+        if limit < len(self._ids):
+            candidate_idx = np.argpartition(-sims, limit - 1)[:limit]
+            order = candidate_idx[np.argsort(-sims[candidate_idx])]
+        else:
+            order = np.argsort(-sims)
         out: list[tuple[Any, float]] = []
         for idx in order:
             score = float(sims[idx])

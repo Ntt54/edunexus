@@ -89,6 +89,9 @@ class Book:
     chunks_done: int = 0
     chunks_total: int = 0
     created_at: str = ""
+    retry_count: int = 0
+    next_retry_at: str | None = None
+    last_error_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -102,6 +105,9 @@ class Book:
             "chunks_done": self.chunks_done,
             "chunks_total": self.chunks_total,
             "created_at": self.created_at,
+            "retry_count": self.retry_count,
+            "next_retry_at": self.next_retry_at,
+            "last_error_at": self.last_error_at,
         }
 
     @classmethod
@@ -117,6 +123,9 @@ class Book:
             chunks_done=int(raw.get("chunks_done", 0)),
             chunks_total=int(raw.get("chunks_total", 0)),
             created_at=str(raw.get("created_at", "")),
+            retry_count=int(raw.get("retry_count", 0)),
+            next_retry_at=raw.get("next_retry_at"),
+            last_error_at=raw.get("last_error_at"),
         )
 
 

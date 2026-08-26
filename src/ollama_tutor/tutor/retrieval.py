@@ -145,6 +145,8 @@ class BM25Index:
         self._tf: dict[str, dict[str, int]] = {}
         # {term: df} — how many documents contain the term
         self._df: dict[str, int] = {}
+        # Inverted index: only score documents containing a query term.
+        self._postings: dict[str, list[str]] = {}
         # Average document length (in tokens).
         self._avgdl = 0.0
 
@@ -160,6 +162,7 @@ class BM25Index:
             total_len += len(tokens)
             for t in set(tokens):
                 self._df[t] = self._df.get(t, 0) + 1
+                self._postings.setdefault(t, []).append(cid)
 
         self._avgdl = total_len / max(1, self._n)
 
@@ -179,7 +182,8 @@ class BM25Index:
             idf = self._idf(term)
             if idf <= 0.0:
                 continue
-            for cid, tf_map in self._tf.items():
+            for cid in self._postings.get(term, []):
+                tf_map = self._tf[cid]
                 tf = tf_map.get(term, 0)
                 if tf == 0:
                     continue
@@ -273,11 +277,13 @@ async def retrieve_hybrid(
     # --- Fuse with RRF ---
     fused = reciprocal_rank_fusion([cosine_ranked, bm25_ranked])
 
-    # --- Assemble top-k result dicts ---
-    # Normalise fused scores so the best score is 1.0.
+    # --- Assemble candidate result dicts ---
+    # Let the reranker inspect a broader pool; without it, keep the cheaper
+    # top-k path. This follows the standard retrieve-then-rerank design.
+    candidate_k = k * 3 if reranker is not None else k
     fused_max = fused[0][1] if fused else 1.0
     results: list[dict[str, Any]] = []
-    for cid, fsc in fused[:k]:
+    for cid, fsc in fused[:candidate_k]:
         # Try cosine meta first, fall back to raw row.
         meta_row = cosine_meta.get(cid)
         if meta_row is not None:
@@ -371,6 +377,12 @@ class Retriever:
     def invalidate(self, subject_id: str) -> None:
         """Drop the cached index for a subject (called after writes)."""
         self._cache.pop(subject_id, None)
+
+    def set_model(self, model: str) -> None:
+        """Switch embedding model and invalidate all model-bound indexes."""
+        if model != self.model:
+            self.model = model
+            self._cache.clear()
 
     async def retrieve(
         self,

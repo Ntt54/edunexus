@@ -111,7 +111,7 @@ class OllamaOptions:
     # Défaut 3 threads pour tous les LLM Ollama (demande utilisateur) ;
     # surchargeable via config « options » ou preset.
     num_thread: int = 3
-    keep_alive: str | None = None
+    keep_alive: str | int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {}
