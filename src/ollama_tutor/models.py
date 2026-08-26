@@ -108,7 +108,9 @@ class OllamaOptions:
     repeat_penalty: float | None = None
     seed: int | None = None
     num_batch: int | None = None
-    num_thread: int | None = None
+    # Défaut 3 threads pour tous les LLM Ollama (demande utilisateur) ;
+    # surchargeable via config « options » ou preset.
+    num_thread: int = 3
     keep_alive: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
