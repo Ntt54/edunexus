@@ -558,6 +558,19 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
   .thread { min-height: 42vh; }
   .dash-grid { grid-template-columns: 1fr; }
 }
+/* ---------------------------------------------------- réglages ------ */
+.reglages-group { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px 18px; margin-bottom: 18px; }
+.reglages-group legend { font-weight: 600; font-size: 0.82em; color: var(--accent); padding: 0 6px; text-transform: uppercase; letter-spacing: 0.04em; }
+.reglages-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px 18px; }
+.reglages-grid label { display: flex; flex-direction: column; font-size: 0.78em; font-weight: 500; color: var(--muted); gap: 3px; }
+.reglages-grid input, .reglages-grid select { background: var(--surface-alt); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 7px 9px; font-size: 0.88em; color: var(--text); width: 100%; }
+.reglages-grid input:focus, .reglages-grid select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
+.reglages-check { flex-direction: row !important; align-items: center; gap: 8px; cursor: pointer; }
+.reglages-check input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+.reglages-actions { display: flex; align-items: center; gap: 14px; margin-top: 18px; }
+#reglagesStatus { font-size: 0.82em; color: var(--muted); }
+@media (max-width: 600px) { .reglages-grid { grid-template-columns: 1fr; } }
+
 </style>
 </head>
 <body>
@@ -607,6 +620,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
   <button class="navbtn" disabled aria-disabled="true" title="Emplacement réservé — disponible dans une version future">
     Parcours <span class="badge soon">à venir</span>
   </button>
+  <button class="navbtn" data-route="reglages">Réglages</button>
 </nav>
 
 <div id="views">
@@ -941,6 +955,76 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
     </div>
   </section>
 
+  <!-- ================================ RÉGLAGES ================================ -->
+  <section class="view" id="view-reglages" aria-label="Réglages">
+    <div class="pane">
+      <div class="pane-head">
+        <h2>Réglages</h2>
+        <span class="hint" style="margin:0;">Paramètres d'inférence et de pédagogie — sauvegardés localement.</span>
+      </div>
+      <div class="pane-scroll" id="reglagesForm">
+        <form id="reglagesFormEl" autocomplete="off">
+          <fieldset class="reglages-group">
+            <legend>Inférence</legend>
+            <div class="reglages-grid">
+              <label>Temperature
+                <input type="number" name="temperature" min="0" max="2" step="0.05" placeholder="1.0">
+              </label>
+              <label>Top P
+                <input type="number" name="top_p" min="0" max="1" step="0.05" placeholder="0.9">
+              </label>
+              <label>Top K
+                <input type="number" name="top_k_llm" min="1" max="100" step="1" placeholder="40">
+              </label>
+              <label>Num Ctx
+                <input type="number" name="num_ctx" min="512" max="131072" step="512" placeholder="8192">
+              </label>
+              <label>Num Predict
+                <input type="number" name="num_predict" min="-1" max="32768" step="1" placeholder="1024">
+              </label>
+              <label>Repeat Penalty
+                <input type="number" name="repeat_penalty" min="1.0" max="2.0" step="0.05" placeholder="1.1">
+              </label>
+              <label>Num Thread
+                <input type="number" name="num_thread" min="1" max="32" step="1" placeholder="3">
+              </label>
+              <label>Keep Alive
+                <input type="text" name="keep_alive" placeholder="5m">
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset class="reglages-group">
+            <legend>Tutorat</legend>
+            <div class="reglages-grid">
+              <label class="reglages-check">
+                <input type="checkbox" name="think"> Mode réflexion (Think)
+              </label>
+              <label class="reglages-check">
+                <input type="checkbox" name="socratic"> Pédagogie socratique
+              </label>
+              <label>Niveau cible
+                <select name="level">
+                  <option value="beginner">Débutant</option>
+                  <option value="intermediate" selected>Intermédiaire</option>
+                  <option value="advanced">Avancé</option>
+                </select>
+              </label>
+              <label>Top K conocimiento
+                <input type="number" name="top_k_tutor" min="1" max="20" step="1" placeholder="5">
+              </label>
+            </div>
+          </fieldset>
+
+          <div class="reglages-actions">
+            <button type="submit" class="btn-primary" id="reglagesSaveBtn">Enregistrer</button>
+            <span class="hint" id="reglagesStatus"></span>
+          </div>
+        </form>
+      </div>
+    </div>
+  </section>
+
 </div><!-- /views -->
 
 <!-- Recherche sémantique dans les sources (modale) -->
@@ -1128,7 +1212,7 @@ const S = {
 
 /* =========================================================== ROUTEUR HASH == */
 const ROUTES = ["accueil", "conversations", "bibliotheque", "apprentissage",
-  "entrainer", "quiz", "progression", "explorer"];
+  "entrainer", "quiz", "progression", "explorer", "reglages"];
 
 function currentRouteFromHash() {
   const h = (location.hash || "").replace(/^#\/?/, "").toLowerCase();
@@ -1156,13 +1240,14 @@ function applyRoute() {
   const titles = {
     accueil: "Accueil", conversations: "Conversations", bibliotheque: "Bibliothèque",
     apprentissage: "Apprentissage", entrainer: "Entraîner", quiz: "Quiz / Examens",
-    progression: "Progression", explorer: "Explorer",
+    progression: "Progression", explorer: "Explorer", reglages: "Réglages",
   };
   document.title = "EduNexus — " + (titles[r] || "Professeur IA local");
   // Chargements paresseux propres à chaque vue.
   if (r === "accueil") loadDashboard();
   if (r === "conversations") loadConversations();
   if (r === "bibliotheque") ensureLibrary();
+  if (r === "reglages") loadReglages();
 }
 
 /* ============================================== moteur + modèles (en-tête) */
@@ -3841,8 +3926,76 @@ function wireAll() {
   }
 }
 
+/* ========================================================= réglages ===== */
+
+async function loadReglages() {
+  const status = $("reglagesStatus");
+  try {
+    const data = await apiJson("/api/tutor/settings");
+    const o = data.options || {};
+    const t = data.tutor || {};
+    const form = $("reglagesFormEl");
+    form.temperature.value    = o.temperature ?? "";
+    form.top_p.value          = o.top_p ?? "";
+    form.top_k_llm.value      = o.top_k ?? "";
+    form.num_ctx.value        = o.num_ctx ?? "";
+    form.num_predict.value    = o.num_predict ?? "";
+    form.repeat_penalty.value = o.repeat_penalty ?? "";
+    form.num_thread.value     = o.num_thread ?? "";
+    form.keep_alive.value     = o.keep_alive ?? "";
+    form.think.checked        = !!t.think;
+    form.socratic.checked     = !!t.socratic;
+    form.level.value          = t.level || "intermediate";
+    form.top_k_tutor.value    = t.top_k ?? "";
+    if (status) status.textContent = "";
+  } catch (e) {
+    if (status) status.textContent = "Erreur chargement : " + e.message;
+  }
+}
+
+function wireReglages() {
+  const form = $("reglagesFormEl");
+  if (!form) return;
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const status = $("reglagesStatus");
+    const fd = new FormData(form);
+    const num = (name) => { const v = fd.get(name); return v !== "" && v !== null ? Number(v) : null; };
+    const str = (name) => { const v = fd.get(name); return v !== "" && v !== null ? v : null; };
+    const payload = {
+      options: {
+        temperature:    num("temperature"),
+        top_p:          num("top_p"),
+        top_k:          num("top_k_llm"),
+        num_ctx:        num("num_ctx"),
+        num_predict:    num("num_predict"),
+        repeat_penalty: num("repeat_penalty"),
+        num_thread:     num("num_thread"),
+        keep_alive:     str("keep_alive"),
+      },
+      think:    form.think.checked,
+      socratic: form.socratic.checked,
+      level:    fd.get("level"),
+      top_k:    num("top_k_tutor"),
+    };
+    try {
+      if (status) status.textContent = "Enregistrement…";
+      const r = await fetch("/api/tutor/settings", {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload),
+      });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      if (status) status.textContent = "✓ Enregistré";
+    } catch (e) {
+      if (status) status.textContent = "Erreur : " + e.message;
+    }
+  });
+}
+
 /* =================================================================== init */
 wireAll();
+wireReglages();
 loadSelection();
 applyRoute();
 loadEngineBadge();
