@@ -31,7 +31,7 @@ from .assessment import (
     parse_prepare_response,
 )
 from .embeddings import _hash_text, embed_texts
-from .extractors import chunk_text, extract_text
+from .extractors import chunk_text, chunk_text_structured, extract_text
 from .providers.docling_ocr import DoclingOCRError
 from .providers.gguf_embedding import GGUFEmbeddingError
 from .providers.llama_server import LlamaServerError
@@ -1501,32 +1501,55 @@ class TutorService:
                     if isinstance(parsed, dict)
                     else list(parsed)
                 )
-                text = "\n\n".join(str(p.get("text", "")) for p in pages)
+                text_segments = [
+                    (str(p.get("text", "")), {})
+                    for p in pages
+                    if str(p.get("text", "")).strip()
+                ]
             else:
-                text = extract_text(path, fmt)
+                text_segments = list(extract_text(path, fmt))
+
             if self._is_cancelled(book_id):
                 self.store.cancel_indexing(book_id)
                 return
 
-            chunks = chunk_text(text)
-            if not chunks:
+            # Build combined text with metadata markers so chunk_text_structured
+            # can re-derive page/section info from the annotated text.
+            combined_parts: list[str] = []
+            for text, meta in text_segments:
+                if not text.strip():
+                    continue
+                if meta.get("page") is not None:
+                    combined_parts.append(
+                        f"--- Page {meta['page']} ---\n{text}"
+                    )
+                elif meta.get("section"):
+                    combined_parts.append(f"# {meta['section']}\n{text}")
+                else:
+                    combined_parts.append(text)
+            combined_text = "\n\n".join(combined_parts)
+
+            chunk_dicts = chunk_text_structured(combined_text)
+            if not chunk_dicts:
                 self.store.mark_indexed(book_id, 0)
                 return
 
+            chunk_texts = [c["text"] for c in chunk_dicts]
+
             if self.embedding_provider is not None:
-                embeddings = await self._embed_with_provider(chunks)
+                embeddings = await self._embed_with_provider(chunk_texts)
             else:
                 embeddings = await embed_texts(
-                    self.client, self.model, chunks, self.store
+                    self.client, self.model, chunk_texts, self.store
                 )
             if self._is_cancelled(book_id):
                 self.store.cancel_indexing(book_id)
                 return
 
             self.store.add_chunks(
-                subject_id, book_id, chunks, embeddings, self.model
+                subject_id, book_id, chunk_dicts, embeddings, self.model
             )
-            self.store.mark_indexed(book_id, len(chunks))
+            self.store.mark_indexed(book_id, len(chunk_dicts))
         except (
             GGUFEmbeddingError,
             DoclingOCRError,

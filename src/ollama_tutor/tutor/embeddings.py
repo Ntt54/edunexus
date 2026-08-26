@@ -5,6 +5,7 @@ UI-framework-free by contract (no textual/fastapi imports).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from typing import Any, Sequence
 
@@ -21,6 +22,7 @@ async def embed_texts(
     model: str,
     chunks: list[str],
     store,
+    max_parallel_embed: int = 1,
 ) -> list[list[float]]:
     """Embed ``chunks`` via ``client.embed``, caching each by text hash.
 
@@ -28,6 +30,10 @@ async def embed_texts(
     hash-keyed cache (``store.get_embedding``) are reused without a model
     call; only cache misses are sent to ``client.embed`` (batched). New
     vectors are written back via ``store.add_embedding``.
+
+    When *max_parallel_embed* > 1, cache misses are split into batches
+    of that size and sent concurrently via ``asyncio.gather`` (US8:
+    llama-server ``--parallel N`` allows N simultaneous requests).
     """
     results: list[list[float] | None] = []
     to_embed: list[tuple[int, str]] = []
@@ -40,11 +46,35 @@ async def embed_texts(
             to_embed.append((i, text))
 
     if to_embed:
-        texts = [t for _, t in to_embed]
-        vectors = await client.embed(model, texts)
-        for (i, _), vec in zip(to_embed, vectors):
-            store.add_embedding(_hash_text(chunks[i], model), model, vec)
-            results[i] = vec
+        batch_size = max(1, max_parallel_embed)
+        if batch_size <= 1 or len(to_embed) <= batch_size:
+            # Single-batch path (original behaviour).
+            texts = [t for _, t in to_embed]
+            vectors = await client.embed(model, texts)
+            for (i, _), vec in zip(to_embed, vectors):
+                store.add_embedding(_hash_text(chunks[i], model), model, vec)
+                results[i] = vec
+        else:
+            # Parallel-batch path: split into ``batch_size`` chunks and
+            # fire them concurrently.
+            batches: list[list[tuple[int, str]]] = []
+            for start in range(0, len(to_embed), batch_size):
+                batches.append(to_embed[start : start + batch_size])
+
+            async def _embed_batch(
+                batch: list[tuple[int, str]],
+            ) -> list[tuple[int, list[float]]]:
+                texts = [t for _, t in batch]
+                vectors = await client.embed(model, texts)
+                return [(i, vec) for (i, _), vec in zip(batch, vectors)]
+
+            batch_results = await asyncio.gather(
+                *[_embed_batch(b) for b in batches]
+            )
+            for batch_pairs in batch_results:
+                for i, vec in batch_pairs:
+                    store.add_embedding(_hash_text(chunks[i], model), model, vec)
+                    results[i] = vec
 
     return [r if r is not None else [] for r in results]
 

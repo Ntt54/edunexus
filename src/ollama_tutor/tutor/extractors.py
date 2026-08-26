@@ -11,7 +11,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 
 SUPPORTED_FORMATS = {".txt", ".md", ".pdf", ".epub", ".docx", ".pptx"}
@@ -47,7 +47,9 @@ class _TagStripper(HTMLParser):
         self._parts = []
 
 
-def extract_text(path, fmt: str | None = None) -> str:
+def extract_text(
+    path, fmt: str | None = None
+) -> Iterable[tuple[str, dict[str, Any]]]:
     """Extract plain text from a book file.
 
     Args:
@@ -56,7 +58,9 @@ def extract_text(path, fmt: str | None = None) -> str:
             ``"epub"``); auto-detected from the file extension when omitted.
 
     Returns:
-        The extracted plain-text content.
+        An iterable of ``(text, metadata_dict)`` tuples.  Metadata keys
+        may include ``"page"`` (int), ``"section"`` (str) or ``"chapter"``
+        (str) when available from the source format.
 
     Raises:
         FileNotFoundError: when the path does not exist.
@@ -76,35 +80,34 @@ def extract_text(path, fmt: str | None = None) -> str:
             raise ValueError(f"Unsupported format: {fmt}")
 
     if fmt in ("txt", "md"):
-        return p.read_text(encoding="utf-8", errors="replace")
+        return [(p.read_text(encoding="utf-8", errors="replace"), {})]
     if fmt == "pdf":
-        return _extract_pdf(p)
+        return list(_extract_pdf(p))
     if fmt == "epub":
-        return _extract_epub(p)
+        return list(_extract_epub(p))
     if fmt == "docx":
-        return _extract_docx(p)
+        return list(_extract_docx(p))
     if fmt == "pptx":
-        return _extract_pptx(p)
+        return list(_extract_pptx(p))
     raise ValueError(f"Unsupported format: {fmt}")
 
 
-def _extract_pdf(path: Path) -> str:
+def _extract_pdf(path: Path) -> Iterable[tuple[str, dict[str, Any]]]:
+    """Extract text from a PDF, yielding ``(text, {"page": N})`` per page."""
     from pypdf import PdfReader
 
     reader = PdfReader(str(path))
-    parts: list[str] = []
-    for page in reader.pages:
+    for page_num, page in enumerate(reader.pages, start=1):
         try:
             text = page.extract_text() or ""
         except Exception:
             text = ""
         if text:
-            parts.append(text)
-    return "\n".join(parts)
+            yield (text, {"page": page_num})
 
 
-def _extract_docx(path: Path) -> str:
-    """Extract text from a .docx file via python-docx."""
+def _extract_docx(path: Path) -> Iterable[tuple[str, dict[str, Any]]]:
+    """Extract text from a .docx file, yielding ``(text, {})`` tuples."""
     from docx import Document
 
     doc = Document(str(path))
@@ -119,11 +122,13 @@ def _extract_docx(path: Path) -> str:
             cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
             if cells:
                 parts.append(" | ".join(cells))
-    return "\n".join(parts)
+    combined = "\n".join(parts)
+    if combined:
+        yield (combined, {})
 
 
-def _extract_pptx(path: Path) -> str:
-    """Extract text from a .pptx file via python-pptx."""
+def _extract_pptx(path: Path) -> Iterable[tuple[str, dict[str, Any]]]:
+    """Extract text from a .pptx file, yielding ``(text, {})`` tuples."""
     from pptx import Presentation
 
     prs = Presentation(str(path))
@@ -137,7 +142,9 @@ def _extract_pptx(path: Path) -> str:
                     slide_texts.append(text)
         if slide_texts:
             parts.append(f"[Slide {slide_num}]\n" + "\n".join(slide_texts))
-    return "\n".join(parts)
+    combined = "\n".join(parts)
+    if combined:
+        yield (combined, {})
 
 
 _OPF_NS = "{http://www.idpf.org/2007/opf}"
@@ -182,7 +189,39 @@ def _spine_hrefs(zf: zipfile.ZipFile, opf_path: str) -> list[str]:
     return hrefs
 
 
-def _extract_epub(path: Path) -> str:
+_HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
+
+
+class _HeadingExtractor(HTMLParser):
+    """Extract the first heading text from an HTML fragment."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._heading: str | None = None
+        self._in_heading = False
+        self._buf: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag.lower() in _HEADING_TAGS and self._heading is None:
+            self._in_heading = True
+            self._buf = []
+
+    def handle_data(self, data: str) -> None:
+        if self._in_heading:
+            self._buf.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._in_heading and tag.lower() in _HEADING_TAGS:
+            self._in_heading = False
+            self._heading = " ".join(self._buf).strip()
+
+    @property
+    def heading(self) -> str | None:
+        return self._heading if self._heading else None
+
+
+def _extract_epub(path: Path) -> Iterable[tuple[str, dict[str, Any]]]:
+    """Extract text from an EPUB, yielding ``(text, {"section": heading})`` per spine item."""
     with zipfile.ZipFile(path) as zf:
         names = zf.namelist()
         opf_path = _find_opf(zf, names)
@@ -190,16 +229,25 @@ def _extract_epub(path: Path) -> str:
         if not hrefs:
             hrefs = [n for n in names if n.endswith((".xhtml", ".html", ".htm"))]
         stripper = _TagStripper()
-        texts: list[str] = []
         for href in hrefs:
             try:
                 data = zf.read(href).decode("utf-8", "replace")
             except KeyError:
                 continue
+            # Extract heading from the HTML before stripping
+            heading_extractor = _HeadingExtractor()
+            try:
+                heading_extractor.feed(data)
+            except Exception:
+                pass
             stripper.feed(data)
-            texts.append(stripper.get_text())
+            text = stripper.get_text()
             stripper.reset_text()
-    return "\n".join(t for t in texts if t).strip()
+            if text.strip():
+                meta: dict[str, Any] = {}
+                if heading_extractor.heading:
+                    meta["section"] = heading_extractor.heading
+                yield (text.strip(), meta)
 
 
 def fingerprint(text: str) -> str:

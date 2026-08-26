@@ -57,6 +57,7 @@ class LlamaServerConfig:
     host: str = "127.0.0.1"
     port: int = 0  # 0 = pick a free ephemeral port at start time.
     mmproj_path: str = ""  # Optional vision projector, appended as --mmproj.
+    parallel: int = 1  # llama-server --parallel N (US8: concurrent embeddings).
     extra_args: list[str] = field(default_factory=list)
     startup_timeout_s: float = 120.0
     health_path: str = "/health"
@@ -203,6 +204,8 @@ class LlamaServerManager:
             ]
             if config.mmproj_path:
                 argv += ["--mmproj", config.mmproj_path]
+            if config.parallel > 1:
+                argv += ["--parallel", str(config.parallel)]
             argv += list(config.extra_args)
 
             try:

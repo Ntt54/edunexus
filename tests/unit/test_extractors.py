@@ -116,29 +116,39 @@ def test_chunk_text_empty() -> None:
 def test_extract_txt_passthrough(tmp_path: Path) -> None:
     p = tmp_path / "note.txt"
     p.write_text("Hello plain text world.", encoding="utf-8")
-    assert extract_text(p) == "Hello plain text world."
+    segments = list(extract_text(p))
+    assert len(segments) == 1
+    assert segments[0][0] == "Hello plain text world."
+    assert segments[0][1] == {}
 
 
 def test_extract_md_passthrough(tmp_path: Path) -> None:
     p = tmp_path / "note.md"
     p.write_text("# Title\n\nSome **markdown** body.", encoding="utf-8")
-    out = extract_text(p)
-    assert "Title" in out and "markdown" in out
+    segments = list(extract_text(p))
+    assert len(segments) == 1
+    text, meta = segments[0]
+    assert "Title" in text and "markdown" in text
+    assert meta == {}
 
 
 def test_extract_pdf_returns_text(tmp_path: Path) -> None:
     p = tmp_path / "book.pdf"
     _make_pdf(p, "Hello PDF world from pypdf")
-    out = extract_text(p)
-    assert "Hello PDF world from pypdf" in out
+    segments = list(extract_text(p))
+    assert len(segments) >= 1
+    texts = [t for t, _ in segments]
+    assert any("Hello PDF world from pypdf" in t for t in texts)
 
 
 def test_extract_epub_strips_tags(tmp_path: Path) -> None:
     p = tmp_path / "book.epub"
     _make_epub(p, "Hello <b>epub</b> stripped world")
-    out = extract_text(p)
-    assert "Hello" in out and "epub" in out and "stripped" in out
-    assert "<b>" not in out and "</p>" not in out
+    segments = list(extract_text(p))
+    assert len(segments) >= 1
+    text = segments[0][0]
+    assert "Hello" in text and "epub" in text and "stripped" in text
+    assert "<b>" not in text and "</p>" not in text
 
 
 def test_extract_unsupported_raises(tmp_path: Path) -> None:

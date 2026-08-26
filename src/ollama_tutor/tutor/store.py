@@ -884,7 +884,7 @@ class LibraryStore:
         self,
         subject_id: str,
         book_id: str,
-        chunks: list[str],
+        chunks: list[str] | list[dict[str, Any]],
         embeddings: list[list[float]],
         model: str,
     ) -> None:
@@ -894,9 +894,24 @@ class LibraryStore:
         ``text_hash`` (sha256 of its text) and an ``embedding`` BLOB; the same
         hash also populates the shared embeddings cache so identical text
         re-imported elsewhere is free (D2/D5).
+
+        ``chunks`` may be plain strings (legacy) or structured dicts with
+        keys ``text``, ``section``, ``page`` (and optionally ``chapter``)
+        produced by :func:`chunk_text_structured`.  Metadata from the dicts
+        is stored in the ``chunks`` table columns (T056).
         """
         total = len(chunks)
-        for i, (text, vec) in enumerate(zip(chunks, embeddings)):
+        for i, (chunk, vec) in enumerate(zip(chunks, embeddings)):
+            if isinstance(chunk, dict):
+                text = chunk["text"]
+                chapter = chunk.get("chapter")
+                section = chunk.get("section")
+                page = chunk.get("page")
+            else:
+                text = chunk
+                chapter = None
+                section = None
+                page = None
             text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
             blob = np.array(vec, dtype=np.float32).tobytes() if vec else None
             position = i / total if total else 0.0
@@ -906,7 +921,7 @@ class LibraryStore:
                 "(id, subject_id, book_id, ordinal, text, text_hash, chapter, "
                 "section, page, position, difficulty, content_type, embedding, "
                 "embedding_model) "
-                "VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, 'prose', ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'prose', ?, ?)",
                 (
                     chunk_id,
                     subject_id,
@@ -914,6 +929,9 @@ class LibraryStore:
                     i,
                     text,
                     text_hash,
+                    chapter,
+                    section,
+                    page,
                     position,
                     blob,
                     model,
