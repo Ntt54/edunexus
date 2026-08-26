@@ -995,6 +995,24 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
           </fieldset>
 
           <fieldset class="reglages-group">
+            <legend>Fournisseur LLM</legend>
+            <div class="reglages-grid">
+              <label>Fournisseur
+                <select name="llm_provider">
+                  <option value="ollama" selected>Ollama (local)</option>
+                  <option value="openai">OpenAI-compatible</option>
+                </select>
+              </label>
+              <label>URL de base
+                <input type="url" name="llm_base_url" placeholder="https://api.openai.com/v1">
+              </label>
+              <label>Clé API
+                <input type="password" name="llm_api_key" placeholder="sk-…">
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset class="reglages-group">
             <legend>Tutorat</legend>
             <div class="reglages-grid">
               <label class="reglages-check">
@@ -3947,6 +3965,9 @@ async function loadReglages() {
     form.socratic.checked     = !!t.socratic;
     form.level.value          = t.level || "intermediate";
     form.top_k_tutor.value    = t.top_k ?? "";
+    form.llm_provider.value   = t.llm_provider || "ollama";
+    form.llm_base_url.value   = t.llm_base_url || "";
+    form.llm_api_key.value    = t.llm_api_key || "";
     if (status) status.textContent = "";
   } catch (e) {
     if (status) status.textContent = "Erreur chargement : " + e.message;
@@ -3977,6 +3998,9 @@ function wireReglages() {
       socratic: form.socratic.checked,
       level:    fd.get("level"),
       top_k:    num("top_k_tutor"),
+      llm_provider: fd.get("llm_provider"),
+      llm_base_url: fd.get("llm_base_url"),
+      llm_api_key:  fd.get("llm_api_key"),
     };
     try {
       if (status) status.textContent = "Enregistrement…";

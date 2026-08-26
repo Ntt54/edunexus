@@ -402,6 +402,10 @@ class SettingsUpdate(BaseModel):
     think: bool | None = None
     socratic: bool | None = None
     level: str | None = None
+    top_k: int | None = None
+    llm_provider: str | None = None
+    llm_base_url: str | None = None
+    llm_api_key: str | None = None
 
 
 def create_app(config_dir: Path | None = None) -> FastAPI:
@@ -418,7 +422,15 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
     # inside daemon threads (each with its own event loop), so sharing the
     # app's chat client would cross event-loop boundaries.
     tutor_store = LibraryStore(config.config_dir)
-    tutor_client = OllamaClient()
+    # B1 multi-fournisseur : choisir le client LLM selon la config
+    if config.llm_provider == "openai" and config.llm_base_url:
+        from ..tutor.providers.openai_compat import OpenAICompatProvider
+        tutor_client = OpenAICompatProvider(
+            base_url=config.llm_base_url,
+            api_key=config.llm_api_key or None,
+        )
+    else:
+        tutor_client = OllamaClient()
     # Phase 5a provider wiring: the GGUF embedding provider is built ONLY
     # when llama.bin + embed GGUF are configured (explicit local engine).
     # Unconfigured ⇒ None keeps the legacy Ollama path through tutor_client
@@ -1456,6 +1468,9 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                 "socratic": config.tutor_socratic,
                 "level": config.tutor_level,
                 "top_k": config.tutor_top_k,
+                "llm_provider": config.llm_provider,
+                "llm_base_url": config.llm_base_url,
+                "llm_api_key": config.llm_api_key,
             },
         }
 
@@ -1477,6 +1492,14 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                 config.tutor_socratic = payload.socratic
             if payload.level is not None:
                 config.tutor_level = payload.level
+            if payload.top_k is not None:
+                config.tutor_top_k = payload.top_k
+            if payload.llm_provider is not None:
+                config.llm_provider = payload.llm_provider
+            if payload.llm_base_url is not None:
+                config.llm_base_url = payload.llm_base_url
+            if payload.llm_api_key is not None:
+                config.llm_api_key = payload.llm_api_key
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         config.save()  # persistance immédiate (préférence utilisateur)

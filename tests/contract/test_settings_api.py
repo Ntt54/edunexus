@@ -44,7 +44,10 @@ def test_get_settings_shape(client):
     assert r.status_code == 200
     data = r.json()
     assert isinstance(data["options"], dict)
-    assert set(data["tutor"]) == {"think", "socratic", "level", "top_k"}
+    assert set(data["tutor"]) == {
+        "think", "socratic", "level", "top_k",
+        "llm_provider", "llm_base_url", "llm_api_key",
+    }
 
 
 def test_put_merges_options_without_loss(client):

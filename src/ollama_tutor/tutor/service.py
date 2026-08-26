@@ -52,6 +52,7 @@ from .prompts import (
     build_user_prompt,
     resolve_overrides,
 )
+from .providers.openai_compat import OpenAICompatClient
 from .retrieval import Retriever
 from .review import ReviewScheduler
 from .store import LibraryStore
@@ -112,6 +113,19 @@ class TutorService:
         # None keeps the legacy Ollama/pypdf path byte-identical.
         self.embedding_provider = embedding_provider
         self.document_parser = document_parser
+        # B1 multi-fournisseur : le client LLM (génération) peut être
+        # un fournisseur externe compatible OpenAI, distinct du client
+        # Ollama utilisé pour les embeddings.
+        if (
+            getattr(config, "llm_provider", "ollama") == "openai"
+            and getattr(config, "llm_base_url", "")
+        ):
+            self._llm_client: Any = OpenAICompatClient(
+                base_url=config.llm_base_url,
+                api_key=getattr(config, "llm_api_key", ""),
+            )
+        else:
+            self._llm_client = client
         self.retriever = Retriever(store, client, self.model)
         self.progress = ProgressTracker(store)
         self.review = ReviewScheduler(store)
@@ -442,7 +456,7 @@ class TutorService:
         ``end`` frame (INVARIANT 5: sources already fired before this runs).
         """
         options = OllamaOptions(num_ctx=max(8192, self.config.options.num_ctx or 0))
-        agen = self.client.chat_stream(
+        agen = self._llm_client.chat_stream(
             messages, model, think=think, options=options
         ).__aiter__()
         next_task: asyncio.Task | None = None
@@ -572,7 +586,7 @@ class TutorService:
     ) -> str:
         """Run a non-streaming LLM call and return the concatenated content."""
         parts: list[str] = []
-        async for ev in self.client.chat_stream(
+        async for ev in self._llm_client.chat_stream(
             messages, self.config.tutor_model, options=options
         ):
             if ev.kind == "content":
@@ -709,7 +723,7 @@ class TutorService:
         """
         messages = build_code_analysis_prompt(code, context, execution_result)
         options = OllamaOptions(num_ctx=max(8192, self.config.options.num_ctx or 0))
-        agen = self.client.chat_stream(
+        agen = self._llm_client.chat_stream(
             messages, self.config.tutor_model, options=options
         ).__aiter__()
         try:
@@ -1283,43 +1297,6 @@ class TutorService:
     # ------------------------------------------------------------------
     # Import + index pipeline (D5/D6)
     # ------------------------------------------------------------------
-
-    def import_and_index(
-        self,
-        subject_name: str,
-        path: Any,
-        fmt: str | None = None,
-        background: bool = True,
-    ) -> Book:
-        """Import a document into ``subject_name`` and index it.
-
-        Resolves/creates the subject, registers the book (fingerprint no-op
-        when already indexed), then extracts → chunks → embeds → stores →
-        marks indexed. On error the book row is set to ``error`` with the
-        message. When ``background`` is True the pipeline runs in a daemon
-        thread and returns immediately; otherwise it runs synchronously.
-        """
-        subject_id = self._resolve_subject(subject_name)
-        book = self.store.import_document(subject_id, path)
-        # dedup: an already-indexed book is a no-op (zero new embeddings)
-        if self.store.get_book_status(book.id) == "indexed":
-            return book
-
-        if background:
-            ev = threading.Event()
-            self._cancel_flags[book.id] = ev
-            t = threading.Thread(
-                target=self._run_index_thread,
-                args=(subject_id, book, path, fmt),
-                daemon=True,
-            )
-            t.start()
-            self._threads[book.id] = t
-            return book
-
-        asyncio.run(self._run_index(subject_id, book, path, fmt))
-        # refresh so the caller sees the final status/chunk counts
-        return self.store.get_book(book.id) or book
 
     def _run_index_thread(
         self, subject_id: str, book: Book, path: Any, fmt: str | None

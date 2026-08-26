@@ -346,6 +346,42 @@ class Config:
         self._data.setdefault("tutor", {})["top_k"] = max(1, min(20, value))
         self._schedule_save()
 
+    # ------------------------------------------------------------------
+    # Fournisseur LLM (B1 multi-fournisseur)
+    # ------------------------------------------------------------------
+
+    @property
+    def llm_provider(self) -> str:
+        """Fournisseur LLM : 'ollama' (défaut) ou 'openai' (compatible)."""
+        return self._data.get("tutor", {}).get("llm_provider", "ollama")
+
+    @llm_provider.setter
+    def llm_provider(self, value: str) -> None:
+        if value not in ("ollama", "openai"):
+            raise ValueError(f"Fournisseur inconnu {value!r} ; attendu 'ollama' ou 'openai'")
+        self._data.setdefault("tutor", {})["llm_provider"] = value
+        self._schedule_save()
+
+    @property
+    def llm_base_url(self) -> str:
+        """URL de base du fournisseur LLM (ex. https://api.openai.com/v1)."""
+        return self._data.get("tutor", {}).get("llm_base_url", "")
+
+    @llm_base_url.setter
+    def llm_base_url(self, value: str) -> None:
+        self._data.setdefault("tutor", {})["llm_base_url"] = value
+        self._schedule_save()
+
+    @property
+    def llm_api_key(self) -> str:
+        """Clé API du fournisseur LLM (optionnel, vide = pas d'auth)."""
+        return self._data.get("tutor", {}).get("llm_api_key", "")
+
+    @llm_api_key.setter
+    def llm_api_key(self, value: str) -> None:
+        self._data.setdefault("tutor", {})["llm_api_key"] = value
+        self._schedule_save()
+
     @property
     def tutor_whisper_binary(self) -> str:
         return self._data.get("tutor", {}).get("whisper_binary", "")
@@ -481,6 +517,9 @@ class Config:
             "level": self.tutor_level,
             "think": self.tutor_think,
             "top_k": self.tutor_top_k,
+            "llm_provider": self.llm_provider,
+            "llm_base_url": self.llm_base_url,
+            "llm_api_key": self.llm_api_key,
             "whisper_binary": self.tutor_whisper_binary,
             "whisper_model": self.tutor_whisper_model,
             "llama_bin": self.tutor_llama_bin,
