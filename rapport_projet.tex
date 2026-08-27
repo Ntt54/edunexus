@@ -1,0 +1,323 @@
+\documentclass[12pt,a4paper]{article}
+
+% ── Encodage & langue ──
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+
+% ── Mise en page ──
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{setspace}
+\onehalfspacing
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textit{Rapport de projet --- Stage}}
+\fancyhead[R]{\small\textit{EduNexus}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ── Graphisme ──
+\usepackage{xcolor}
+\definecolor{accent}{HTML}{5B5CE2}
+\definecolor{dark}{HTML}{172033}
+\definecolor{gray}{HTML}{66738A}
+\usepackage{titlesec}
+\titleformat{\section}{\Large\bfseries\color{dark}}{}{0em}{}[\color{accent}\rule{\textwidth}{0.8pt}]
+\titleformat{\subsection}{\large\bfseries\color{dark}}{}{0em}{}
+
+% ── Utilitaires ──
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=accent, urlcolor=accent}
+
+% ── Images ──
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, calc}
+
+\begin{document}
+
+% ══════════════════════════════════════════════════════════════
+% PAGE DE GARDE
+% ══════════════════════════════════════════════════════════════
+\begin{titlepage}
+\centering
+\vspace*{2cm}
+
+{\Huge\bfseries\color{dark} EduNexus}\\[0.6cm]
+{\Large\color{gray} Professeur IA local pour l'apprentissage personnalisé}\\[2cm]
+
+\rule{\textwidth}{1pt}\\[1.5cm]
+
+{\large\textbf{Rapport de présentation du projet}}\\[0.8cm]
+{\large Stage --- Année universitaire 2025--2026}\\[3cm]
+
+\begin{minipage}{0.6\textwidth}
+\centering
+\textbf{Étudiant}\\[0.3cm]
+Ngan So Souleymane
+\end{minipage}
+\hfill
+\begin{minipage}{0.3\textwidth}
+\centering
+\textbf{Date}\\[0.3cm]
+Août 2026
+\end{minipage}
+
+\vfill
+{\small\color{gray} Document généré à partir du code source du projet}
+\end{titlepage}
+
+% ══════════════════════════════════════════════════════════════
+% TABLE DES MATIÈRES
+% ══════════════════════════════════════════════════════════════
+\tableofcontents
+\newpage
+
+% ══════════════════════════════════════════════════════════════
+% 1. INTRODUCTION
+% ══════════════════════════════════════════════════════════════
+\section{Introduction}
+
+Apprendre à son propre rythme, sans dépendre d'une connexion Internet permanente ni craindre que ses données de cours partent on ne sait où : c'est le problème auquel EduNexus tente de répondre.
+
+Ce projet est né d'une constatation simple. Les plateformes d'apprentissage en ligne offrent aujourd'hui des fonctionnalités remarquables, mais elles reposent presque toutes sur le cloud. Pour un étudiant travaillant sur une machine modeste, avec des documents de cours volumineux et une connexion intermittente, cette dépendance devient un obstacle concret. EduNexus propose une alternative \textbf{entièrement locale} : un tuteur intelligent qui fonctionne sur votre ordinateur, qui lit vos propres PDF et livres, et qui construit un programme de révision personnalisé sans jamais envoyer un seul octet vers l'extérieur.
+
+Le résultat est une application web autonome, alimentée par des modèles de langage open source, capable de transformer n'importe quel document de cours en un accompagnement pédagogique structuré : diagnostic des lacunes, exercices adaptatifs, fiches de révision, et suivi de progression.
+
+% ══════════════════════════════════════════════════════════════
+% 2. CONTEXTE ET PROBLÉMATIQUE
+% ══════════════════════════════════════════════════════════════
+\section{Contexte et problématique}
+
+\subsection{Le constat de départ}
+
+Les étudiants disposent aujourd'hui de deux options extrêmes. D'un côté, les plateformes comme Coursera ou Khan Academy offrent un contenu de qualité, mais elles imposent un accès Internet, collectent des données personnelles et ne permettent pas toujours d'importer ses propres documents. De l'autre, les outils d'IA grand public (ChatGPT, Claude) répondent de manière generique, sans lien avec le corpus spécifique de l'apprenant, et nécessitent un abonnement payant.
+
+Entre les deux, il manque un outil qui combine la puissance du RAG (Retrieval-Augmented Generation) avec la confidentialité d'un fonctionnement strictement local.
+
+\subsection{Les contraintes techniques}
+
+Le projet cible les machines modestes --- un i5 de septième génération avec 8 Go de RAM, par exemple. Cette contrainte a guidé chaque décision architecturale : utilisation de modèles GGUF quantifiés gérés séquentiellement, un seul serveur \texttt{llama-server} à la fois, des embeddings calculés parallèlement mais en nombre limité, et une interface web légère construite en HTML/CSS/JavaScript vanilla sans framework lourd.
+
+\subsection{La promesse produit}
+
+\begin{quote}
+\textit{« Un professeur IA local qui transforme vos propres documents en un programme de révision vérifiable et personnalisé. »}
+\end{quote}
+
+Cette phrase résume l'ambition. Il ne s'agit pas de construire un chatbot supplémentaire, mais de créer un véritable système d'apprentissage qui comprend vos documents, identifie ce que vous ne maîtrisez pas encore, et vous propose la bonne activité au bon moment.
+
+% ══════════════════════════════════════════════════════════════
+% 3. ARCHITECTURE TECHNIQUE
+% ══════════════════════════════════════════════════════════════
+\section{Architecture technique}
+
+\subsection{Principes fondateurs}
+
+L'architecture repose sur six principes formulés dans une \textit{constitution} du projet (v1.0.0) :
+
+\begin{enumerate}[leftmargin=2cm]
+    \item \textbf{Cœur découplé} --- Le noyau pédagogique (\texttt{tutor/}) ne contient aucun import des bibliothèques d'interface (FastAPI, Textual). Il peut être réutilisé dans n'importe quel contexte.
+    \item \textbf{Préservation} --- Aucune donnée utilisateur n'est perdue. Les livres, conversations et progressions sont persistés dans SQLite.
+    \item \textbf{Tests hors-ligne} --- L'ensemble des 391 tests s'exécute sans aucun appel réseau, en mockant les réponses du modèle via \texttt{httpx.MockTransport}.
+    \item \textbf{Sécurité locale} --- Le serveur ne lie que \texttt{127.0.0.1}. Pas de donnée envoyée vers l'extérieur par défaut.
+    \item \textbf{Légèreté} --- Pas de nouvelle dépendance runtime lourde. NumPy et les outils Python standards suffisent.
+    \item \textbf{Observabilité} --- Toutes les erreurs sont journalisées dans \texttt{\textasciitilde/.config/ollama-tui/errors.log}.
+\end{enumerate}
+
+\subsection{Structure du code}
+
+Le projet suit un agencement \texttt{src-layout} avec Python 3.12 et le gestionnaire de paquets Hatchling :
+
+\begin{center}
+\begin{tikzpicture}[
+    node distance=0.6cm and 0.3cm,
+    box/.style={rectangle, draw=dark, rounded corners=4pt, minimum width=2.8cm, minimum height=0.7cm, font=\small, align=center},
+    root/.style={box, fill=dark, text=white, minimum width=4cm},
+    layer/.style={box, fill=accent!15},
+    leaf/.style={box, fill=gray!10, minimum width=2.2cm, font=\scriptsize},
+]
+    \node[root] (src) {\texttt{src/ollama\_tutor}};
+    \node[layer, below left=0.8cm and 1.2cm of src] (tutor) {\texttt{tutor/}\\[-2pt]{\scriptsize noyau UI-agnostique}};
+    \node[layer, below right=0.8cm and 1.2cm of src] (web) {\texttt{web/}\\[-2pt]{\scriptsize FastAPI + HTML}};
+
+    \node[leaf, below=0.5cm of tutor, xshift=-1.5cm] (service) {\texttt{service.py}};
+    \node[leaf, below=0.5cm of tutor, xshift=0cm] (store) {\texttt{store.py}};
+    \node[leaf, below=0.5cm of tutor, xshift=1.5cm] (retrieval) {\texttt{retrieval.py}};
+
+    \node[leaf, below=0.5cm of web] (server) {\texttt{server.py}};
+    \node[leaf, below=0.5cm of server] (html) {\texttt{tutor.html}};
+
+    \draw[->, thick, accent] (src) -- (tutor);
+    \draw[->, thick, accent] (src) -- (web);
+    \draw[->, gray] (tutor) -- (service);
+    \draw[->, gray] (tutor) -- (store);
+    \draw[->, gray] (tutor) -- (retrieval);
+    \draw[->, gray] (web) -- (server);
+    \draw[->, gray] (server) -- (html);
+\end{tikzpicture}
+\end{center}
+
+La séparation est stricte : \texttt{server.py} est un transport fin qui délègue tout à \texttt{TutorService}. Le noyau pédagogique (\texttt{tutor/}) ne contient aucun import de web, garantissant sa réutilisabilité.
+
+\subsection{Fournisseurs modélaires}
+
+EduNexus supporte trois moteurs interchangeables pour les embeddings et le LLM :
+
+\begin{center}
+\begin{tabularx}{\textwidth}{l l X}
+\toprule
+\textbf{Fournisseur} & \textbf{Usage} & \textbf{Caractéristiques} \\
+\midrule
+Ollama & Par défaut & Aucune configuration si Ollama tourne en local \\
+GGUF local & llama.cpp & Modèles quantifiés, \texttt{--parallel N} pour embeddings \\
+OpenAI-compat & vLLM, LM Studio & Tout provider compatible avec l'API OpenAI \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Les modèles sont chargés séquentiellement --- un seul à la fois --- pour respecter le budget RAM des machines modestes.
+
+% ══════════════════════════════════════════════════════════════
+% 4. FONCTIONNALITÉS
+% ══════════════════════════════════════════════════════════════
+\section{Fonctionnalités principales}
+
+\subsection{Import et indexation de documents}
+
+Le pipeline d'ingestion accepte cinq formats : PDF, EPUB, DOCX, PPTX, et texte brut (TXT/MD). Pour chaque document, le système extrait le texte, le découpe en chunks structurés (en respectant les frontières de paragraphes et les titres de section), calcule les embeddings, et les stocke dans une base SQLite locale.
+
+La fonctionnalité de déduplication empêche l'indexation en double : un hash du fichier source est calculé à l'import, et si le même fichier est ré-importé, le système détecte automatiquement s'il s'agit d'un doublon identique ou d'une mise à jour nécessitant une ré-indexation.
+
+\subsection{Recherche hybride}
+
+La recherche combine deux approches complémentaires :
+
+\begin{itemize}[leftmargin=1.5cm]
+    \item \textbf{BM25} --- recherche lexicale basée sur la fréquence des termes, efficace pour les termes techniques et les noms propres.
+    \item \textbf{Similarité cosinus} --- recherche sémantique via les embeddings, qui comprend le sens même quand les mots diffèrent.
+\end{itemize}
+
+Les résultats des deux méthodes sont fusionnés par \textit{Reciprocal Rank Fusion} (RRF), une technique qui pondère le rang de chaque document dans chaque classement plutôt que ses scores brutes. Un reranking post-recherche optionnel (0.7 × cosinus + 0.3 × Jaccard lexical) améliore encore la précision.
+
+\subsection{Tutorat socratique et citations vérifiables}
+
+Lorsqu'un étudiant pose une question, le système retrieve les passages pertinents dans sa bibliothèque, construit un prompt contextuel, et génère une réponse en mode socratique : plutôt que de donner directement la réponse, il guide l'apprenant vers la solution par des indices progressifs.
+
+Chaque réponse est accompagnée de citations au format \texttt{[Livre X, page Y]}. Un système de validation à trois niveaux vérifie automatiquement que les citations sont réellement fondées :
+
+\begin{center}
+\begin{tabularx}{\textwidth}{l l X}
+\toprule
+\textbf{Niveau} & \textbf{Signification} & \textbf{Comportement} \\
+\midrule
+\ding{51} Citation valide & La source et l'emplacement existent & Affichage normal \\
+\ding{55} Citation faible & Le livre est identifié mais la correspondance est incertaine & Avertissement visible \\
+\ding{55} Réponse non fondée & Aucun passage pertinent retrouvé & « Réponse non vérifiée par vos documents » \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Diagnostic et parcours adaptatif}
+
+Avant toute session d'apprentissage, EduNexus peut administrer un quiz de positionnement court. Les questions s'adaptent à la difficulté des réponses précédentes : si l'étudiant maîtrise bien un concept, la difficulté augmente ; sinon, elle diminue. Le rapport final identifie les forces, les faiblesses, et suggère un parcours d'apprentissage ordonné par dépendance pédagogique.
+
+\subsection{Exercices, quiz et mode épreuve}
+
+Le module d'entraînement propose des exercices à difficulté choisie, des quiz à correction immédiate, et un mode « épreuve » qui permet d'importer un sujet d'examen (PDF ou images), d'en extraire les questions par OCR, et de les résoudre une par une avec assistance RAG et indices progressifs.
+
+\subsection{Répétition espacée et suivi de progression}
+
+Chaque réponse est associée à un concept. Le système calcule un score de maîtrise et programme automatiquement des sessions de révision au moment optimal de rappel. Les erreurs sont enregistrées en détail (question, réponse donnée, bonne réponse, type d'erreur) et consultables par matière.
+
+\subsection{Gamification}
+
+Un système léger de gamification (points d'expérience, streak quotidien, badges) vient encourager la régularité sans détourner l'attention de l'apprentissage réel. L'XP est attribuée de manière sobre : +20 pour un quiz complété, +15 pour un exercice correct, +10 de bonus pour un streak consécutif.
+
+% ══════════════════════════════════════════════════════════════
+% 5. INTERFACE UTILISATEUR
+% ══════════════════════════════════════════════════════════════
+\section{Interface utilisateur}
+
+L'interface est une SPA (Single Page Application) autonome construite en HTML, CSS et JavaScript vanilla, sans aucun framework. Elle est accessible via un navigateur à l'adresse \texttt{http://127.0.0.1:9215/tutor}.
+
+L'agencement suit un modèle « workspace-first » : une barre latérale sombre à gauche avec les neuf espaces de navigation, et un contenu principal à droite. Le design est responsive avec trois breakpoints (desktop, tablette, mobile) et utilise un système de design cohérent basé sur des variables CSS.
+
+Les neuf espaces --- Accueil, Conversations, Bibliothèque, Apprentissage, Entraîner, Quiz/Examens, Progression, Explorer et Réglages --- offrent une navigation claire entre les différentes activités, sans surcharger l'écran d'accueil.
+
+% ══════════════════════════════════════════════════════════════
+% 6. DÉVELOPPEMENT ET MÉTHODOLOGIE
+% ══════════════════════════════════════════════════════════════
+\section{Développement et méthodologie}
+
+\subsection{Approche itérative par spécifications}
+
+Le développement a suivi une méthodologie de spécifications formalisées. Chaque fonctionnalité majeure a fait l'objet d'un document de spécification (dans le dossier \texttt{specs/}) contenant une analyse des problèmes, un plan d'implémentation détaillé, et des critères de validation. Ce processus a produit trois itérations principales :
+
+\begin{itemize}[leftmargin=1.5cm]
+    \item \textbf{Feature 005} --- Interface multi-espaces et bibliothèque hiérarchique (36 tâches)
+    \item \textbf{Feature 006} --- Apprentissage adaptatif et classification (47 tests)
+    \item \textbf{Feature 007} --- Audit complet et évolution du MVP (95 tâches, 18 phases)
+\end{itemize}
+
+\subsection{Qualité logicielle}
+
+La base de tests compte aujourd'hui \textbf{391 tests} s'exécutant en moins de 10 secondes. Tous sont hors-ligne : les flux de données du modèle sont mockés via des transports HTTP fictifs, ce qui permet de valider le comportement du système sans aucune dépendance à un service externe.
+
+L'architecture en couches garantit que le noyau pédagogique peut être testé indépendamment de l'interface web, et réciproquement.
+
+\subsection{Analyse et amélioration continue}
+
+Une analyse externe (réalisée via Manus AI) a identifié les axes d'amélioration prioritaires. Les recommandations les plus impactantes ont été implémentées : indexation nocturne automatique, file d'attente persistante avec reprise après interruption, détection de doublons, maintenance et backup de la base de données, optimisations SQLite, et refonte de l'interface.
+
+% ══════════════════════════════════════════════════════════════
+% 7. BILAN QUANTITATIF
+% ══════════════════════════════════════════════════════════════
+\section{Bilan quantitatif}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{l X r}
+\toprule
+\textbf{Indicateur} & \textbf{Description} & \textbf{Valeur} \\
+\midrule
+Lignes de code & Source principal (tutor + web) & $\approx$ 8\,500 \\
+Tests & Unitaires, contractuels, d'intégration & 391 \\
+Commits & Historique Git du projet & 25+ \\
+Fonctionnalités & Espaces, modes, outils pédagogiques & 20 \\
+Formats supportés & PDF, EPUB, DOCX, PPTX, TXT, MD & 6 \\
+Fournisseurs & Ollama, GGUF, OpenAI-compatibles & 3 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+% ══════════════════════════════════════════════════════════════
+% 8. PERSPECTIVES
+% ══════════════════════════════════════════════════════════════
+\section{Perspectives}
+
+Plusieurs axes d'amélioration ont été identifiés pour les prochaines itérations :
+
+\begin{enumerate}[leftmargin=1.5cm]
+    \item \textbf{Modèle de maîtrise formel} --- Introduire les entités \texttt{Concept}, \texttt{MasteryState} et \texttt{ReviewSchedule} pour rendre le calcul de progression transparent et explicable.
+    \item \textbf{Évaluation RAG} --- Constituer un corpus de test manuel pour mesurer objectivement la précision des citations, le rappel des chunks pertinents, et le taux de réponses non fondées.
+    \item \textbf{OCR local} --- Implémenter un vrai moteur OCR pour les images et PDF scannés, ou limiter explicitement le périmètre du mode épreuve.
+    \item \textbf{Export et migration} --- Permettre l'export complet de la base (bibliothèque, conversations, progression) et la migration du modèle d'embedding sans perte de données.
+    \item \textbf{Mode « local uniquement »} --- Un interrupteur qui bloque physiquement tout appel à un endpoint distant, pour les utilisateurs soucieux de confidentialité.
+\end{enumerate}
+
+% ══════════════════════════════════════════════════════════════
+% 9. CONCLUSION
+% ══════════════════════════════════════════════════════════════
+\section{Conclusion}
+
+EduNexus n'est pas un simple chatbot éducatif. C'est un système d'apprentissage complet qui fonctionne entièrement sur votre ordinateur, qui comprend vos documents de cours, et qui construit un programme de révision adapté à votre niveau. La confidentialité n'est pas un gadget marketing : c'est un principe architectural. Les données ne quittent jamais la machine.
+
+Le projet a nécessité la maîtrise de domains techniques variés --- RAG, embeddings, streaming SSE, interfaces web autonomes, tests hors-ligne --- tout en gardant à l'esprit la contrainte centrale : les machines modestes. Chaque fonctionnalité a été pensée pour fonctionner sur un simple laptop sans GPU.
+
+Aujourd'hui, le système est fonctionnel et testé. Les prochaines étapes porteront sur la profondeur pédagogique (modèle de maîtrise, répétition espacée) et la qualité mesurable (évaluation RAG, corpus de référence). L'objectif reste le même : transformer n'importe quel document de cours en un compagnon d'apprentissage fiable, local et personnalisé.
+
+\end{document}
