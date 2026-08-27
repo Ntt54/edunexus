@@ -96,6 +96,12 @@ button { cursor: pointer; }
   border: 1px solid var(--line); background: var(--surface); border-radius: var(--r-sm);
   padding: 4px 6px; font-size: 12.5px; max-width: 150px; color: var(--ink); text-overflow: ellipsis;
 }
+.model-field .model-search {
+  border: 1px solid var(--line); background: var(--surface); border-radius: var(--r-sm);
+  padding: 3px 6px; font-size: 12px; width: 70px; color: var(--ink);
+}
+.model-field .model-search:focus { outline: none; border-color: var(--accent); }
+.model-field .model-search::placeholder { color: var(--ink-dim); opacity: 0.7; }
 .engine-badge {
   display: inline-flex; align-items: center; gap: 6px;
   font-family: var(--mono); font-size: 11.5px; color: var(--ink-dim);
@@ -913,9 +919,11 @@ input[type=text], input[type=search], input[type=number], textarea, select {
   <div class="engine-badge" id="engineBadge" title="Moteur d'embeddings local"><span class="dot"></span><span id="engineLabel">détection…</span></div>
   <div class="model-group">
     <label class="model-field"><span>Embeddings</span>
+      <input type="search" class="model-search" id="searchEmbedding" placeholder="Filtrer…" aria-label="Filtrer les modèles d'embeddings">
       <select id="modelEmbedding" aria-label="Modèle d'embeddings"></select>
     </label>
     <label class="model-field"><span>LLM</span>
+      <input type="search" class="model-search" id="searchLLM" placeholder="Filtrer…" aria-label="Filtrer les modèles de langage">
       <select id="modelLLM" aria-label="Modèle de langage"></select>
     </label>
   </div>
@@ -1327,6 +1335,10 @@ input[type=text], input[type=search], input[type=number], textarea, select {
                 <input type="password" name="llm_api_key" placeholder="sk-…">
               </label>
             </div>
+            <div class="reglages-actions" style="margin-top:0.5rem">
+              <button type="button" id="testConnBtn" class="btn btn-sm">Tester la connexion</button>
+              <span id="testConnStatus" style="margin-left:0.5rem;font-size:0.85rem"></span>
+            </div>
           </fieldset>
 
           <fieldset class="reglages-group">
@@ -1660,6 +1672,13 @@ async function loadEngineBadge() {
   }
 }
 
+function providerGroup(name) {
+  // Groupe par préfixe fournisseur (ex. "auto/", "openrouter/", "google/").
+  const idx = name.indexOf("/");
+  if (idx > 0) return name.slice(0, idx);
+  return "Autres";
+}
+
 function fillModelSelect(sel, list, current) {
   sel.innerHTML = "";
   const names = Array.from(new Set([...(list || []), current].filter(Boolean)));
@@ -1671,12 +1690,50 @@ function fillModelSelect(sel, list, current) {
     return;
   }
   sel.disabled = false;
+  // Regroupe les modèles par fournisseur (préfixe avant le premier "/").
+  const groups = new Map();
   for (const n of names) {
-    const o = document.createElement("option");
-    o.value = n; o.textContent = n;
-    if (n === current) o.selected = true;
-    sel.appendChild(o);
+    const g = providerGroup(n);
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(n);
   }
+  const sortedGroups = Array.from(groups.entries()).sort((a, b) => {
+    // "ollama" (et "Autres") toujours en premier, puis ordre alphabétique.
+    const rank = (g) => (g === "ollama" ? 0 : g === "Autres" ? 1 : 2);
+    const ra = rank(a[0]), rb = rank(b[0]);
+    if (ra !== rb) return ra - rb;
+    return a[0].localeCompare(b[0]);
+  });
+  for (const [g, items] of sortedGroups) {
+    const og = document.createElement("optgroup");
+    og.label = g;
+    for (const n of items) {
+      const o = document.createElement("option");
+      o.value = n; o.textContent = n;
+      if (n === current) o.selected = true;
+      og.appendChild(o);
+    }
+    sel.appendChild(og);
+  }
+}
+
+function applyModelFilter(kind) {
+  const q = ($("search" + kind).value || "").trim().toLowerCase();
+  const sel = $("model" + kind);
+  let visible = 0;
+  for (const og of sel.querySelectorAll("optgroup")) {
+    let groupVisible = 0;
+    for (const o of og.querySelectorAll("option")) {
+      const match = !q || o.value.toLowerCase().includes(q);
+      o.style.display = match ? "" : "none";
+      if (match) groupVisible++;
+    }
+    og.style.display = groupVisible ? "" : "none";
+    visible += groupVisible;
+  }
+  // Affiche un indicateur du nombre de résultats quand on filtre.
+  const pill = $("statusPill");
+  if (q && pill) pill.textContent = visible + " modèle(s)";
 }
 
 async function loadModels() {
@@ -1690,6 +1747,8 @@ async function loadModels() {
   }
   fillModelSelect($("modelEmbedding"), data.embedding, data.current && data.current.embedding);
   fillModelSelect($("modelLLM"), data.llm, data.current && data.current.llm);
+  applyModelFilter("Embedding");
+  applyModelFilter("LLM");
 }
 
 async function putModel(kind, value) {
@@ -1703,6 +1762,8 @@ async function putModel(kind, value) {
     });
     fillModelSelect($("modelEmbedding"), data.embedding, data.current && data.current.embedding);
     fillModelSelect($("modelLLM"), data.llm, data.current && data.current.llm);
+    applyModelFilter("Embedding");
+    applyModelFilter("LLM");
     toast("Modèle " + (kind === "llm" ? "LLM" : "d'embeddings") + " : " + value);
     setStatus("prêt");
   } catch (e) {
@@ -4257,6 +4318,8 @@ function wireAll() {
   $("spaceSelect").addEventListener("change", onSpaceChange);
   $("modelEmbedding").addEventListener("change", (e) => putModel("embedding", e.target.value));
   $("modelLLM").addEventListener("change", (e) => putModel("llm", e.target.value));
+  $("searchEmbedding").addEventListener("input", () => applyModelFilter("Embedding"));
+  $("searchLLM").addEventListener("input", () => applyModelFilter("LLM"));
 
   // Conversations
   $("newConvBtn").addEventListener("click", () => toggleNewConvForm());
@@ -4460,6 +4523,35 @@ function wireReglages() {
       if (status) status.textContent = "Erreur : " + e.message;
     }
   });
+
+  const testConnBtn = $("testConnBtn");
+  if (testConnBtn) {
+    testConnBtn.addEventListener("click", async () => {
+      const status = $("testConnStatus");
+      testConnBtn.disabled = true;
+      if (status) { status.textContent = "Test en cours…"; status.style.color = ""; }
+      try {
+        const r = await fetch("/api/tutor/test-connection", { method: "POST" });
+        const data = await r.json();
+        if (status) {
+          if (data.ok) {
+            status.textContent = "✓ " + (data.message || "Connexion OK");
+            status.style.color = "#2d8a4e";
+          } else {
+            status.textContent = "✗ " + (data.message || "Échec");
+            status.style.color = "#c0392b";
+          }
+        }
+      } catch (e) {
+        if (status) {
+          status.textContent = "✗ Erreur réseau";
+          status.style.color = "#c0392b";
+        }
+      } finally {
+        testConnBtn.disabled = false;
+      }
+    });
+  }
 
   const maintenanceBtn = $("maintenanceBtn");
   if (maintenanceBtn) {

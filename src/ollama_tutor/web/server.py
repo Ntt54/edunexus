@@ -1313,11 +1313,78 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             "ocr": bool(llama_bin and config.tutor_docling_gguf),
         }
 
+    @app.post("/api/tutor/test-connection")
+    async def tutor_test_connection() -> dict[str, Any]:
+        """Probe the configured provider (Ollama or remote) for reachability."""
+        provider = config.llm_provider
+        base_url = config.llm_base_url
+        api_key = config.llm_api_key
+
+        if provider == "openai" and base_url:
+            from ..tutor.providers.openai_compat import OpenAICompatProvider
+            probe = OpenAICompatProvider(
+                base_url=base_url, api_key=api_key or None
+            )
+            try:
+                ok = await probe.check_health()
+                models = await probe.list_models() if ok else []
+                return {
+                    "ok": ok,
+                    "provider": "openai",
+                    "base_url": base_url,
+                    "model_count": len(models),
+                    "models": [m.name for m in models[:20]],
+                    "message": (
+                        f"{len(models)} modèle(s) disponible(s)"
+                        if ok
+                        else "Serveur inaccessible"
+                    ),
+                }
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "ok": False,
+                    "provider": "openai",
+                    "message": str(exc)[:200],
+                }
+            finally:
+                await probe.close()
+        else:
+            try:
+                models = await tutor_client.list_models()
+                return {
+                    "ok": True,
+                    "provider": "ollama",
+                    "model_count": len(models),
+                    "models": [m.name for m in models[:20]],
+                    "message": f"{len(models)} modèle(s) disponible(s)",
+                }
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "ok": False,
+                    "provider": "ollama",
+                    "message": str(exc)[:200],
+                }
+
     async def _tutor_models_payload() -> dict[str, Any]:
-        try:
-            models = await tutor_client.list_models()
-        except Exception:
-            models = []  # UI must stay functional offline.
+        # Build the client from the CURRENT config so the dropdown reflects
+        # the provider selected in Réglages (not the one captured at startup).
+        if config.llm_provider == "openai" and config.llm_base_url:
+            from ..tutor.providers.openai_compat import OpenAICompatProvider
+            probe = OpenAICompatProvider(
+                base_url=config.llm_base_url,
+                api_key=config.llm_api_key or None,
+            )
+            try:
+                models = await probe.list_models()
+            except Exception:
+                models = []
+            finally:
+                await probe.close()
+        else:
+            try:
+                models = await tutor_client.list_models()
+            except Exception:
+                models = []  # UI must stay functional offline.
         names = [m.name for m in models]
         return {
             "embedding": names,

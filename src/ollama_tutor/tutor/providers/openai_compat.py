@@ -27,6 +27,13 @@ class OpenAIClientError(Exception):
 
 
 @dataclass
+class _SimpleModel:
+    """Minimal model wrapper with ``.name`` attribute matching OllamaModel protocol."""
+
+    name: str
+
+
+@dataclass
 class _StreamState:
     """Mutable accumulator for SSE chunk parsing."""
 
@@ -78,6 +85,31 @@ class OpenAICompatProvider:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+
+    # ------------------------------------------------------------------
+    # Model listing (GET /v1/models) — matches OllamaClient.list_models()
+    # ------------------------------------------------------------------
+
+    async def list_models(self) -> list[_SimpleModel]:
+        """Fetch available models via ``GET /v1/models``."""
+        client = self._get_client()
+        try:
+            resp = await client.get("/models", timeout=10.0)
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            items = data.get("data", [])
+            return [_SimpleModel(m.get("id", "")) for m in items if m.get("id")]
+        except Exception:
+            return []
+
+    async def check_health(self) -> bool:
+        """Check if the remote server is reachable."""
+        try:
+            models = await self.list_models()
+            return True  # reachable if no exception
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # Streaming chat (OllamaClient-compatible signature)
