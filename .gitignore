@@ -17,3 +17,10 @@ venv/
 # Divers
 *.log
 .DS_Store
+
+# Données utilisateur (base SQLite, transcripts, uploads, config)
+data/
+
+# binaires llama.cpp versionnés + modèles GGUF (009)
+vendor/
+models/

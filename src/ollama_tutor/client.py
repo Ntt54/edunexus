@@ -46,6 +46,7 @@ class StreamEvent:
     kind: str  # "thinking" | "content" | "done"
     text: str = ""
     stats: InferenceStats | None = None
+    truncated: bool = False  # True si la réponse a été coupée (finish_reason=length)
 
 
 class OllamaClient:
@@ -204,10 +205,15 @@ class OllamaClient:
                             text=chunk["message"]["content"],
                         )
 
-                    # Final frame with stats
+                    # Final frame with stats — propagate truncation (done_reason == "length")
                     if chunk.get("done"):
                         stats = self._parse_stats(chunk)
-                        yield StreamEvent(kind="done", stats=stats)
+                        truncated = chunk.get("done_reason") == "length" or chunk.get("done_reason") == "length" or chunk.get("finish_reason") == "length"
+                        # Ollama uses done_reason, OpenAI compat uses finish_reason
+                        if not truncated:
+                            dr = chunk.get("done_reason") or chunk.get("finish_reason") or ""
+                            truncated = str(dr).lower() == "length"
+                        yield StreamEvent(kind="done", stats=stats, truncated=bool(truncated))
                         break
 
         except httpx.ConnectError as e:

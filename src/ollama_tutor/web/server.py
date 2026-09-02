@@ -22,8 +22,10 @@ import asyncio
 import base64
 import binascii
 import datetime
+import hashlib
 import json
 import os
+import sqlite3
 import sys
 import traceback
 import uuid
@@ -55,6 +57,7 @@ from ..tutor.voice import VoiceError, WhisperTranscriber
 from ..utils.platform import get_config_dir  # re-exported for tests/monkeypatch
 
 STATIC_DIR = Path(__file__).parent / "static"
+VUE_DIST_DIR = Path(__file__).parent.parent.parent.parent / "web" / "vue" / "dist"
 
 #: Tool profiles accepted on agent WS frames (specs/003 T019). Omitted,
 #: empty or "default" ⇒ legacy full toolset.
@@ -214,10 +217,45 @@ class TutorQuizSubmitRequest(BaseModel):
 class TutorConceptRequest(BaseModel):
     name: str
     path_rank: int | None = None
+    notion: str = ""
 
 
 class TutorCompareRequest(BaseModel):
-    notion: str = ""
+    a: str
+    b: str
+
+
+class TutorProfileRequest(BaseModel):
+    domain: str = ""
+    level: str = ""
+    objective: str = ""
+    deadline: str = ""
+    available_time: str = ""
+    prerequisites: list[str] = []
+    competencies: list[str] = []
+    explanation_style: str = ""
+    activities: list[str] = []
+    mastery_criteria: list[str] = []
+    constraints: dict[str, Any] = {}
+    template_id: str = ""
+
+
+class TutorGoalRequest(BaseModel):
+    goal: str
+
+
+class TutorLearnerRequest(BaseModel):
+    name: str
+    avatar: str = ""
+
+
+class TutorNotebookNoteRequest(BaseModel):
+    note: str
+
+
+class TutorNotebookActionRequest(BaseModel):
+    action: str
+    params: dict[str, Any] = {}
 
 
 class TutorAutoClassifyRequest(BaseModel):
@@ -348,17 +386,48 @@ def _log_error(
 
     Writes to ``config.config_dir / "errors.log"`` (utf-8 append, lazy file
     creation). Never raises — logging must not kill a request/stream.
+
+    Dual write (Polish A): also appends to ``get_config_dir() / "errors.log"``
+    and to ``data/errors.log`` (project-local fallback) so errors are visible
+    both from the global config dir and from the repository data dir.
     """
+    ts = datetime.datetime.now().isoformat(timespec="seconds")
+    line = f"[{ts}] [{source}] {message}\n"
+    if detail:
+        line += f"{detail}\n"
+
+    # 1) primary: config.config_dir / errors.log
     try:
         log_file = Path(config.config_dir) / "errors.log"
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        ts = datetime.datetime.now().isoformat(timespec="seconds")
         with log_file.open("a", encoding="utf-8") as f:
-            f.write(f"[{ts}] [{source}] {message}\n")
-            if detail:
-                f.write(f"{detail}\n")
+            f.write(line)
     except Exception:
         pass
+
+    # 2) secondary: global get_config_dir() / errors.log
+    try:
+        global_log = get_config_dir() / "errors.log"
+        # avoid double write when paths are identical
+        try:
+            same = Path(global_log).resolve() == Path(config.config_dir).resolve() / "errors.log"
+        except Exception:
+            same = str(global_log) == str(Path(config.config_dir) / "errors.log")
+        if not same:
+            global_log.parent.mkdir(parents=True, exist_ok=True)
+            with global_log.open("a", encoding="utf-8") as f:
+                f.write(line)
+    except Exception:
+        pass
+
+    # 3) tertiary: data/errors.log (project-local, relative to cwd and to config_dir)
+    for candidate in (Path("data") / "errors.log", Path(config.config_dir) / "data" / "errors.log"):
+        try:
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            with candidate.open("a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception:
+            pass
 
 
 def _save_data_url(data_dir: Path, data_url: str) -> Path | None:
@@ -436,6 +505,24 @@ class SettingsUpdate(BaseModel):
 def create_app(config_dir: Path | None = None) -> FastAPI:
     """Build the web GUI application."""
     app = FastAPI(title="EduNexus")
+
+    # Feature 008 — WS event broadcast registry (T063). Connected /ws/tutor
+    # sockets register here so REST endpoints can emit feature events
+    # (profile_updated, graph_built, path_generated, program_status,
+    # photo_status, notebook_output) to live clients.
+    app.state.tutor_ws_clients: set[WebSocket] = set()
+
+    async def _emit_tutor_event(event: str, **payload: Any) -> None:
+        """Broadcast a feature event to all connected /ws/tutor clients."""
+        frame = {"type": event, **payload}
+        dead: list[WebSocket] = []
+        for ws in list(app.state.tutor_ws_clients):
+            try:
+                await ws.send_json(frame)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            app.state.tutor_ws_clients.discard(ws)
 
     config = Config(config_dir=config_dir) if config_dir else Config()
     client = OllamaClient()
@@ -577,13 +664,35 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
 
     @app.get("/tutor")
     async def tutor_view() -> FileResponse:
-        # Mirror the /agent gating pattern (T017): surface hidden unless enabled.
+        """Serve the new Vue SPA as the default tutor UI."""
+        if not config.tutor_enabled:
+            raise HTTPException(
+                status_code=404,
+                detail="Vue tuteur désactivée — active tutor.enabled dans la config",
+            )
+        index_path = VUE_DIST_DIR / "index.html"
+        if not index_path.exists():
+            # Fallback to legacy single-file HTML if Vue build not present
+            return FileResponse(STATIC_DIR / "tutor.html")
+        return FileResponse(index_path)
+
+    @app.get("/tutor-classic")
+    async def tutor_classic_view() -> FileResponse:
+        """Serve the legacy single-file HTML tutor UI."""
         if not config.tutor_enabled:
             raise HTTPException(
                 status_code=404,
                 detail="Vue tuteur désactivée — active tutor.enabled dans la config",
             )
         return FileResponse(STATIC_DIR / "tutor.html")
+
+    @app.get("/tutor/assets/{asset_path:path}")
+    async def tutor_vue_assets(asset_path: str) -> FileResponse:
+        """Serve static assets (JS, CSS) from the Vue build."""
+        file_path = VUE_DIST_DIR / "assets" / asset_path
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="Asset not found")
+        return FileResponse(file_path)
 
     @app.post("/api/tutor/import")
     async def tutor_import(request: Request) -> dict[str, Any]:
@@ -599,6 +708,7 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             upload = form.get("file")
             queue_requested = str(form.get("queue", "")).lower() in {"1", "true", "yes", "on"}
             if upload is None:
+                _log_error(config, "tutor-import", "import sans fichier")
                 raise HTTPException(status_code=400, detail="missing file")
             uploads_dir = config.config_dir / "tutor" / "uploads"
             uploads_dir.mkdir(parents=True, exist_ok=True)
@@ -608,6 +718,7 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             # value such as ../../outside.pdf cannot escape uploads_dir.
             safe_filename = Path(raw_filename.replace("\\", "/")).name
             if not safe_filename or safe_filename in {".", ".."}:
+                _log_error(config, "tutor-import", f"nom de fichier invalide: {raw_filename!r}")
                 raise HTTPException(status_code=400, detail="invalid file name")
             dest = uploads_dir / safe_filename
             if dest.exists():
@@ -623,6 +734,7 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             fmt = data.get("fmt")
             queue_requested = bool(data.get("queue", False))
         if not subject or not path:
+            _log_error(config, "tutor-import", "subject and path required")
             raise HTTPException(status_code=400, detail="subject and path required")
 
         # Pre-flight (Phase 6 UX): register the book row synchronously so
@@ -631,9 +743,66 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         try:
             subject_id, book = tutor_service.register_import(str(subject), path)
         except FileNotFoundError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+            _log_error(config, "tutor-import", f"Fichier introuvable: {exc}", traceback.format_exc())
+            raise HTTPException(status_code=400, detail="Fichier introuvable") from exc
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+            _log_error(config, "tutor-import", f"Format invalide: {exc}", traceback.format_exc())
+            raise HTTPException(status_code=400, detail="Formats acceptés .txt,.md,.pdf,.epub") from exc
+        except sqlite3.IntegrityError as exc:
+            _log_error(config, "tutor-import", f"Intégrité fingerprint: {exc}", traceback.format_exc())
+            # Reuse existing book via subject_books instead of 500 (fingerprint UNIQUE)
+            try:
+                p = Path(str(path))
+                suffix = p.suffix.lower()
+                if suffix in (".txt", ".md"):
+                    try:
+                        raw = p.read_text(encoding="utf-8", errors="replace")
+                    except Exception:
+                        raw = ""
+                else:
+                    try:
+                        raw = p.read_bytes().hex()
+                    except Exception:
+                        raw = ""
+                fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest() if raw else None
+                row = None
+                if fingerprint:
+                    row = tutor_store._conn.execute(
+                        "SELECT * FROM books WHERE fingerprint = ?", (fingerprint,)
+                    ).fetchone()
+                if row is None:
+                    # fallback: try by source_path
+                    row = tutor_store._conn.execute(
+                        "SELECT * FROM books WHERE source_path = ?", (str(path),)
+                    ).fetchone()
+                if row is not None:
+                    from ..tutor.models import Book as _Book
+
+                    existing_book = _Book.from_dict(dict(row))
+                    # resolve subject again (register_import already created it)
+                    try:
+                        sid = tutor_service._resolve_subject(str(subject))
+                    except Exception:
+                        sid = None
+                    if sid is not None:
+                        try:
+                            tutor_store._conn.execute(
+                                "INSERT OR IGNORE INTO subject_books (subject_id, book_id) VALUES (?, ?)",
+                                (sid, existing_book.id),
+                            )
+                            tutor_store._conn.commit()
+                        except Exception:
+                            pass
+                        subject_id, book = sid, existing_book
+                    else:
+                        raise HTTPException(status_code=400, detail="Fichier déjà importé") from exc
+                else:
+                    raise HTTPException(status_code=400, detail="Fichier déjà importé") from exc
+            except HTTPException:
+                raise
+            except Exception as e2:
+                _log_error(config, "tutor-import", f"reuse fingerprint échec: {e2}", traceback.format_exc())
+                raise HTTPException(status_code=400, detail="Fichier déjà importé") from exc
 
         # Fingerprint dedup: re-importing an already-indexed book is a no-op.
         status = tutor_store.get_book_status(book.id)
@@ -721,6 +890,12 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
 
     @app.post("/api/tutor/search")
     async def tutor_search(payload: TutorSearchRequest) -> dict[str, Any]:
+        if not payload.query or not payload.query.strip():
+            _log_error(config, "tutor-search", "query requis")
+            raise HTTPException(status_code=400, detail="query requis")
+        if payload.k is None or not isinstance(payload.k, int) or payload.k < 1 or payload.k > 50:
+            _log_error(config, "tutor-search", f"k invalide: {payload.k}")
+            raise HTTPException(status_code=400, detail="k doit être entre 1 et 50")
         subj = next(
             (s for s in tutor_store.list_subjects() if s.name.lower() == payload.subject.lower()),
             None,
@@ -813,6 +988,54 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="livre inconnu") from exc
 
+    @app.get("/api/tutor/pgvector/status")
+    async def tutor_pgvector_status() -> dict[str, Any]:
+        """Health check for pgvector backend (migration plan step 8)."""
+        enabled = bool(getattr(config, "pgvector_enabled", False))
+        dsn = getattr(config, "pgvector_dsn", "")
+        if not enabled:
+            return {"enabled": False, "ok": False, "dsn": dsn, "detail": "pgvector désactivé (SQLite par défaut)"}
+        tmp = None
+        conn = None
+        try:
+            # Try connection via LibraryStore helper
+            from ..tutor.store import LibraryStore
+
+            tmp = LibraryStore(config.config_dir, pgvector_enabled=True, pgvector_dsn=dsn)
+            conn = tmp.get_pg_connection()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                    cur.fetchone()
+                ok = True
+                detail = "pgvector opérationnel"
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+        except Exception as exc:  # noqa: BLE001
+            ok = False
+            detail = str(exc)[:300]
+        finally:
+            if tmp is not None:
+                try:
+                    # Prefer public close() API; fallback to _conn.close()
+                    if hasattr(tmp, "close"):
+                        tmp.close()
+                    else:
+                        tmp._conn.close()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                # Also ensure leaking pg conn is closed if exception before assignment
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+        return {"enabled": enabled, "ok": ok, "dsn": dsn, "detail": detail}
+
     @app.get("/api/tutor/index-status")
     async def tutor_index_status() -> dict[str, Any]:
         """Indexing progress for the UI poller (Phase 6 UX contract).
@@ -840,6 +1063,170 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         }
 
     # ------------------------------------------------------------------
+    # Feature 008 — Profil pédagogique (US1) — thin transport only
+    # ------------------------------------------------------------------
+
+    @app.get("/api/tutor/pedagogical-templates")
+    async def tutor_pedagogical_templates() -> dict[str, Any]:
+        """List predefined pedagogical templates (FR-003)."""
+        from ..tutor.profiles import ProfileService
+        svc = ProfileService(tutor_store)
+        return {"templates": [t.to_dict() for t in svc.list_templates()]}
+
+    @app.get("/api/tutor/subjects/{subject_id}/profile")
+    async def tutor_get_profile(subject_id: str) -> dict[str, Any]:
+        """Get the pedagogical profile of a subject (FR-005)."""
+        from ..tutor.profiles import ProfileService
+        svc = ProfileService(tutor_store)
+        profile = svc.get_profile(subject_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="profil non défini")
+        return {"profile": profile.to_dict()}
+
+    @app.put("/api/tutor/subjects/{subject_id}/profile")
+    async def tutor_put_profile(subject_id: str, payload: TutorProfileRequest) -> dict[str, Any]:
+        """Save the pedagogical profile of a subject (FR-001/FR-005)."""
+        from ..tutor.models import SubjectProfile
+        from ..tutor.profiles import ProfileService
+        svc = ProfileService(tutor_store)
+        profile = SubjectProfile(
+            subject_id=subject_id,
+            domain=payload.domain,
+            level=payload.level,
+            objective=payload.objective,
+            deadline=payload.deadline,
+            available_time=payload.available_time,
+            prerequisites=payload.prerequisites,
+            competencies=payload.competencies,
+            explanation_style=payload.explanation_style,
+            activities=payload.activities,
+            mastery_criteria=payload.mastery_criteria,
+            constraints=payload.constraints,
+            template_id=payload.template_id,
+        )
+        try:
+            svc.save_profile(profile)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        await _emit_tutor_event("profile_updated", subject_id=subject_id)
+        return {"profile": profile.to_dict()}
+
+    @app.post("/api/tutor/subjects/{subject_id}/profile/interpret-goal")
+    async def tutor_interpret_goal(subject_id: str, payload: TutorGoalRequest) -> dict[str, Any]:
+        """Convert a plain-language goal into pedagogical parameters (FR-004)."""
+        from ..tutor.profiles import ProfileService
+        svc = ProfileService(tutor_store)
+        if not payload.goal.strip():
+            raise HTTPException(status_code=400, detail="objectif requis")
+        return {"parameters": svc.interpret_goal(payload.goal)}
+
+    # ------------------------------------------------------------------
+    # Feature 008 — Graphe de compétences (US2) — thin transport only
+    # ------------------------------------------------------------------
+
+    @app.get("/api/tutor/subjects/{subject_id}/graph")
+    async def tutor_get_graph(subject_id: str) -> dict[str, Any]:
+        """Get the competency graph of a subject (FR-007)."""
+        from ..tutor.graph import GraphBuilder
+        return GraphBuilder(tutor_store).get_graph(subject_id)
+
+    @app.post("/api/tutor/subjects/{subject_id}/graph/build")
+    async def tutor_build_graph(subject_id: str) -> dict[str, Any]:
+        """Build/refresh the graph from imported books (FR-007..FR-009)."""
+        from ..tutor.graph import GraphBuilder
+        result = GraphBuilder(tutor_store).build(subject_id)
+        await _emit_tutor_event("graph_built", subject_id=subject_id, **result)
+        return result
+
+    @app.post("/api/tutor/graph/nodes/{node_id}/validate")
+    async def tutor_validate_node(node_id: str) -> dict[str, Any]:
+        """Mark a node as user-confirmed (FR-010)."""
+        from ..tutor.graph import GraphBuilder
+        return GraphBuilder(tutor_store).validate_node(node_id)
+
+    @app.get("/api/tutor/subjects/{subject_id}/graph/dashboard")
+    async def tutor_graph_dashboard(subject_id: str) -> dict[str, Any]:
+        """Dashboard aggregation: covered/uncovered/contradictory/unconfirmed (US5)."""
+        from ..tutor.graph import GraphBuilder
+        return GraphBuilder(tutor_store).dashboard(subject_id)
+
+    # ------------------------------------------------------------------
+    # Feature 008 — Parcours explicable (US3) — thin transport only
+    # ------------------------------------------------------------------
+
+    @app.post("/api/tutor/subjects/{subject_id}/path/generate")
+    async def tutor_generate_path(subject_id: str) -> dict[str, Any]:
+        """Generate an explainable learning path from graph + profile (FR-013)."""
+        from ..tutor.path_builder import PathBuilder
+        result = PathBuilder(tutor_store).generate(subject_id)
+        await _emit_tutor_event("path_generated", subject_id=subject_id, **result)
+        return result
+
+    @app.put("/api/tutor/subjects/{subject_id}/path")
+    async def tutor_reorder_path(subject_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Reorder / exclude path steps (FR-014)."""
+        from ..tutor.path_builder import PathBuilder
+        return PathBuilder(tutor_store).reorder(subject_id, payload.get("steps", []))
+
+    # ------------------------------------------------------------------
+    # Feature 008 — Adaptation locale (US4) — thin transport only
+    # ------------------------------------------------------------------
+
+    @app.get("/api/tutor/subjects/{subject_id}/adaptation/stability")
+    async def tutor_stability_portion(subject_id: str) -> dict[str, Any]:
+        """Stability portion: objectives, main notion, success criterion (FR-019)."""
+        from ..tutor.adaptation import AdaptationService
+        return AdaptationService(tutor_store).stability_portion(subject_id)
+
+    @app.post("/api/tutor/subjects/{subject_id}/adaptation/recompute")
+    async def tutor_recompute_window(subject_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Recompute only a window of path steps (FR-016)."""
+        from ..tutor.adaptation import AdaptationService
+        anchor = (payload or {}).get("anchor_step_id")
+        return AdaptationService(tutor_store).recompute_window(subject_id, anchor)
+
+    # ------------------------------------------------------------------
+    # Feature 008 — Capture de programme par OCR (US6) — thin transport
+    # ------------------------------------------------------------------
+
+    @app.post("/api/tutor/subjects/{subject_id}/program/capture")
+    async def tutor_capture_program(subject_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Start a program capture from a photo/PDF path (FR-023)."""
+        from ..tutor.program_capture import ProgramCaptureService
+        svc = ProgramCaptureService(tutor_store, tutor_service.document_parser)
+        result = await svc.capture(
+            subject_id,
+            str(payload.get("path", "")),
+            source_type=str(payload.get("source_type", "photo")),
+        )
+        await _emit_tutor_event(
+            "program_status",
+            subject_id=subject_id,
+            status=result.get("program", {}).get("status", "processing"),
+        )
+        return result
+
+    @app.get("/api/tutor/subjects/{subject_id}/program/{program_id}")
+    async def tutor_get_program(subject_id: str, program_id: str) -> dict[str, Any]:
+        """Get a captured program with its node tree (FR-024)."""
+        from ..tutor.program_capture import ProgramCaptureService
+        return ProgramCaptureService(tutor_store).get(program_id)
+
+    @app.put("/api/tutor/subjects/{subject_id}/program/{program_id}/nodes/{node_id}")
+    async def tutor_correct_program_node(subject_id: str, program_id: str,
+                                         node_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Correct an OCR node before path generation (FR-027)."""
+        from ..tutor.program_capture import ProgramCaptureService
+        return ProgramCaptureService(tutor_store).correct_node(
+            node_id, str(payload.get("title", "")))
+
+    @app.post("/api/tutor/subjects/{subject_id}/program/{program_id}/confirm")
+    async def tutor_confirm_program(subject_id: str, program_id: str) -> dict[str, Any]:
+        """Confirm the whole captured program (FR-026)."""
+        from ..tutor.program_capture import ProgramCaptureService
+        return ProgramCaptureService(tutor_store).confirm(program_id)
+
+    # ------------------------------------------------------------------
     # REST: tutor practice (004-local-ai-tutor, US4) — thin transport only
     # Routes follow contracts/tutor-rest-api.md (subject/exercise-scoped) and
     # also expose the simplified aliases enumerated in task T035.
@@ -853,6 +1240,7 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         if subj is None:
             subjects = tutor_store.list_subjects()
             if not subjects:
+                _log_error(config, "tutor-resolve", "aucun sujet")
                 raise HTTPException(status_code=400, detail="aucun sujet")
             subj = subjects[0]
         return subj.id
@@ -867,17 +1255,32 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
     async def tutor_create_concept(subject_id: str, payload: TutorConceptRequest) -> dict[str, Any]:
         """Create/upsert a concept (so the practice view can target notions)."""
         if not payload.name.strip():
+            _log_error(config, "tutor-concept", "nom de concept requis")
             raise HTTPException(status_code=400, detail="nom de concept requis")
-        concept = tutor_store.upsert_concept(subject_id, payload.name.strip(), payload.path_rank)
+        try:
+            concept = tutor_store.upsert_concept(subject_id, payload.name.strip(), payload.path_rank)
+        except KeyError as exc:
+            _log_error(config, "tutor-concept", f"concept sujet introuvable: {exc}", traceback.format_exc())
+            raise HTTPException(status_code=400, detail="sujet introuvable") from exc
+        except ValueError as exc:
+            _log_error(config, "tutor-concept", f"concept invalide: {exc}", traceback.format_exc())
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return concept.to_dict()
 
     @app.post("/api/tutor/exercises")
     async def tutor_create_exercise(payload: TutorExerciseRequest) -> dict[str, Any]:
         """Generate an exercise (no solution field — INVARIANT 3)."""
+        if not payload.concept_id or not payload.concept_id.strip():
+            _log_error(config, "tutor-exercise", "concept_id requis")
+            raise HTTPException(status_code=400, detail="concept_id requis")
         try:
             ex = await tutor_service.generate_exercise(payload.concept_id, payload.difficulty)
-        except KeyError:
-            raise HTTPException(status_code=404, detail="concept introuvable")
+        except KeyError as exc:
+            _log_error(config, "tutor-exercise", f"concept introuvable: {exc}", traceback.format_exc())
+            raise HTTPException(status_code=400, detail="concept introuvable") from exc
+        except ValueError as exc:
+            _log_error(config, "tutor-exercise", f"exercise invalide: {exc}", traceback.format_exc())
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         # Never leak the solution through grading/generation (INVARIANT 3).
         return {
             "id": ex.id,
@@ -891,12 +1294,16 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         }
 
     async def _do_grade(exercise_id: str, answer: str, reveal_hint: bool) -> dict[str, Any]:
+        if not exercise_id or not exercise_id.strip():
+            _log_error(config, "tutor-grade", "exercise_id requis")
+            raise HTTPException(status_code=400, detail="exercise_id requis")
         try:
             result = await tutor_service.grade_answer(
                 exercise_id, answer, reveal_hint=reveal_hint
             )
-        except KeyError:
-            raise HTTPException(status_code=404, detail="exercice introuvable")
+        except KeyError as exc:
+            _log_error(config, "tutor-grade", f"exercice introuvable: {exc}", traceback.format_exc())
+            raise HTTPException(status_code=400, detail="exercice introuvable") from exc
         return {
             "verdict": result.verdict,
             "feedback": result.feedback,
@@ -911,6 +1318,7 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
     @app.post("/api/tutor/answers")
     async def tutor_grade_answer_alias(payload: TutorAnswerAliasRequest) -> dict[str, Any]:
         if not payload.exercise_id:
+            _log_error(config, "tutor-grade", "exercise_id requis (alias)")
             raise HTTPException(status_code=400, detail="exercise_id requis")
         return await _do_grade(payload.exercise_id, payload.answer, payload.reveal_hint)
 
@@ -935,6 +1343,7 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
     @app.post("/api/tutor/solution")
     async def tutor_request_solution_alias(payload: TutorSolutionAliasRequest) -> dict[str, Any]:
         if not payload.exercise_id:
+            _log_error(config, "tutor-solution", "exercise_id requis (alias)")
             raise HTTPException(status_code=400, detail="exercise_id requis")
         return await _do_solution(payload.exercise_id, payload.explicit)
 
@@ -1204,6 +1613,7 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         Returns grouped book/chapter/page rows.
         """
         if not notion.strip():
+            _log_error(config, "tutor-locate", "notion requis")
             raise HTTPException(status_code=400, detail="notion requis")
         try:
             rows = tutor_service.retriever.locate(subject_id, notion.strip())
@@ -1219,6 +1629,7 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         call.
         """
         if not notion.strip():
+            _log_error(config, "tutor-rank", "notion requis")
             raise HTTPException(status_code=400, detail="notion requis")
         try:
             ranked = tutor_service.retriever.rank_books(
@@ -1238,6 +1649,7 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         """
         notion = (payload.notion or "").strip()
         if not notion:
+            _log_error(config, "tutor-compare", "notion requis")
             raise HTTPException(status_code=400, detail="notion requis")
         try:
             subject = tutor_store._get_subject(subject_id)
@@ -1366,8 +1778,24 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                 }
 
     async def _tutor_models_payload() -> dict[str, Any]:
-        # Build the client from the CURRENT config so the dropdown reflects
-        # the provider selected in Réglages (not the one captured at startup).
+        # Toujours lister les modèles Ollama locaux (groupe "ollama" en premier)
+        # ET les modèles du fournisseur cloud configuré, pour pouvoir basculer
+        # entre les deux depuis la liste déroulante.
+        # NB : quand llm_provider == "openai", tutor_client est un
+        # OpenAICompatProvider — il faut donc un client Ollama dédié pour
+        # lister les modèles locaux.
+        ollama_names: list[str] = []
+        try:
+            from ..client import OllamaClient
+            ollama = OllamaClient()
+            try:
+                ollama_names = [m.name for m in await ollama.list_models()]
+            finally:
+                await ollama.close()
+        except Exception:
+            ollama_names = []  # Ollama hors ligne : on garde le cloud.
+
+        cloud_names: list[str] = []
         if config.llm_provider == "openai" and config.llm_base_url:
             from ..tutor.providers.openai_compat import OpenAICompatProvider
             probe = OpenAICompatProvider(
@@ -1375,20 +1803,24 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                 api_key=config.llm_api_key or None,
             )
             try:
-                models = await probe.list_models()
+                cloud_names = [m.name for m in await probe.list_models()]
             except Exception:
-                models = []
+                cloud_names = []
             finally:
                 await probe.close()
-        else:
-            try:
-                models = await tutor_client.list_models()
-            except Exception:
-                models = []  # UI must stay functional offline.
-        names = [m.name for m in models]
+
+        # Fusion sans doublons : Ollama d'abord, puis cloud.
+        names = list(dict.fromkeys(ollama_names + cloud_names))
         return {
             "embedding": names,
             "llm": names,
+            # Sources séparées pour que l'UI regroupe correctement les modèles
+            # Ollama (même ceux contenant "/" comme ibm/granite-embedding:…)
+            # sous le groupe "ollama", distincts des modèles cloud.
+            "sources": {
+                "ollama": ollama_names,
+                "cloud": cloud_names,
+            },
             "current": {
                 "embedding": config.tutor_embedding_model,
                 "llm": config.tutor_model,
@@ -1718,6 +2150,275 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         return {"active": n}
 
     # ------------------------------------------------------------------
+    # Feature 008 — Photo de conversation (US7) — thin transport
+    # ------------------------------------------------------------------
+
+    @app.post("/api/tutor/conversations/{conversation_id}/photo")
+    async def conversation_photo_import(conversation_id: str,
+                                        payload: dict[str, Any]) -> dict[str, Any]:
+        """Import a photo into a conversation (FR-031)."""
+        from ..tutor.conversation_photo import ConversationPhotoService
+        svc = ConversationPhotoService(tutor_store, tutor_service.document_parser)
+        result = await svc.import_photo(
+            conversation_id, str(payload.get("path", "")))
+        await _emit_tutor_event(
+            "photo_status",
+            conversation_id=conversation_id,
+            status=result.get("confirmation_status", "pending"),
+        )
+        return result
+
+    @app.post("/api/tutor/conversation-photos/{photo_id}/confirm")
+    async def conversation_photo_confirm(photo_id: str) -> dict[str, Any]:
+        """Confirm a conversation photo (FR-031/FR-032)."""
+        from ..tutor.conversation_photo import ConversationPhotoService
+        return ConversationPhotoService(tutor_store).confirm(photo_id)
+
+    @app.get("/api/tutor/conversation-photos/{photo_id}")
+    async def conversation_photo_get(photo_id: str) -> dict[str, Any]:
+        """Get a conversation photo."""
+        from ..tutor.conversation_photo import ConversationPhotoService
+        return ConversationPhotoService(tutor_store).get(photo_id)
+
+    # ------------------------------------------------------------------
+    # Feature 008 — Multi-utilisateur familial (US9) — thin transport
+    # ------------------------------------------------------------------
+
+    @app.get("/api/tutor/learners")
+    async def learners_list() -> dict[str, Any]:
+        """List all learner profiles (FR-038)."""
+        from ..tutor.learners import LearnerService
+        return LearnerService(tutor_store).list()
+
+    @app.post("/api/tutor/learners")
+    async def learners_create(payload: TutorLearnerRequest) -> dict[str, Any]:
+        """Create a learner profile (FR-038)."""
+        from ..tutor.learners import LearnerService
+        return LearnerService(tutor_store).create(payload.name, avatar=payload.avatar)
+
+    @app.post("/api/tutor/learners/{learner_id}/activate")
+    async def learners_activate(learner_id: str) -> dict[str, Any]:
+        """Select a learner; returns its scoped subjects (FR-039)."""
+        from ..tutor.learners import LearnerService
+        try:
+            return LearnerService(tutor_store).activate(learner_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Apprenant inconnu") from exc
+
+    @app.delete("/api/tutor/learners/{learner_id}")
+    async def learners_delete(learner_id: str) -> dict[str, Any]:
+        """Delete a learner and cascade its data (FR-039 edge case)."""
+        from ..tutor.learners import LearnerService
+        try:
+            return LearnerService(tutor_store).delete(learner_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Apprenant inconnu") from exc
+
+    # ------------------------------------------------------------------
+    # Feature 008 — Carnet de matière (US8) — thin transport only
+    # ------------------------------------------------------------------
+
+    def _notebook_service():
+        """Build a NotebookService wired to the tutor LLM when available."""
+        from ..tutor.notebook import NotebookService
+        llm = getattr(tutor_service, "_llm_client", None)
+        return NotebookService(tutor_store, llm=llm)
+
+    @app.get("/api/tutor/subjects/{subject_id}/notebook")
+    async def notebook_get(subject_id: str) -> dict[str, Any]:
+        """Return the subject notebook with sources and outputs (FR-034/FR-035)."""
+        return _notebook_service().get(subject_id)
+
+    @app.post("/api/tutor/subjects/{subject_id}/notebook/notes")
+    async def notebook_add_note(
+        subject_id: str, payload: TutorNotebookNoteRequest
+    ) -> dict[str, Any]:
+        """Add a personal note (FR-032)."""
+        try:
+            return _notebook_service().add_note(subject_id, payload.note)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/tutor/subjects/{subject_id}/notebook/actions")
+    async def notebook_run_action(
+        subject_id: str, payload: TutorNotebookActionRequest
+    ) -> dict[str, Any]:
+        """Execute a notebook RAG action (FR-033)."""
+        try:
+            result = await _notebook_service().run_action(
+                subject_id, payload.action, payload.params
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await _emit_tutor_event(
+            "notebook_output",
+            subject_id=subject_id,
+            output_id=result.get("output", {}).get("id"),
+            kind=result.get("output", {}).get("kind"),
+        )
+        return result
+
+    @app.delete("/api/tutor/notebook-outputs/{output_id}")
+    async def notebook_delete_output(output_id: str) -> dict[str, Any]:
+        """Delete a notebook output (FR-035)."""
+        return _notebook_service().delete_output(output_id)
+
+    # ------------------------------------------------------------------
+    # REST: Lesson discussion centrée (Feature 009, US1) — thin transport
+    # ------------------------------------------------------------------
+
+    @app.post("/api/tutor/path-steps/{step_id}/discussion")
+    async def lesson_discussion_create(step_id: str, request: Request) -> dict[str, Any]:
+        """Create or return existing lesson discussion for a path step.
+
+        Learner identity via ``X-Learner-Id`` header or ``learner_id`` query param.
+        """
+        learner_id = request.headers.get("x-learner-id") or request.query_params.get("learner_id") or ""
+        learner_id = learner_id.strip()
+        if not learner_id:
+            raise HTTPException(status_code=400, detail="learner_id requis (header X-Learner-Id ou query param)")
+        from ..tutor.lesson_discussion import LessonDiscussionService
+        svc = LessonDiscussionService(tutor_store)
+        try:
+            disc = svc.get_or_create_discussion(step_id, learner_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Étape inconnue")
+        except Exception as exc:
+            _log_error(config, "lesson-discussion-create", f"create discussion step {step_id}: {exc}", traceback.format_exc())
+            raise HTTPException(status_code=500, detail="Création de la discussion impossible (voir errors.log)")
+        return {"discussion": disc.to_dict()}
+
+    @app.get("/api/tutor/lesson-discussions/{discussion_id}")
+    async def lesson_discussion_get(discussion_id: str) -> dict[str, Any]:
+        """Return discussion with messages, generated_contents, exercise_attempts (FR-010)."""
+        from ..tutor.lesson_discussion import LessonDiscussionService
+        svc = LessonDiscussionService(tutor_store)
+        try:
+            payload = svc.get_discussion(discussion_id)
+        except Exception as exc:
+            _log_error(config, "lesson-discussion-get", f"get discussion {discussion_id}: {exc}", traceback.format_exc())
+            raise HTTPException(status_code=500, detail="Lecture de la discussion impossible (voir errors.log)")
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Discussion inconnue")
+        return payload
+
+    @app.post("/api/tutor/lesson-discussions/{discussion_id}/generate-course")
+    async def lesson_generate_course(discussion_id: str, request: Request) -> dict[str, Any]:
+        """Generate a full course for the lesson (FR-004/FR-015)."""
+        from ..tutor.lesson_discussion import LessonDiscussionService
+        # learner_id optional — validate if provided
+        learner_id = request.headers.get("x-learner-id") or request.query_params.get("learner_id") or None
+        if learner_id is not None:
+            learner_id = learner_id.strip() or None
+        svc = LessonDiscussionService(tutor_store, tutor_service=tutor_service)
+        try:
+            content = svc.generate_course(discussion_id, learner_id=learner_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Discussion inconnue")
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        except Exception as exc:
+            _log_error(config, "lesson-course", f"generate-course {discussion_id}: {exc}", traceback.format_exc())
+            raise HTTPException(status_code=500, detail="Génération du cours impossible (voir errors.log)")
+        return {"content": content}
+
+    @app.post("/api/tutor/lesson-discussions/{discussion_id}/generate-summary")
+    async def lesson_generate_summary(discussion_id: str, request: Request) -> dict[str, Any]:
+        """Generate a condensed summary (FR-005/FR-015) — independent if no course."""
+        from ..tutor.lesson_discussion import LessonDiscussionService
+        learner_id = request.headers.get("x-learner-id") or request.query_params.get("learner_id") or None
+        if learner_id is not None:
+            learner_id = learner_id.strip() or None
+        svc = LessonDiscussionService(tutor_store, tutor_service=tutor_service)
+        try:
+            content = svc.generate_summary(discussion_id, learner_id=learner_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Discussion inconnue")
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        except Exception as exc:
+            _log_error(config, "lesson-summary", f"generate-summary {discussion_id}: {exc}", traceback.format_exc())
+            raise HTTPException(status_code=500, detail="Génération de la synthèse impossible (voir errors.log)")
+        return {"content": content}
+
+    @app.post("/api/tutor/lesson-discussions/{discussion_id}/exercises")
+    async def lesson_generate_exercises(discussion_id: str, request: Request) -> dict[str, Any]:
+        """Generate 3–5 exercises for the lesson (FR-006)."""
+        from ..tutor.lesson_discussion import LessonDiscussionService
+        learner_id = request.headers.get("x-learner-id") or request.query_params.get("learner_id") or None
+        if learner_id is not None:
+            learner_id = learner_id.strip() or None
+        svc = LessonDiscussionService(tutor_store, tutor_service=tutor_service)
+        try:
+            attempt = svc.generate_exercises(discussion_id, learner_id=learner_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Discussion inconnue")
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        except Exception as exc:
+            _log_error(config, "lesson-exercises", f"generate-exercises {discussion_id}: {exc}", traceback.format_exc())
+            raise HTTPException(status_code=500, detail="Génération des exercices impossible (voir errors.log)")
+        return {"attempt": attempt}
+
+    @app.post("/api/tutor/lesson-discussions/{discussion_id}/exercises/{attempt_id}/submit")
+    async def lesson_submit_exercises(discussion_id: str, attempt_id: str, request: Request) -> dict[str, Any]:
+        """Evaluate exercise answers, compute score, update status (FR-007/FR-008)."""
+        from ..tutor.lesson_discussion import LessonDiscussionService
+        learner_id = request.headers.get("x-learner-id") or request.query_params.get("learner_id") or None
+        if learner_id is not None:
+            learner_id = learner_id.strip() or None
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        answers = body.get("answers", body) if isinstance(body, dict) else {}
+        # allow direct mapping or nested {"answers": {...}}
+        if isinstance(answers, dict) and "answers" in answers and isinstance(answers["answers"], dict):
+            answers = answers["answers"]
+        if not isinstance(answers, dict):
+            answers = {}
+        svc = LessonDiscussionService(tutor_store, tutor_service=tutor_service)
+        try:
+            result = svc.submit_exercises(discussion_id, attempt_id, answers, learner_id=learner_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Discussion ou tentative inconnue")
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            _log_error(config, "lesson-submit", f"submit {discussion_id}/{attempt_id}: {exc}", traceback.format_exc())
+            raise HTTPException(status_code=500, detail="Évaluation impossible (voir errors.log)")
+        return {"attempt": result}
+
+    async def _lesson_complete_impl(discussion_id: str, request: Request) -> dict[str, Any]:
+        from ..tutor.lesson_discussion import LessonDiscussionService
+        learner_id = request.headers.get("x-learner-id") or request.query_params.get("learner_id") or None
+        if learner_id is not None:
+            learner_id = learner_id.strip() or None
+        svc = LessonDiscussionService(tutor_store, tutor_service=tutor_service)
+        try:
+            res = svc.complete_manual(discussion_id, learner_id=learner_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Discussion inconnue")
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        except Exception as exc:
+            _log_error(config, "lesson-complete", f"complete {discussion_id}: {exc}", traceback.format_exc())
+            raise HTTPException(status_code=500, detail="Validation manuelle impossible (voir errors.log)")
+        return res
+
+    @app.post("/api/tutor/lesson-discussions/{discussion_id}/complete")
+    async def lesson_complete(discussion_id: str, request: Request) -> dict[str, Any]:
+        """Force completion regardless of score (FR-008)."""
+        return await _lesson_complete_impl(discussion_id, request)
+
+    @app.post("/api/tutor/lesson-discussions/{discussion_id}/complete-manual")
+    async def lesson_complete_manual(discussion_id: str, request: Request) -> dict[str, Any]:
+        """Alias for manual completion (FR-008)."""
+        return await _lesson_complete_impl(discussion_id, request)
+
+    # ------------------------------------------------------------------
     # REST: Learning paths — Parcours (Feature 006 — adaptive learning)
     # ------------------------------------------------------------------
 
@@ -1741,21 +2442,78 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             subject_id, title, body.get("description", "")
         )
 
+    def _enrich_steps_with_discussion(steps: list[dict[str, Any]], learner_id: str | None) -> list[dict[str, Any]]:
+        """Add ``discussion_id`` per step via lesson_discussions lookup filtered by learner_id."""
+        if not learner_id:
+            for s in steps:
+                s["discussion_id"] = None
+            return steps
+        for s in steps:
+            try:
+                row = tutor_store._conn.execute(
+                    "SELECT id FROM lesson_discussions WHERE path_step_id = ? AND learner_id = ? LIMIT 1",
+                    (s.get("id"), learner_id),
+                ).fetchone()
+                s["discussion_id"] = row["id"] if row is not None else None
+            except Exception:
+                s["discussion_id"] = None
+        return steps
+
     @app.get("/api/tutor/paths")
-    async def list_paths(subject_id: str | None = None) -> dict[str, Any]:
-        sid = subject_id or _active_subject_id()
+    async def list_paths(request: Request, subject_id: str | None = None) -> dict[str, Any]:
+        sid = subject_id or request.query_params.get("subject_id") or _active_subject_id()
         if not sid:
             raise HTTPException(status_code=400, detail="subject_id requis")
         if tutor_store.get_subject(sid) is None:
             raise HTTPException(status_code=404, detail="Sujet inconnu")
-        return {"paths": tutor_service.list_paths(sid)}
+        learner_id = request.headers.get("x-learner-id") or request.query_params.get("learner_id")
+        learner_id = learner_id.strip() if isinstance(learner_id, str) and learner_id.strip() else None
+        paths = tutor_service.list_paths(sid)
+        # Enrich each path with steps including status + discussion_id and progress counts
+        for p in paths:
+            steps = [s.to_dict() for s in tutor_store.list_path_steps(p["id"])]
+            _enrich_steps_with_discussion(steps, learner_id)
+            p["steps"] = steps
+            completed = sum(1 for s in steps if s.get("status") == "completed")
+            total = len(steps)
+            p["progress_count"] = f"{completed}/{total}" if total else "0/0"
+            p["completed"] = completed
+            p["total"] = total
+            if total:
+                p["progress"] = round(completed / total * 100, 1)
+            else:
+                p["progress"] = 0.0
+        return {"paths": paths}
 
     @app.get("/api/tutor/paths/{path_id}")
-    async def get_path(path_id: str) -> dict[str, Any]:
+    async def get_path(request: Request, path_id: str) -> dict[str, Any]:
+        learner_id = request.headers.get("x-learner-id") or request.query_params.get("learner_id")
+        learner_id = learner_id.strip() if isinstance(learner_id, str) and learner_id.strip() else None
         path = tutor_service.get_path(path_id)
         if path is None:
             raise HTTPException(404, "Parcours inconnu")
+        steps = path.get("steps") or []
+        _enrich_steps_with_discussion(steps, learner_id)
+        path["steps"] = steps
+        completed = sum(1 for s in steps if s.get("status") == "completed")
+        total = len(steps)
+        path["progress_count"] = f"{completed}/{total}" if total else "0/0"
+        path["completed"] = completed
+        path["total"] = total
         return path
+
+    @app.get("/api/tutor/path-steps")
+    async def list_path_steps(request: Request, path_id: str | None = None) -> dict[str, Any]:
+        learner_id = request.headers.get("x-learner-id") or request.query_params.get("learner_id")
+        learner_id = learner_id.strip() if isinstance(learner_id, str) and learner_id.strip() else None
+        pid = path_id or request.query_params.get("path_id")
+        if not pid:
+            raise HTTPException(status_code=400, detail="path_id requis (query param path_id)")
+        if tutor_store.get_learning_path(pid) is None:
+            raise HTTPException(status_code=404, detail="Parcours inconnu")
+        steps = [s.to_dict() for s in tutor_store.list_path_steps(pid)]
+        _enrich_steps_with_discussion(steps, learner_id)
+        return {"steps": steps, "path_id": pid}
 
     @app.put("/api/tutor/paths/{path_id}")
     async def update_path(path_id: str, request: Request) -> dict[str, Any]:
@@ -1810,6 +2568,28 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         if not tutor_service.delete_path_step(step_id):
             raise HTTPException(404, "Étape inconnue")
         return {"ok": True}
+
+    @app.post("/api/tutor/subjects/{subject_id}/path/generate-from-books")
+    async def generate_path_from_books(subject_id: str, request: Request) -> dict[str, Any]:
+        body = await request.json()
+        book_ids = body.get("book_ids", [])
+        if not book_ids:
+            raise HTTPException(400, "book_ids requis")
+        if tutor_store.get_subject(subject_id) is None:
+            raise HTTPException(404, "Sujet inconnu")
+        result = await tutor_service.generate_path_from_books(subject_id, book_ids)
+        return result
+
+    @app.post("/api/tutor/subjects/{subject_id}/path/from-program")
+    async def path_from_program(subject_id: str, request: Request) -> dict[str, Any]:
+        body = await request.json()
+        program_id = body.get("program_id", "")
+        if not program_id:
+            raise HTTPException(400, "program_id requis")
+        if tutor_store.get_subject(subject_id) is None:
+            raise HTTPException(404, "Sujet inconnu")
+        result = tutor_service.path_from_program(subject_id, program_id)
+        return result
 
     # ------------------------------------------------------------------
     # REST: Domain classification (Feature 006 — adaptive learning)
@@ -1984,6 +2764,7 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             return
 
         await ws.accept()
+        app.state.tutor_ws_clients.add(ws)
 
         async def send(payload: dict[str, Any]) -> None:
             await ws.send_json(payload)
@@ -2005,7 +2786,13 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                 for s in tutor_store.list_subjects():
                     if s.id == ref_s or s.name.lower() == ref_s.lower():
                         return s
-            return tutor_store.active_subject()
+            subject = tutor_store.active_subject()
+            if subject is not None:
+                return subject
+            subjects = tutor_store.list_subjects()
+            if subjects:
+                return subjects[0]
+            return None
 
         cancel_event = asyncio.Event()
         run_task: asyncio.Task | None = None
@@ -2204,12 +2991,32 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
 
                 subject = _resolve_subject(data)
                 if subject is None:
-                    await send({
-                        "type": "error",
-                        "code": "no_subject",
-                        "message": "Aucun sujet actif pour le tuteur.",
-                    })
-                    continue
+                    # Fallback: auto-create default subject when DB is empty
+                    try:
+                        subjects = tutor_store.list_subjects()
+                        if subjects:
+                            subject = subjects[0]
+                        else:
+                            try:
+                                subject = tutor_store.create_subject("Général")
+                            except ValueError:
+                                # race / case-insensitive duplicate
+                                subjects = tutor_store.list_subjects()
+                                subject = subjects[0] if subjects else None
+                            if subject is not None:
+                                try:
+                                    tutor_store.select_subject(subject.id)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        subject = None
+                    if subject is None:
+                        await send({
+                            "type": "error",
+                            "code": "no_subject",
+                            "message": "Aucun sujet actif pour le tuteur.",
+                        })
+                        continue
 
                 cancel_event.clear()
                 run_task = asyncio.ensure_future(
@@ -2235,5 +3042,6 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         finally:
             # A dropped socket cancels the in-flight run so it does not leak.
             cancel_event.set()
+            app.state.tutor_ws_clients.discard(ws)
 
     return app

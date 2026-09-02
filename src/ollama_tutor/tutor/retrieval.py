@@ -19,15 +19,45 @@ UI-framework-free by contract (no textual/fastapi imports).
 
 from __future__ import annotations
 
+import logging
 import math
-import numpy as np
+import traceback
+from pathlib import Path
 from typing import Any
 
 from .store import LibraryStore
 import re
 
+import numpy as np
+
 from .vector import NumpyVectorIndex, ScoredChunk
 from .reranker import SimpleReranker
+
+logger = logging.getLogger(__name__)
+
+
+def _log_pg_error(store: Any, message: str, exc: BaseException | None = None) -> None:
+    """Best-effort PG error logging to errors.log + logger.warning."""
+    detail = traceback.format_exc() if exc is not None else ""
+    # Try file logging via store's config_dir if available
+    try:
+        cfg_dir = getattr(store, "config_dir", None)
+        if cfg_dir is not None:
+            log_file = Path(cfg_dir) / "errors.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            import datetime
+
+            ts = datetime.datetime.now().isoformat(timespec="seconds")
+            with log_file.open("a", encoding="utf-8") as f:
+                f.write(f"[{ts}] [retrieval-pgvector] {message}\n")
+                if detail:
+                    f.write(f"{detail}\n")
+    except Exception:
+        pass
+    if exc is not None:
+        logger.warning("%s: %s\n%s", message, exc, detail)
+    else:
+        logger.warning("%s", message)
 
 # Retrieval floor (research D11): chunks below this cosine score are dropped.
 DEFAULT_FLOOR = 0.25
@@ -354,13 +384,32 @@ class Retriever:
 
     def _index_for(self, subject_id: str) -> tuple[NumpyVectorIndex, dict[str, dict], dict[str, str]]:
         if subject_id not in self._cache:
+            # PGVector path: store handles SQL search; we still build minimal meta
+            # for title resolution. Vector index is empty when pgvector enabled
+            # because retrieve() will use SQL instead of NumpyVectorIndex.
+            pg_enabled = bool(getattr(self.store, "pgvector_enabled", False))
+            if pg_enabled:
+                # Lightweight: fetch meta rows for titles; vector index stays empty
+                try:
+                    rows = self.store.get_indexed_chunks_pg(subject_id, model=self.model)
+                except Exception as exc:
+                    _log_pg_error(self.store, f"get_indexed_chunks_pg failed for subject {subject_id}, falling back to SQLite", exc)
+                    self._cache.pop(subject_id, None)
+                    rows = self.store.get_indexed_chunks(subject_id, model=self.model)
+                meta: dict[str, dict] = {r["id"]: r for r in rows}
+                idx = NumpyVectorIndex()
+                titles: dict[str, str] = {}
+                for b in self.store.list_books(subject_id):
+                    titles[b.id] = b.title
+                self._cache[subject_id] = (idx, meta, titles)
+                return self._cache[subject_id]
             idx = NumpyVectorIndex()
             # Provenance : seuls les chunks embeddés par LE modèle courant
             # entrent dans l'index (005-suite — empêche le mélange de
             # vecteurs incompatibles entre modèles d'embedding).
             rows = self.store.get_indexed_chunks(subject_id, model=self.model)
             items: list[tuple[str, list[float]]] = []
-            meta: dict[str, dict] = {}
+            meta = {}
             for r in rows:
                 emb = r.get("embedding")
                 if emb:
@@ -368,10 +417,30 @@ class Retriever:
                     items.append((r["id"], vec))
                     meta[r["id"]] = r
             idx.add(items)
-            titles: dict[str, str] = {}
+            titles = {}
             for b in self.store.list_books(subject_id):
                 titles[b.id] = b.title
             self._cache[subject_id] = (idx, meta, titles)
+        return self._cache[subject_id]
+
+    def _index_for_sqlite_fallback(self, subject_id: str) -> tuple[NumpyVectorIndex, dict[str, dict], dict[str, str]]:
+        """Rebuild cache via SQLite after PG failure (ensures floor/book_ids filtering works)."""
+        self._cache.pop(subject_id, None)
+        idx = NumpyVectorIndex()
+        rows = self.store.get_indexed_chunks(subject_id, model=self.model)
+        items: list[tuple[str, list[float]]] = []
+        meta: dict[str, dict] = {}
+        for r in rows:
+            emb = r.get("embedding")
+            if emb:
+                vec = np.frombuffer(emb, dtype=np.float32).tolist()
+                items.append((r["id"], vec))
+                meta[r["id"]] = r
+        idx.add(items)
+        titles: dict[str, str] = {}
+        for b in self.store.list_books(subject_id):
+            titles[b.id] = b.title
+        self._cache[subject_id] = (idx, meta, titles)
         return self._cache[subject_id]
 
     def invalidate(self, subject_id: str) -> None:
@@ -403,9 +472,52 @@ class Retriever:
         if not vectors or not vectors[0]:
             return []
         scope = {str(b) for b in book_ids} if book_ids is not None else None
+        pg_enabled = bool(getattr(self.store, "pgvector_enabled", False))
+        # PG vector path: SQL search ORDER BY embedding <=> %s
+        if pg_enabled:
+            try:
+                search_k = max(k, 24) * 3 if scope is not None else k
+                # over-fetch for reranker
+                fetch_k_pg = k * 3 if self.reranker is not None else k
+                # need more candidates before scope filter
+                pg_k = max(search_k, fetch_k_pg * 2)
+                scored_pg = self.store.search_similar_pg(
+                    subject_id, vectors[0], k=pg_k, floor=self.floor, book_ids=book_ids
+                )
+                out: list[ScoredChunk] = []
+                for cid, score in scored_pg:
+                    r = meta.get(cid, {})
+                    # fallback: try sqlite row if missing
+                    if not r:
+                        # fetch single row? skip
+                        continue
+                    book_id = str(r.get("book_id", ""))
+                    if scope is not None and book_id not in scope:
+                        continue
+                    out.append(ScoredChunk(
+                        chunk_id=cid,
+                        book_id=book_id,
+                        book_title=titles.get(book_id, book_id),
+                        chapter=r.get("chapter"),
+                        page=r.get("page"),
+                        score=score,
+                        text=r.get("text", ""),
+                    ))
+                    if len(out) >= fetch_k_pg:
+                        break
+                if self.reranker is not None and out:
+                    out = self.reranker.rerank(question, out, top_k=k)
+                return out
+            except Exception as exc:
+                _log_pg_error(self.store, f"search_similar_pg failed for subject {subject_id}, falling back to NumpyVectorIndex", exc)
+                self._cache.pop(subject_id, None)
+                # Re-resolve index/meta/titles from SQLite after invalidation so
+                # floor/book_ids filtering still works via the numpy path below.
+                # Force rebuild of sqlite index if cache was PG-based (empty vector index).
+                idx, meta, titles = self._index_for_sqlite_fallback(subject_id)
         search_k = max(k, 24) * 3 if scope is not None else k
         scored = idx.search(vectors[0], search_k, floor=self.floor)
-        out: list[ScoredChunk] = []
+        out = []
         # When reranking, over-fetch so the reranker has a broader pool to
         # reorder; otherwise collect exactly *k* candidates.
         fetch_k = k * 3 if self.reranker is not None else k

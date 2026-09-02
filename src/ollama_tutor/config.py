@@ -22,15 +22,25 @@ def _valid_hhmm(value: str, fallback: str) -> str:
 
 
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "ollama-tui"
-
 _VALID_TUTOR_LEVELS = {"beginner", "intermediate", "advanced", "expert"}
-
 
 class Config:
     """Application configuration."""
 
     def __init__(self, config_dir: Path | None = None) -> None:
-        self.config_dir = config_dir or DEFAULT_CONFIG_DIR
+        if config_dir is not None:
+            self.config_dir = config_dir
+        else:
+            env = os.environ.get("EDUNEXUS_DATA_DIR")
+            if env:
+                self.config_dir = Path(env)
+            else:
+                try:
+                    from .utils.platform import get_config_dir
+
+                    self.config_dir = get_config_dir()
+                except Exception:
+                    self.config_dir = DEFAULT_CONFIG_DIR
         self.config_file = self.config_dir / "config.json"
         self.presets_file = self.config_dir / "presets.json"
         self.history_dir = self.config_dir / "history"
@@ -432,6 +442,30 @@ class Config:
 
     # --- Tutor GGUF/llama.cpp paths (Phase 0; empty = feature disabled) ---
 
+    # ------------------------------------------------------------------
+    # PGVector (migration plan — SQLite default, opt-in PG)
+    # ------------------------------------------------------------------
+
+    @property
+    def pgvector_enabled(self) -> bool:
+        return bool(self._data.get("tutor", {}).get("pgvector_enabled", False))
+
+    @pgvector_enabled.setter
+    def pgvector_enabled(self, value: bool) -> None:
+        self._data.setdefault("tutor", {})["pgvector_enabled"] = bool(value)
+        self._schedule_save()
+
+    @property
+    def pgvector_dsn(self) -> str:
+        return self._data.get("tutor", {}).get(
+            "pgvector_dsn", "postgresql://postgres:postgres@localhost:5432/edunexus"
+        )
+
+    @pgvector_dsn.setter
+    def pgvector_dsn(self, value: str) -> None:
+        self._data.setdefault("tutor", {})["pgvector_dsn"] = str(value)
+        self._schedule_save()
+
     @property
     def tutor_llama_bin(self) -> str:
         return self._data.get("tutor", {}).get("llama_bin", "")
@@ -660,4 +694,6 @@ class Config:
             "nightly_max_runtime_minutes": self.tutor_nightly_max_runtime_minutes,
             "nightly_prepare_enabled": self.tutor_nightly_prepare_enabled,
             "reranking_enabled": self.tutor_reranking_enabled,
+            "pgvector_enabled": self.pgvector_enabled,
+            "pgvector_dsn": self.pgvector_dsn,
         }

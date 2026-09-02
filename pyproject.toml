@@ -18,6 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+pgvector = ["psycopg[binary]>=3.2"]
 web = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",

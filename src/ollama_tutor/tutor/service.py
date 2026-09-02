@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator
 
+from ..client import OllamaClient
 from ..models import Message, MessageRole, OllamaOptions
 from .assessment import (
     AttemptResult,
@@ -53,6 +54,7 @@ from .prompts import (
     build_exam_analysis_prompt,
     build_exam_resolve_prompt,
     build_learning_path_prompt,
+    build_path_from_books_prompt,
     build_revision_sheet_prompt,
     build_summary_prompt,
     build_system_prompt,
@@ -66,7 +68,6 @@ from .reranker import SimpleReranker
 from .review import ReviewScheduler
 from .store import LibraryStore
 from .vector import ScoredChunk
-
 
 @dataclass
 class PrepareReport:
@@ -113,7 +114,6 @@ class TutorService:
         document_parser=None,
     ) -> None:
         self.store = store
-        self.client = client
         self.config = config
         self.model = getattr(config, "tutor_embedding_model", "embeddinggemma")
         # Phase 5a provider wiring (keyword-only, optional): when set, the
@@ -133,15 +133,24 @@ class TutorService:
                 base_url=config.llm_base_url,
                 api_key=getattr(config, "llm_api_key", ""),
             )
+            # Les embeddings passent TOUJOURS par Ollama (local), jamais par le
+            # fournisseur cloud. Si le client injecté est déjà un OllamaClient
+            # (tests), on le réutilise ; sinon on crée un client Ollama dédié.
+            if isinstance(client, OllamaClient):
+                self.client = client
+            else:
+                self.client = OllamaClient()
         else:
             self._llm_client = client
+            self.client = client
         self.retriever = Retriever(
-            store, client, self.model,
+            store, self.client, self.model,
             reranker=SimpleReranker() if getattr(config, "tutor_reranking_enabled", False) else None,
         )
         self.progress = ProgressTracker(store)
         self.review = ReviewScheduler(store)
-        self.quiz_engine = QuizEngine(store, client, config)
+        # QuizEngine génère (chat_stream) → client LLM (cloud ou Ollama).
+        self.quiz_engine = QuizEngine(store, self._llm_client, config)
         self._cancel_flags: dict[str, threading.Event] = {}
         self._threads: dict[str, threading.Thread] = {}
         # One app-loop worker owns the persistent pending queue. Books are
@@ -426,12 +435,23 @@ class TutorService:
         as ``num_predict``, ``num_thread`` and ``keep_alive``.  A 4096-token
         context and a 384-token output cap are lighter CPU-oriented defaults;
         explicit user settings still take precedence.
+
+        Provider-aware output cap : pour le fournisseur cloud (OpenAI-compatible),
+        on ne plafonne PAS ``num_predict`` (qui devient ``max_tokens``) — sinon la
+        réflexion ET la réponse sont coupées en plein milieu. Le cloud gère le
+        calcul, il peut produire de longues réponses. Le plafond ne s'applique
+        qu'aux modèles locaux (Ollama/GGUF) pour borner l'usage CPU/RAM.
         """
+        is_cloud = (
+            getattr(self.config, "llm_provider", "ollama") == "openai"
+            and getattr(self.config, "llm_base_url", "")
+        )
         values = self.config.options.to_dict()
         if not values.get("num_ctx"):
             values["num_ctx"] = 4096
-        if not values.get("num_predict"):
-            values["num_predict"] = 384
+        if not values.get("num_predict") and not is_cloud:
+            # Plafond par défaut pour les modèles locaux (CPU) : 2048 jetons.
+            values["num_predict"] = 2048
         return OllamaOptions(**values)
 
     # ------------------------------------------------------------------
@@ -466,6 +486,7 @@ class TutorService:
                 self.store.append_conversation_message(
                     conversation_id, "user", question
                 )
+                self._autotitle_conversation(conversation_id, question)
             except Exception:  # jamais bloquant pour le run
                 pass
         text_parts: list[str] = []
@@ -495,6 +516,29 @@ class TutorService:
                     )
                 except Exception:
                     pass
+
+    def _autotitle_conversation(
+        self, conversation_id: str, question: str
+    ) -> None:
+        """Nomme automatiquement une conversation encore sans titre.
+
+        Utilise la première question comme titre (tronqué) dès que le premier
+        message y est enregistré. Best-effort : ne lève jamais vers le run.
+        """
+        try:
+            sess = self.store.get_tutoring_session(conversation_id)
+            if sess is None or (sess.title or "").strip():
+                return  # inconnue ou déjà nommée
+            transcript = self.store.get_session_transcript(conversation_id)
+            if len(transcript) != 1:
+                return  # pas le tout premier message
+            title = " ".join(question.split())
+            if len(title) > 60:
+                title = title[:60].rstrip() + "…"
+            if title:
+                self.store.rename_conversation(conversation_id, title)
+        except Exception:
+            pass
 
     async def _ask_iter(
         self,
@@ -856,13 +900,24 @@ class TutorService:
                     yield {"type": "reasoning", "text": ev.text}
                 elif ev.kind == "content":
                     yield {"type": "delta", "text": ev.text}
-                elif ev.kind == "done" and ev.stats is not None:
-                    yield {
-                        "type": "stats",
-                        "prompt_tokens": ev.stats.prompt_tokens,
-                        "generated_tokens": ev.stats.generated_tokens,
-                        "tok_s": ev.stats.generation_speed,
-                    }
+                elif ev.kind == "done":
+                    if ev.stats is not None:
+                        yield {
+                            "type": "stats",
+                            "prompt_tokens": ev.stats.prompt_tokens,
+                            "generated_tokens": ev.stats.generated_tokens,
+                            "tok_s": ev.stats.generation_speed,
+                        }
+                    if getattr(ev, "truncated", False):
+                        yield {
+                            "type": "warning",
+                            "code": "truncated",
+                            "message": (
+                                "Réponse interrompue : limite de jetons atteinte. "
+                                "Augmentez « num_predict » dans les réglages pour "
+                                "des réponses plus longues."
+                            ),
+                        }
         except Exception as e:  # surface as error frame, then end
             yield {
                 "type": "error",
@@ -954,7 +1009,7 @@ class TutorService:
         Otherwise all indexed chunks for the subject are included.
         Returns ``{"sheet": text, "subject_name": str}``.
         """
-        subject = self.store._get_subject(subject_id)
+        subject = self.store.require_subject(subject_id)
         if book_id:
             raw_chunks = self.store.get_chunks_by_provenance(
                 subject_id, book_id, chapter
@@ -1006,24 +1061,36 @@ class TutorService:
         """Non-streaming LLM call for revision sheet generation."""
         options = self._generation_options()
         parts: list[str] = []
+        truncated = False
         async for ev in self._llm_client.chat_stream(
             messages, model, options=options
         ):
             if ev.kind == "content":
                 parts.append(ev.text)
-        return "".join(parts)
+            elif ev.kind == "done" and getattr(ev, "truncated", False):
+                truncated = True
+        text = "".join(parts)
+        if truncated:
+            text += "\n\n[Réponse tronquée : limite de jetons atteinte]"
+        return text
 
     async def _llm_collect(
         self, messages: list[Message], options: OllamaOptions
     ) -> str:
         """Run a non-streaming LLM call and return the concatenated content."""
         parts: list[str] = []
+        truncated = False
         async for ev in self._llm_client.chat_stream(
             messages, self.config.tutor_model, options=options
         ):
             if ev.kind == "content":
                 parts.append(ev.text)
-        return "".join(parts)
+            elif ev.kind == "done" and getattr(ev, "truncated", False):
+                truncated = True
+        text = "".join(parts)
+        if truncated:
+            text += "\n\n[Réponse tronquée : limite de jetons atteinte]"
+        return text
 
     def _collect_past_errors(self, concept_id: str) -> list[str]:
         """Recent incorrect/partial attempt feedback for a concept (context)."""
@@ -1121,6 +1188,16 @@ class TutorService:
                 self.store.update_exercise(exercise_id, status="solved")
                 # US15 / T088: +15 XP for a correct exercise answer.
                 self.store.add_xp(15)
+            # Feature 008 — US4 (FR-016): after each activity, recompute only a
+            # window of path steps, not the whole path.
+            try:
+                from .adaptation import AdaptationService
+                AdaptationService(self.store).recompute_window(
+                    exercise.subject_id, anchor_step_id=None
+                )
+            except Exception:
+                # Adaptation is best-effort; never break grading on it.
+                pass
 
         # Hint escalation (FR-016/017): auto on incorrect, or on explicit ask.
         revealed_hint: str | None = None
@@ -1194,13 +1271,24 @@ class TutorService:
                     yield {"type": "reasoning", "text": ev.text}
                 elif ev.kind == "content":
                     yield {"type": "delta", "text": ev.text}
-                elif ev.kind == "done" and ev.stats is not None:
-                    yield {
-                        "type": "stats",
-                        "prompt_tokens": ev.stats.prompt_tokens,
-                        "generated_tokens": ev.stats.generated_tokens,
-                        "tok_s": ev.stats.generation_speed,
-                    }
+                elif ev.kind == "done":
+                    if ev.stats is not None:
+                        yield {
+                            "type": "stats",
+                            "prompt_tokens": ev.stats.prompt_tokens,
+                            "generated_tokens": ev.stats.generated_tokens,
+                            "tok_s": ev.stats.generation_speed,
+                        }
+                    if getattr(ev, "truncated", False):
+                        yield {
+                            "type": "warning",
+                            "code": "truncated",
+                            "message": (
+                                "Réponse interrompue : limite de jetons atteinte. "
+                                "Augmentez « num_predict » dans les réglages pour "
+                                "des réponses plus longues."
+                            ),
+                        }
         except Exception as e:  # surface as error frame, then end
             yield {
                 "type": "error",
@@ -1215,12 +1303,7 @@ class TutorService:
 
     def _subject_chunks(self, subject_id: str) -> list[dict[str, Any]]:
         """Return chunk rows (id/text/chapter/book_id) for a subject, in order."""
-        rows = self.store._conn.execute(
-            "SELECT id, text, chapter, book_id FROM chunks "
-            "WHERE subject_id = ? ORDER BY ordinal",
-            (subject_id,),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        return self.store.list_chunks_meta(subject_id)
 
     def _find_concept(self, subject_id: str, name: str) -> Any | None:
         if not name:
@@ -1266,7 +1349,7 @@ class TutorService:
         returns a :class:`PrepareReport`. A second run reports only skipped.
         """
         # KeyError if the subject is unknown (mirrors other subject-scoped ops).
-        self.store._get_subject(subject_id)
+        self.store.require_subject(subject_id)
         report = PrepareReport()
         chunks = self._subject_chunks(subject_id)
         if not chunks:
@@ -1576,10 +1659,10 @@ class TutorService:
         gaps (gap-flagged concepts + due flashcards) to produce a briefing the
         UI can show before the learner resumes.
         """
-        self.store._get_subject(subject_id)  # KeyError if unknown
+        self.store.require_subject(subject_id)  # KeyError if unknown
         summaries = self.store.list_session_summaries(subject_id)
         last = summaries[0] if summaries else None
-        subject = self.store._get_subject(subject_id)
+        subject = self.store.require_subject(subject_id)
 
         # Open gaps: gap-flagged concepts + concepts with due reviews.
         difficulties: list[str] = []
@@ -1641,7 +1724,7 @@ class TutorService:
         gterm = self.store.get_glossary_term(subject_id, term)
         if gterm is None:
             raise KeyError(f"Terme inconnu : {term}")
-        subject = self.store._get_subject(subject_id)
+        subject = self.store.require_subject(subject_id)
         model = model or self.config.tutor_model
         think = self.config.tutor_think if think is None else bool(think)
 
@@ -1721,7 +1804,7 @@ class TutorService:
         ``{nodes: [Concept], edges: [relation]}`` where ``nodes`` are the
         subject's concepts and ``edges`` the ``knowledge_relations`` rows.
         """
-        self.store._get_subject(subject_id)  # KeyError if unknown
+        self.store.require_subject(subject_id)  # KeyError if unknown
         concepts = self.store.list_concepts(subject_id)
         relations = self.store.list_relations(subject_id)
         return {
@@ -2257,7 +2340,7 @@ class TutorService:
            ordered concept.
         4. Returns the created path as a dict (with steps).
         """
-        subject = self.store._get_subject(subject_id)
+        subject = self.store.require_subject(subject_id)
         concepts = self.store.list_concepts(subject_id)
         if not concepts:
             raise KeyError(f"Aucun concept pour la matière : {subject_id}")
@@ -2351,6 +2434,237 @@ class TutorService:
                 ordered.append(orig)
         return ordered
 
+    # ------------------------------------------------------------------
+    # Learning path from books TOC / captured program (Feature 008)
+    # ------------------------------------------------------------------
+
+    async def generate_path_from_books(
+        self, subject_id: str, book_ids: list[str],
+    ) -> dict[str, Any]:
+        """Generate a learning path from selected books' table of contents.
+
+        1. Fetches chunks from the selected books, grouped by chapter.
+        2. Builds a TOC structure: [{title, chapters: [{title, sections: [...]}]}]
+        3. Calls the LLM via build_path_from_books_prompt to generate structured steps.
+        4. Creates a LearningPath with PathStep entries.
+        5. Returns the created path as a dict.
+        """
+        subject = self.store.require_subject(subject_id)
+
+        # Fetch chunks from the selected books to build the TOC structure
+        # via public store API (no private _conn access).
+        rows = self.store.list_chunks_meta(subject_id, book_ids)
+
+        # Group by book → chapter → sections.
+        book_toc: dict[str, dict[str, set[str]]] = {}
+        for row in rows:
+            bid = row["book_id"]
+            ch = row["chapter"] or ""
+            sec = row["section"] or ""
+            if bid not in book_toc:
+                book_toc[bid] = {}
+            if ch not in book_toc[bid]:
+                book_toc[bid][ch] = set()
+            if sec:
+                book_toc[bid][ch].add(sec)
+
+        # Build the book_structures list for the prompt.
+        book_structures: list[dict] = []
+        for bid in book_ids:
+            book = self.store.get_book(bid)
+            title = book.title if book else bid
+            chapters: list[dict] = []
+            if bid in book_toc:
+                for ch_title, sections in book_toc[bid].items():
+                    chapters.append({
+                        "title": ch_title,
+                        "sections": sorted(sections),
+                    })
+            book_structures.append({"title": title, "chapters": chapters})
+
+        # Build prompt and call LLM.
+        level = self.config.tutor_level or "intermediate"
+        system_prompt = build_path_from_books_prompt(book_structures, level)
+        messages = [
+            Message(role=MessageRole.SYSTEM, content=system_prompt),
+            Message(
+                role=MessageRole.USER,
+                content=(
+                    f"Crée un parcours d'apprentissage structuré à partir des "
+                    f"{len(book_structures)} livres sélectionnés pour la matière "
+                    f"« {subject.name} »."
+                ),
+            ),
+        ]
+        options = self._generation_options()
+        raw = await self._llm_collect(messages, options)
+
+        # Parse the LLM response.
+        steps_data = self._parse_path_steps_response(raw)
+
+        # Create the learning path.
+        title = f"Parcours depuis livres — {subject.name}"
+        description = (
+            f"Parcours structuré basé sur {len(book_structures)} livre(s) "
+            f"({len(steps_data)} étapes)"
+        )
+        path = self.store.create_learning_path(subject_id, title, description)
+
+        # Create PathSteps from the LLM response.
+        for ordinal, step in enumerate(steps_data):
+            activity_type = step.get("type", "concept")
+            if activity_type not in ("concept", "exercise", "quiz", "reading"):
+                activity_type = "concept"
+            step_title = step.get("title", f"Étape {ordinal + 1}")
+            source = step.get("source", "")
+            # Determine activity_id: chapter name, book title, or generic.
+            if activity_type in ("exercise", "quiz"):
+                activity_id = f"{activity_type}-{source}-{ordinal}"
+            else:
+                activity_id = source or "Général"
+            self.store.add_path_step(
+                path.id, activity_type, activity_id, title=step_title,
+                ordinal=ordinal,
+            )
+
+        result = path.to_dict()
+        result["steps"] = [s.to_dict() for s in self.store.list_path_steps(path.id)]
+        return result
+
+    def path_from_program(
+        self, subject_id: str, program_id: str,
+    ) -> dict[str, Any]:
+        """Convert a confirmed captured program into a learning path.
+
+        1. Fetches the captured program and its nodes.
+        2. Converts chapters → concept steps, competencies → exercise steps.
+        3. Adds a quiz step after every 2-3 concept steps.
+        4. Creates a LearningPath with PathStep entries.
+        5. Returns the created path as a dict.
+        """
+        subject = self.store.require_subject(subject_id)
+        program = self.store.get_captured_program(program_id)
+        if program is None:
+            raise KeyError(f"Programme introuvable : {program_id}")
+        if program.subject_id != subject_id:
+            raise ValueError("Le programme n'appartient pas à cette matière")
+
+        nodes = self.store.get_program_nodes(program_id)
+        if not nodes:
+            raise KeyError(f"Aucun nœud pour le programme : {program_id}")
+
+        # Build a tree from flat nodes (parent_id relationships).
+        by_id = {n.id: n for n in nodes}
+        children: dict[str | None, list] = {}
+        for n in nodes:
+            parent = n.parent_id or None
+            children.setdefault(parent, []).append(n)
+
+        # Traverse tree in depth-first order, generating steps.
+        steps: list[dict] = []
+        concept_count = 0  # tracks consecutive concepts for quiz insertion.
+
+        def _traverse(parent_id: str | None) -> None:
+            nonlocal concept_count
+            for node in (children.get(parent_id) or []):
+                if node.kind == "chapter":
+                    steps.append({
+                        "activity_type": "concept",
+                        "activity_id": node.id,
+                        "title": node.title,
+                    })
+                    concept_count += 1
+                    # Insert quiz after every 2-3 concepts.
+                    if concept_count >= 2:
+                        steps.append({
+                            "activity_type": "quiz",
+                            "activity_id": f"quiz-{node.id}",
+                            "title": f"Quiz — {node.title}",
+                        })
+                        concept_count = 0
+                elif node.kind == "competency":
+                    steps.append({
+                        "activity_type": "exercise",
+                        "activity_id": node.id,
+                        "title": node.title,
+                    })
+                else:
+                    # sub_part or other kinds → concept step.
+                    steps.append({
+                        "activity_type": "concept",
+                        "activity_id": node.id,
+                        "title": node.title,
+                    })
+                # Recurse into children.
+                _traverse(node.id)
+
+        _traverse(None)
+
+        if not steps:
+            raise KeyError("Aucune étape n'a pu être générée depuis le programme")
+
+        # Create the learning path.
+        title = f"Parcours depuis programme — {subject.name}"
+        description = (
+            f"Parcours converti depuis le programme « {program.recognized_text[:80]}… » "
+            f"({len(steps)} étapes)"
+        )
+        path = self.store.create_learning_path(subject_id, title, description)
+
+        # Create PathSteps.
+        for ordinal, step in enumerate(steps):
+            self.store.add_path_step(
+                path.id,
+                step["activity_type"],
+                step["activity_id"],
+                title=step["title"],
+                ordinal=ordinal,
+            )
+
+        result = path.to_dict()
+        result["steps"] = [s.to_dict() for s in self.store.list_path_steps(path.id)]
+        return result
+
+    @staticmethod
+    def _parse_path_steps_response(raw: str) -> list[dict[str, Any]]:
+        """Parse the LLM JSON array response for structured learning path steps.
+
+        Expects: [{"title": "...", "type": "concept", "duration": 15, "source": "..."}]
+        Falls back to a single concept step on parse failure.
+        """
+        import re as _re
+
+        text = (raw or "").strip()
+        # Strip markdown code fences if present.
+        if text.startswith("```"):
+            text = _re.sub(r"^```[A-Za-z0-9_-]*[ \t]*\r?\n?", "", text)
+            text = _re.sub(r"\r?\n?[ \t]*```$", "", text).strip()
+        start = text.find("[")
+        end = text.rfind("]")
+        if start == -1 or end == -1 or end <= start:
+            return []
+        try:
+            arr = json.loads(text[start : end + 1])
+        except (json.JSONDecodeError, ValueError):
+            return []
+        if not isinstance(arr, list):
+            return []
+        valid_types = {"concept", "exercise", "quiz", "reading"}
+        result: list[dict[str, Any]] = []
+        for item in arr:
+            if not isinstance(item, dict):
+                continue
+            step_type = str(item.get("type", "concept")).strip()
+            if step_type not in valid_types:
+                step_type = "concept"
+            result.append({
+                "title": str(item.get("title", "")),
+                "type": step_type,
+                "duration": int(item.get("duration", 15)),
+                "source": str(item.get("source", "")),
+            })
+        return result
+
     def get_subject_domain(self, subject_id: str) -> str:
         """Get the classified domain for a subject."""
         return self.store.get_subject_domain(subject_id)
@@ -2363,7 +2677,7 @@ class TutorService:
         """Auto-classify a subject's content domain using the hybrid classifier."""
         from .classifier import classify_subject_chunks
         return await classify_subject_chunks(
-            self.store, subject_id, self.client, self.config.tutor_model
+            self.store, subject_id, self._llm_client, self.config.tutor_model
         )
 
     # ------------------------------------------------------------------
@@ -2393,12 +2707,18 @@ class TutorService:
             Message(role=MessageRole.USER, content="Génère le résumé à partir des extraits fournis."),
         ]
         parts: list[str] = []
+        truncated = False
         async for ev in self._llm_client.chat_stream(
             messages, model, options=self._generation_options()
         ):
             if ev.kind == "content":
                 parts.append(ev.text)
-        return {"summary": "".join(parts), "book_title": book.title}
+            elif ev.kind == "done" and getattr(ev, "truncated", False):
+                truncated = True
+        summary = "".join(parts)
+        if truncated:
+            summary += "\n\n[Réponse tronquée : limite de jetons atteinte]"
+        return {"summary": summary, "book_title": book.title}
 
     # ------------------------------------------------------------------
     # Diagnostic initial / quiz de positionnement (US3 / T021-T023)
@@ -2416,7 +2736,7 @@ class TutorService:
         Returns a dict with ``session_id``, ``question``, ``options``,
         ``question_num``, ``total_questions``.
         """
-        subject = self.store._get_subject(subject_id)
+        subject = self.store.require_subject(subject_id)
         concepts = self.store.list_concepts(subject_id)
         if not concepts:
             raise KeyError(f"Aucun concept pour la matière : {subject_id}")
@@ -2508,12 +2828,18 @@ class TutorService:
         """Non-streaming LLM call for diagnostic question generation."""
         options = self._generation_options()
         parts: list[str] = []
+        truncated = False
         async for ev in self._llm_client.chat_stream(
             messages, model, options=options
         ):
             if ev.kind == "content":
                 parts.append(ev.text)
-        return "".join(parts)
+            elif ev.kind == "done" and getattr(ev, "truncated", False):
+                truncated = True
+        text = "".join(parts)
+        if truncated:
+            text += "\n\n[Réponse tronquée]"
+        return text
 
     @staticmethod
     def _parse_diagnostic_response(text: str) -> dict[str, Any]:

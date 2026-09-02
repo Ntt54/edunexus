@@ -26,7 +26,7 @@ def test_generation_options_use_cpu_friendly_defaults(tmp_path: Path) -> None:
     options = service._generation_options()
 
     assert options.num_ctx == 4096
-    assert options.num_predict == 384
+    assert options.num_predict == 2048
     assert options.num_thread == 3
 
 

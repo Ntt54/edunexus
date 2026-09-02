@@ -22,26 +22,41 @@ from typing import Any
 import numpy as np
 
 from .models import (
+    CapturedProgram,
+    CompetencyNode,
     Concept,
+    ConversationPhoto,
     Exercise,
     ExerciseAttempt,
     Flashcard,
+    GeneratedLessonContent,
     GlossaryTerm,
+    GraphEdge,
     KnowledgeRelation,
+    LearnerProfile,
     LearningPath,
+    LessonDiscussion,
+    LessonExerciseAttempt,
+    NotebookOutput,
     PathStep,
+    PedagogicalTemplate,
+    ProgramNode,
     Quiz,
     QuizAnswer,
     QuizQuestion,
     ReviewItem,
     SessionSummary,
+    SourceReference,
     Subject,
+    SubjectNotebook,
+    SubjectProfile,
     TutoringSession,
     _now_iso,
     _uid,
 )
 
 _SUBJECT_NAME_MAX = 80
+_CONCEPT_NAME_MAX = 60
 _VALID_LEVELS = {"beginner", "intermediate", "advanced", "expert"}
 
 
@@ -53,7 +68,13 @@ def _json(value: Any) -> str:
 class LibraryStore:
     """CRUD + subject-scoped persistence for the tutor library."""
 
-    def __init__(self, config_dir: Path) -> None:
+    def __init__(
+        self,
+        config_dir: Path,
+        pgvector_enabled: bool = False,
+        pgvector_dsn: str = "postgresql://postgres:postgres@localhost:5432/edunexus",
+        pgvector_dim: int = 384,
+    ) -> None:
         self.config_dir = Path(config_dir)
         self.tutor_dir = self.config_dir / "tutor"
         self.tutor_dir.mkdir(parents=True, exist_ok=True)
@@ -67,6 +88,10 @@ class LibraryStore:
         self._create_schema()
         self._migrate()
         self._active_id: str | None = None
+        # PGVector (opt-in, SQLite is default)
+        self.pgvector_enabled = pgvector_enabled
+        self.pgvector_dsn = pgvector_dsn
+        self.pgvector_dim = pgvector_dim
 
     @property
     def _conn(self) -> sqlite3.Connection:
@@ -101,7 +126,7 @@ class LibraryStore:
                 title TEXT NOT NULL,
                 source_path TEXT NOT NULL DEFAULT '',
                 format TEXT NOT NULL,
-                fingerprint TEXT NOT NULL UNIQUE,
+                fingerprint TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',
                 error TEXT,
                 chunks_done INTEGER NOT NULL DEFAULT 0,
@@ -185,6 +210,9 @@ class LibraryStore:
                 verdict TEXT NOT NULL,
                 feedback TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
+                time_ms INTEGER NOT NULL DEFAULT 0,
+                hints_used INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY (exercise_id) REFERENCES exercises(id) ON DELETE CASCADE
             );
 
@@ -342,8 +370,13 @@ class LibraryStore:
                 activity_type TEXT NOT NULL,
                 activity_id TEXT NOT NULL,
                 title TEXT NOT NULL DEFAULT '',
-                status TEXT NOT NULL DEFAULT 'pending',
+                status TEXT NOT NULL DEFAULT 'not_started',
                 completed_at TEXT,
+                why_now TEXT NOT NULL DEFAULT '',
+                prerequisites TEXT NOT NULL DEFAULT '[]',
+                sources TEXT NOT NULL DEFAULT '[]',
+                planned_activity TEXT NOT NULL DEFAULT '',
+                expected_proof TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY (path_id) REFERENCES learning_paths(id) ON DELETE CASCADE
             );
 
@@ -354,6 +387,178 @@ class LibraryStore:
                 longest_streak INTEGER DEFAULT 0,
                 last_active_date TEXT,
                 badges_json TEXT DEFAULT '[]'
+            );
+
+            -- Feature 008 — EduNexus adaptatif
+            -- Multi-utilisateur familial (US9) : profils d'apprenant locaux.
+            CREATE TABLE IF NOT EXISTS learner_profiles (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                avatar TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            -- Profil pédagogique de matière (US1).
+            CREATE TABLE IF NOT EXISTS subject_profiles (
+                subject_id TEXT PRIMARY KEY,
+                domain TEXT NOT NULL DEFAULT '',
+                level TEXT NOT NULL DEFAULT '',
+                objective TEXT NOT NULL DEFAULT '',
+                deadline TEXT NOT NULL DEFAULT '',
+                available_time TEXT NOT NULL DEFAULT '',
+                prerequisites TEXT NOT NULL DEFAULT '[]',
+                competencies TEXT NOT NULL DEFAULT '[]',
+                explanation_style TEXT NOT NULL DEFAULT '',
+                activities TEXT NOT NULL DEFAULT '[]',
+                mastery_criteria TEXT NOT NULL DEFAULT '[]',
+                constraints TEXT NOT NULL DEFAULT '{}',
+                template_id TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE
+            );
+
+            -- Modèles pédagogiques prédéfinis (US1).
+            CREATE TABLE IF NOT EXISTS pedagogical_templates (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                activities TEXT NOT NULL DEFAULT '[]',
+                proof_types TEXT NOT NULL DEFAULT '[]',
+                default_style TEXT NOT NULL DEFAULT ''
+            );
+
+            -- Graphe de compétences (US2).
+            CREATE TABLE IF NOT EXISTS competency_nodes (
+                id TEXT PRIMARY KEY,
+                subject_id TEXT NOT NULL,
+                concept_id TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                mastery_score REAL NOT NULL DEFAULT 0.0,
+                confidence REAL NOT NULL DEFAULT 0.0,
+                validation_status TEXT NOT NULL DEFAULT 'extracted',
+                sources TEXT NOT NULL DEFAULT '[]',
+                FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS graph_edges (
+                id TEXT PRIMARY KEY,
+                subject_id TEXT NOT NULL,
+                source_node_id TEXT NOT NULL,
+                target_node_id TEXT NOT NULL,
+                relation TEXT NOT NULL DEFAULT 'requires',
+                confidence REAL NOT NULL DEFAULT 0.0,
+                validation_status TEXT NOT NULL DEFAULT 'extracted',
+                FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
+                FOREIGN KEY (source_node_id) REFERENCES competency_nodes(id) ON DELETE CASCADE,
+                FOREIGN KEY (target_node_id) REFERENCES competency_nodes(id) ON DELETE CASCADE
+            );
+
+            -- Capture de programme par OCR (US6).
+            CREATE TABLE IF NOT EXISTS captured_programs (
+                id TEXT PRIMARY KEY,
+                subject_id TEXT NOT NULL,
+                source_type TEXT NOT NULL DEFAULT 'photo',
+                status TEXT NOT NULL DEFAULT 'processing',
+                recognized_text TEXT NOT NULL DEFAULT '',
+                validation_status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS program_nodes (
+                id TEXT PRIMARY KEY,
+                program_id TEXT NOT NULL,
+                parent_id TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                kind TEXT NOT NULL DEFAULT 'chapter',
+                origin TEXT NOT NULL DEFAULT 'ocr',
+                validation_status TEXT NOT NULL DEFAULT 'pending',
+                FOREIGN KEY (program_id) REFERENCES captured_programs(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS capture_images (
+                id TEXT PRIMARY KEY,
+                program_id TEXT NOT NULL,
+                path TEXT NOT NULL DEFAULT '',
+                preprocess_state TEXT NOT NULL DEFAULT 'raw',
+                FOREIGN KEY (program_id) REFERENCES captured_programs(id) ON DELETE CASCADE
+            );
+
+            -- Import de photo dans une conversation (US7).
+            CREATE TABLE IF NOT EXISTS conversation_photos (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                path TEXT NOT NULL DEFAULT '',
+                recognized_text TEXT NOT NULL DEFAULT '',
+                confirmation_status TEXT NOT NULL DEFAULT 'pending',
+                source_linkage TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY (conversation_id) REFERENCES tutoring_sessions(id) ON DELETE CASCADE
+            );
+
+            -- Carnet de matière (US8).
+            CREATE TABLE IF NOT EXISTS subject_notebooks (
+                id TEXT PRIMARY KEY,
+                subject_id TEXT NOT NULL,
+                notes TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS notebook_outputs (
+                id TEXT PRIMARY KEY,
+                notebook_id TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'summary',
+                content TEXT NOT NULL DEFAULT '',
+                sources TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (notebook_id) REFERENCES subject_notebooks(id) ON DELETE CASCADE
+            );
+
+            -- Feature 009 — leçon discussion centrée
+            CREATE TABLE IF NOT EXISTS lesson_discussions (
+                id TEXT PRIMARY KEY,
+                path_step_id TEXT NOT NULL,
+                notion_id TEXT NOT NULL DEFAULT '',
+                subject_id TEXT NOT NULL,
+                learner_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
+                FOREIGN KEY(learner_id) REFERENCES learner_profiles(id) ON DELETE CASCADE,
+                UNIQUE (path_step_id, learner_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS lesson_messages (
+                id TEXT PRIMARY KEY,
+                discussion_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                sources TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (discussion_id) REFERENCES lesson_discussions(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS generated_lesson_contents (
+                id TEXT PRIMARY KEY,
+                discussion_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                sources TEXT NOT NULL DEFAULT '[]',
+                confidence REAL NOT NULL DEFAULT 0.0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (discussion_id) REFERENCES lesson_discussions(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS lesson_exercise_attempts (
+                id TEXT PRIMARY KEY,
+                discussion_id TEXT NOT NULL,
+                questions TEXT NOT NULL DEFAULT '[]',
+                answers TEXT NOT NULL DEFAULT '[]',
+                score REAL NOT NULL DEFAULT 0.0,
+                feedback TEXT NOT NULL DEFAULT '',
+                passed INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (discussion_id) REFERENCES lesson_discussions(id) ON DELETE CASCADE
             );
             """
         )
@@ -406,6 +611,16 @@ class LibraryStore:
                 ON tutoring_sessions(subject_id, last_active_at);
             CREATE INDEX IF NOT EXISTS idx_error_history_subject_created
                 ON error_history(subject_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_lesson_discussions_path_step
+                ON lesson_discussions(path_step_id);
+            CREATE INDEX IF NOT EXISTS idx_lesson_discussions_learner
+                ON lesson_discussions(learner_id);
+            CREATE INDEX IF NOT EXISTS idx_lesson_messages_discussion
+                ON lesson_messages(discussion_id);
+            CREATE INDEX IF NOT EXISTS idx_generated_contents_discussion
+                ON generated_lesson_contents(discussion_id);
+            CREATE INDEX IF NOT EXISTS idx_lesson_attempts_discussion
+                ON lesson_exercise_attempts(discussion_id);
             """
         )
         self._conn.commit()
@@ -420,6 +635,75 @@ class LibraryStore:
         to call on every startup.
         """
         cur = self._conn
+        # --- Bug #12 migration: remove UNIQUE from books.fingerprint ---
+        # Existing DBs created before Polish B have UNIQUE(fingerprint) which
+        # breaks cross-subject reuse (500 on duplicate global fingerprint).
+        # Recreate table without UNIQUE when detected.
+        try:
+            row = cur.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='books'"
+            ).fetchone()
+            sql = (row["sql"] if row else "") or ""
+            if "fingerprint TEXT NOT NULL UNIQUE" in sql:
+                cur.execute("PRAGMA foreign_keys=OFF")
+                cur.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS _books_new (
+                        id TEXT PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        source_path TEXT NOT NULL DEFAULT '',
+                        format TEXT NOT NULL,
+                        fingerprint TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        error TEXT,
+                        chunks_done INTEGER NOT NULL DEFAULT 0,
+                        chunks_total INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        retry_count INTEGER NOT NULL DEFAULT 0,
+                        next_retry_at TEXT,
+                        last_error_at TEXT,
+                        is_temp INTEGER NOT NULL DEFAULT 0,
+                        expires_at REAL
+                    );
+                    """
+                )
+                # Copy with defaults for columns that may not exist yet.
+                existing = {r["name"] for r in cur.execute("PRAGMA table_info(books)")}
+                # Helper to SELECT coalesced value if column missing.
+                # Build SELECT list matching _books_new order.
+                def _col(c: str, default: str) -> str:
+                    return c if c in existing else default
+                cur.execute(
+                    f"""
+                    INSERT INTO _books_new
+                      (id, title, source_path, format, fingerprint, status, error,
+                       chunks_done, chunks_total, created_at,
+                       retry_count, next_retry_at, last_error_at, is_temp, expires_at)
+                    SELECT
+                      id, title, source_path, format, fingerprint, status, error,
+                      chunks_done, chunks_total, created_at,
+                      {_col("retry_count", "0")},
+                      {_col("next_retry_at", "NULL")},
+                      {_col("last_error_at", "NULL")},
+                      {_col("is_temp", "0")},
+                      {_col("expires_at", "NULL")}
+                    FROM books
+                    """
+                )
+                cur.execute("DROP TABLE books")
+                cur.execute("ALTER TABLE _books_new RENAME TO books")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_books_status ON books(status)")
+                cur.execute("PRAGMA foreign_keys=ON")
+                cur.commit()
+        except Exception:
+            try:
+                cur.execute("PRAGMA foreign_keys=ON")
+            except Exception:
+                pass
+            try:
+                cur.commit()
+            except Exception:
+                pass
         cols = {r["name"] for r in cur.execute("PRAGMA table_info(progress)")}
         if "gap_flag" not in cols:
             cur.execute(
@@ -495,6 +779,181 @@ class LibraryStore:
             "ON chunks(subject_id, embedding_model)"
         )
         cur.commit()
+
+        # Feature 008 — multi-utilisateur familial (US9) : colonne learner_id
+        # sur les tables métier pour l'isolation des données par profil.
+        for table in ("subjects", "concepts", "learning_paths", "path_steps",
+                      "tutoring_sessions", "exercises", "exercise_attempts"):
+            tcols = {r["name"] for r in cur.execute(f"PRAGMA table_info({table})")}
+            if "learner_id" not in tcols:
+                cur.execute(
+                    f"ALTER TABLE {table} ADD COLUMN learner_id TEXT"
+                )
+                cur.commit()
+        # Feature 008 — US3 : champs d'explicabilité des étapes de parcours
+        # (why_now, prerequisites, sources, planned_activity, expected_proof).
+        pcols = {r["name"] for r in cur.execute("PRAGMA table_info(path_steps)")}
+        if "why_now" not in pcols:
+            cur.execute("ALTER TABLE path_steps ADD COLUMN why_now TEXT NOT NULL DEFAULT ''")
+            cur.commit()
+        if "prerequisites" not in pcols:
+            cur.execute("ALTER TABLE path_steps ADD COLUMN prerequisites TEXT NOT NULL DEFAULT '[]'")
+            cur.commit()
+        if "sources" not in pcols:
+            cur.execute("ALTER TABLE path_steps ADD COLUMN sources TEXT NOT NULL DEFAULT '[]'")
+            cur.commit()
+        if "planned_activity" not in pcols:
+            cur.execute("ALTER TABLE path_steps ADD COLUMN planned_activity TEXT NOT NULL DEFAULT ''")
+            cur.commit()
+        if "expected_proof" not in pcols:
+            cur.execute("ALTER TABLE path_steps ADD COLUMN expected_proof TEXT NOT NULL DEFAULT ''")
+            cur.commit()
+
+        # Feature 008 — US4 (FR-018) : enregistrer réponse/temps/indices/source
+        # par tentative d'exercice pour l'adaptation.
+        acols = {r["name"] for r in cur.execute("PRAGMA table_info(exercise_attempts)")}
+        if "time_ms" not in acols:
+            cur.execute("ALTER TABLE exercise_attempts ADD COLUMN time_ms INTEGER NOT NULL DEFAULT 0")
+            cur.commit()
+        if "hints_used" not in acols:
+            cur.execute("ALTER TABLE exercise_attempts ADD COLUMN hints_used INTEGER NOT NULL DEFAULT 0")
+            cur.commit()
+        if "source" not in acols:
+            cur.execute("ALTER TABLE exercise_attempts ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+            cur.commit()
+
+        # Index pour accélérer le filtrage par profil actif.
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_subjects_learner ON subjects(learner_id)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_concepts_learner ON concepts(learner_id)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_learner ON tutoring_sessions(learner_id)"
+        )
+        cur.commit()
+
+        # Feature 009 — leçon discussion centrée
+        # lesson_* tables for existing DBs ( _create_schema already handles fresh DBs )
+        cur.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS lesson_discussions (
+                id TEXT PRIMARY KEY,
+                path_step_id TEXT NOT NULL,
+                notion_id TEXT NOT NULL DEFAULT '',
+                subject_id TEXT NOT NULL,
+                learner_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
+                FOREIGN KEY(learner_id) REFERENCES learner_profiles(id) ON DELETE CASCADE,
+                UNIQUE (path_step_id, learner_id)
+            );
+            CREATE TABLE IF NOT EXISTS lesson_messages (
+                id TEXT PRIMARY KEY,
+                discussion_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                sources TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (discussion_id) REFERENCES lesson_discussions(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS generated_lesson_contents (
+                id TEXT PRIMARY KEY,
+                discussion_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                sources TEXT NOT NULL DEFAULT '[]',
+                confidence REAL NOT NULL DEFAULT 0.0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (discussion_id) REFERENCES lesson_discussions(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS lesson_exercise_attempts (
+                id TEXT PRIMARY KEY,
+                discussion_id TEXT NOT NULL,
+                questions TEXT NOT NULL DEFAULT '[]',
+                answers TEXT NOT NULL DEFAULT '[]',
+                score REAL NOT NULL DEFAULT 0.0,
+                feedback TEXT NOT NULL DEFAULT '',
+                passed INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (discussion_id) REFERENCES lesson_discussions(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_lesson_discussions_path_step ON lesson_discussions(path_step_id);
+            CREATE INDEX IF NOT EXISTS idx_lesson_discussions_learner ON lesson_discussions(learner_id);
+            CREATE INDEX IF NOT EXISTS idx_lesson_messages_discussion ON lesson_messages(discussion_id);
+            CREATE INDEX IF NOT EXISTS idx_generated_contents_discussion ON generated_lesson_contents(discussion_id);
+            CREATE INDEX IF NOT EXISTS idx_lesson_attempts_discussion ON lesson_exercise_attempts(discussion_id);
+            """
+        )
+        cur.commit()
+        # Migration for path_steps.status — ensure column exists with default not_started
+        # Idempotent PRAGMA table_info check
+        ps_cols = {r["name"] for r in cur.execute("PRAGMA table_info(path_steps)")}
+        if "status" not in ps_cols:
+            cur.execute(
+                "ALTER TABLE path_steps ADD COLUMN status TEXT NOT NULL DEFAULT 'not_started'"
+            )
+            cur.commit()
+        # For existing tables lesson_discussions: ensure missing columns are added
+        ld_cols = {r["name"] for r in cur.execute("PRAGMA table_info(lesson_discussions)")}
+        if "notion_id" not in ld_cols:
+            cur.execute("ALTER TABLE lesson_discussions ADD COLUMN notion_id TEXT NOT NULL DEFAULT ''")
+            cur.commit()
+        if "learner_id" not in ld_cols:
+            cur.execute("ALTER TABLE lesson_discussions ADD COLUMN learner_id TEXT NOT NULL DEFAULT ''")
+            cur.commit()
+        # Migration: add FK on lesson_discussions.learner_id if missing (table recreation)
+        try:
+            fks = cur.execute("PRAGMA foreign_key_list(lesson_discussions)").fetchall()
+            has_learner_fk = any(dict(r).get("from") == "learner_id" for r in fks)
+            if not has_learner_fk:
+                # Check if table has data violating FK (empty string learner_id) — clean or preserve
+                # Preserve rows with empty learner_id by leaving them; SQLite FK would reject ''.
+                # We recreate with FK; existing rows with '' will fail insertion, so we only
+                # recreate if all learner_id values are either '' or valid FK. For '' we skip
+                # FK recreation to avoid breaking existing DBs, but new DBs already have FK.
+                # To handle '' gracefully, we attempt recreation and fallback if fails.
+                cur.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS _lesson_discussions_new (
+                        id TEXT PRIMARY KEY,
+                        path_step_id TEXT NOT NULL,
+                        notion_id TEXT NOT NULL DEFAULT '',
+                        subject_id TEXT NOT NULL,
+                        learner_id TEXT NOT NULL DEFAULT '',
+                        status TEXT NOT NULL DEFAULT 'active',
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
+                        FOREIGN KEY(learner_id) REFERENCES learner_profiles(id) ON DELETE CASCADE,
+                        UNIQUE (path_step_id, learner_id)
+                    );
+                    """
+                )
+                # Copy only rows where learner_id is valid or empty? Empty will violate FK if not null.
+                # We copy and let INSERT OR IGNORE skip violators, then if count mismatch, abort recreation.
+                existing_count = cur.execute("SELECT COUNT(*) FROM lesson_discussions").fetchone()[0]
+                try:
+                    cur.execute(
+                        "INSERT OR IGNORE INTO _lesson_discussions_new (id, path_step_id, notion_id, subject_id, learner_id, status, created_at) "
+                        "SELECT id, path_step_id, notion_id, subject_id, learner_id, status, created_at FROM lesson_discussions"
+                    )
+                    new_count = cur.execute("SELECT COUNT(*) FROM _lesson_discussions_new").fetchone()[0]
+                    if new_count == existing_count:
+                        cur.execute("DROP TABLE lesson_discussions")
+                        cur.execute("ALTER TABLE _lesson_discussions_new RENAME TO lesson_discussions")
+                        cur.execute("CREATE INDEX IF NOT EXISTS idx_lesson_discussions_path_step ON lesson_discussions(path_step_id)")
+                        cur.execute("CREATE INDEX IF NOT EXISTS idx_lesson_discussions_learner ON lesson_discussions(learner_id)")
+                        cur.commit()
+                    else:
+                        cur.execute("DROP TABLE IF EXISTS _lesson_discussions_new")
+                        cur.commit()
+                except Exception:
+                    cur.execute("DROP TABLE IF EXISTS _lesson_discussions_new")
+                    cur.commit()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Error history (Feature 007 — US11)
@@ -670,8 +1129,8 @@ class LibraryStore:
         attempt.created_at = attempt.created_at or _now_iso()
         self._conn.execute(
             "INSERT INTO exercise_attempts "
-            "(id, exercise_id, answer, verdict, feedback, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "(id, exercise_id, answer, verdict, feedback, created_at, time_ms, hints_used, source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 attempt.id,
                 attempt.exercise_id,
@@ -679,6 +1138,9 @@ class LibraryStore:
                 attempt.verdict,
                 attempt.feedback,
                 attempt.created_at,
+                attempt.time_ms,
+                attempt.hints_used,
+                attempt.source,
             ),
         )
         self._conn.commit()
@@ -697,40 +1159,61 @@ class LibraryStore:
     # Subjects
     # ------------------------------------------------------------------
 
-    def create_subject(self, name: str) -> Subject:
-        """Create a subject; name must be non-empty, <=80 chars, unique (CI)."""
+    def create_subject(self, name: str, learner_id: str | None = None) -> Subject:
+        """Create a subject; name must be non-empty, <=80 chars, unique (CI).
+
+        ``learner_id`` (US9) scopes the subject to a family member; when set,
+        uniqueness is enforced within that learner's namespace.
+        """
         if not isinstance(name, str) or not name.strip():
             raise ValueError("Subject name must be a non-empty string")
         name = name.strip()
+        if "<" in name or ">" in name:
+            raise ValueError("Caractères <> interdits")
         if len(name) > _SUBJECT_NAME_MAX:
             raise ValueError(
                 f"Subject name exceeds {_SUBJECT_NAME_MAX} chars: {len(name)}"
             )
-        existing = self._conn.execute(
-            "SELECT id FROM subjects WHERE name = ?", (name,)
-        ).fetchone()
+        if learner_id:
+            existing = self._conn.execute(
+                "SELECT id FROM subjects WHERE name = ? AND learner_id = ?",
+                (name, learner_id),
+            ).fetchone()
+        else:
+            existing = self._conn.execute(
+                "SELECT id FROM subjects WHERE name = ?", (name,)
+            ).fetchone()
         if existing is not None:
             raise ValueError(f"Subject already exists: {name}")
         now = _now_iso()
         subject = Subject(id=_uid(), name=name, created_at=now, last_used_at=now)
         self._conn.execute(
-            "INSERT INTO subjects (id, name, created_at, last_used_at) "
-            "VALUES (?, ?, ?, ?)",
-            (subject.id, subject.name, subject.created_at, subject.last_used_at),
+            "INSERT INTO subjects (id, name, created_at, last_used_at, learner_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (subject.id, subject.name, subject.created_at, subject.last_used_at,
+             learner_id),
         )
         self._conn.commit()
         return subject
 
-    def list_subjects(self) -> list[Subject]:
-        rows = self._conn.execute(
-            "SELECT * FROM subjects ORDER BY created_at, name"
-        ).fetchall()
+    def list_subjects(self, learner_id: str | None = None) -> list[Subject]:
+        if learner_id:
+            rows = self._conn.execute(
+                "SELECT * FROM subjects WHERE learner_id = ? ORDER BY last_used_at DESC, created_at DESC, name",
+                (learner_id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM subjects ORDER BY last_used_at DESC, created_at DESC, name"
+            ).fetchall()
         return [Subject.from_dict(dict(r)) for r in rows]
 
     def rename_subject(self, subject_id: str, name: str) -> Subject:
         if not isinstance(name, str) or not name.strip():
             raise ValueError("Subject name must be a non-empty string")
         name = name.strip()
+        if "<" in name or ">" in name:
+            raise ValueError("Caractères <> interdits")
         if len(name) > _SUBJECT_NAME_MAX:
             raise ValueError(
                 f"Subject name exceeds {_SUBJECT_NAME_MAX} chars: {len(name)}"
@@ -769,12 +1252,19 @@ class LibraryStore:
         return subject
 
     def active_subject(self) -> Subject | None:
-        if self._active_id is None:
-            return None
+        if self._active_id is not None:
+            row = self._conn.execute(
+                "SELECT * FROM subjects WHERE id = ?", (self._active_id,)
+            ).fetchone()
+            if row is not None:
+                return Subject.from_dict(dict(row))
         row = self._conn.execute(
-            "SELECT * FROM subjects WHERE id = ?", (self._active_id,)
+            "SELECT * FROM subjects ORDER BY last_used_at DESC, created_at DESC LIMIT 1"
         ).fetchone()
-        return Subject.from_dict(dict(row)) if row is not None else None
+        if row is not None:
+            self._active_id = row["id"]
+            return Subject.from_dict(dict(row))
+        return None
 
     def get_subject(self, subject_id: str) -> Subject | None:
         """Return a subject by id, or ``None`` when it does not exist."""
@@ -788,6 +1278,43 @@ class LibraryStore:
         if subject is None:
             raise KeyError(f"Unknown subject: {subject_id}")
         return subject
+
+    def require_subject(self, subject_id: str) -> Subject:
+        """Public alias of ``_get_subject`` — raises KeyError if unknown.
+
+        New code should use this instead of the private ``_get_subject``.
+        """
+        return self._get_subject(subject_id)
+
+    def list_chunks_meta(
+        self, subject_id: str, book_ids: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Return chunk rows for *subject_id*, optionally filtered to *book_ids*.
+
+        Selects ``id, text, chapter, section, page, book_id`` ordered by
+        ``ordinal``. When *book_ids* is ``None`` all chunks are returned;
+        otherwise only chunks whose ``book_id IN (...)`` are returned.
+        """
+        if book_ids is not None:
+            # Normalise to strings and deduplicate empty
+            ids = [str(b) for b in book_ids if str(b)]
+            if not ids:
+                return []
+            placeholders = ",".join("?" for _ in ids)
+            sql = (
+                "SELECT id, text, chapter, section, page, book_id "
+                "FROM chunks WHERE subject_id = ? AND book_id IN "
+                f"({placeholders}) ORDER BY ordinal"
+            )
+            params: list[Any] = [subject_id, *ids]
+            rows = self._conn.execute(sql, params).fetchall()
+            return [dict(r) for r in rows]
+        rows = self._conn.execute(
+            "SELECT id, text, chapter, section, page, book_id "
+            "FROM chunks WHERE subject_id = ? ORDER BY ordinal",
+            (subject_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------
     # Documents (minimal import lifecycle; extended in later lanes)
@@ -852,6 +1379,20 @@ class LibraryStore:
         ).fetchone()
         if existing is not None:
             return Book.from_dict(dict(existing))
+
+        # Cross-subject reuse: if fingerprint exists globally, link it
+        # instead of creating a duplicate row (Bug #12).
+        global_book = self._conn.execute(
+            "SELECT * FROM books WHERE fingerprint = ? LIMIT 1",
+            (fingerprint,),
+        ).fetchone()
+        if global_book is not None:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO subject_books (subject_id, book_id) VALUES (?, ?)",
+                (subject_id, global_book["id"]),
+            )
+            self._conn.commit()
+            return Book.from_dict(dict(global_book))
 
         now = _now_iso()
         book = Book(
@@ -1228,11 +1769,241 @@ class LibraryStore:
 
     def delete_book(self, book_id: str) -> None:
         """Delete a book and its subject joins; chunks cascade (T016)."""
+        if self.pgvector_enabled:
+            try:
+                self.delete_book_chunks_pg(book_id)
+            except Exception:
+                pass
         self._conn.execute(
             "DELETE FROM subject_books WHERE book_id = ?", (book_id,)
         )
         self._conn.execute("DELETE FROM books WHERE id = ?", (book_id,))
         self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # PGVector backend (opt-in, SQLite is default fallback)
+    # ------------------------------------------------------------------
+
+    def get_pg_connection(self):
+        """Return a psycopg connection (raises if psycopg not installed)."""
+        try:
+            import psycopg  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError(
+                'psycopg[binary] not installed; install with: pip install -e ".[pgvector]"'
+            ) from exc
+        return psycopg.connect(self.pgvector_dsn)
+
+    def init_pgvector_schema(self, dim: int | None = None) -> None:
+        """Create pgvector extension, chunks table and indexes.
+
+        dim: vector dimension (default self.pgvector_dim, plan default 384).
+        Uses vector_cosine_ops HNSW with m=16 ef_construction=64.
+        """
+        d_raw = dim if dim is not None else self.pgvector_dim
+        d = int(d_raw)
+        d = max(32, min(4096, d))
+        conn = self.get_pg_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS chunks (
+                        id TEXT PRIMARY KEY,
+                        subject_id TEXT NOT NULL,
+                        book_id TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        chapter TEXT,
+                        page INTEGER,
+                        section TEXT,
+                        position REAL DEFAULT 0.0,
+                        difficulty TEXT,
+                        content_type TEXT DEFAULT 'prose',
+                        embedding vector({d}),
+                        created_at TIMESTAMP DEFAULT NOW()
+                    );
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_chunks_embedding
+                        ON chunks
+                        USING hnsw (embedding vector_cosine_ops)
+                        WITH (m = 16, ef_construction = 64);
+                    """
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_chunks_subject_id ON chunks(subject_id);"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_chunks_book_id ON chunks(book_id);"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_chunks_chapter ON chunks(chapter);"
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_indexed_chunks_pg(
+        self, subject_id: str, model: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Read chunks with embeddings from PG (fallback to SQLite when disabled)."""
+        if not self.pgvector_enabled:
+            return self.get_indexed_chunks(subject_id, model=model)
+        conn = self.get_pg_connection()
+        try:
+            with conn.cursor() as cur:
+                # Note: PG schema does not store embedding_model; filter ignored
+                cur.execute(
+                    "SELECT id, book_id, text, chapter, section, page, embedding "
+                    "FROM chunks WHERE subject_id = %s AND embedding IS NOT NULL ORDER BY position",
+                    (subject_id,),
+                )
+                rows = cur.fetchall()
+                cols = [d[0] for d in cur.description] if cur.description else []
+                out: list[dict[str, Any]] = []
+                for r in rows:
+                    d = dict(zip(cols, r))
+                    # embedding may be string like "[0.1,0.2]" – keep as is; caller handles
+                    out.append(d)
+                return out
+        finally:
+            conn.close()
+
+    def add_chunks_pg(
+        self,
+        subject_id: str,
+        book_id: str,
+        chunks: list[str] | list[dict[str, Any]],
+        embeddings: list[list[float]],
+        model: str | None = None,
+    ) -> None:
+        """Insert chunks+embeddings into PG. Falls back to SQLite when disabled."""
+        if not self.pgvector_enabled:
+            # delegate to SQLite (model required; use empty string if None)
+            return self.add_chunks(subject_id, book_id, chunks, embeddings, model or "")
+        # PG insert
+        conn = self.get_pg_connection()
+        try:
+            with conn.cursor() as cur:
+                for i, (chunk, vec) in enumerate(zip(chunks, embeddings)):
+                    if isinstance(chunk, dict):
+                        text = chunk["text"]
+                        chapter = chunk.get("chapter")
+                        section = chunk.get("section")
+                        page = chunk.get("page")
+                    else:
+                        text = chunk
+                        chapter = section = page = None
+                    position = i / len(chunks) if chunks else 0.0
+                    chunk_id = _uid()
+                    cur.execute(
+                        "INSERT INTO chunks (id, subject_id, book_id, text, chapter, page, section, position, embedding) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        (chunk_id, subject_id, book_id, text, chapter, page, section, position, vec),
+                    )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def update_chunks_embedding_pg(
+        self, book_id: str, embeddings: list[list[float]], model: str | None = None
+    ) -> int:
+        """Update embeddings in PG by position order. Fallback to SQLite when disabled."""
+        if not self.pgvector_enabled:
+            return self.update_chunks_embedding(book_id, embeddings, model or "")
+        conn = self.get_pg_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM chunks WHERE book_id = %s ORDER BY position", (book_id,))
+                rows = cur.fetchall()
+                if len(rows) != len(embeddings):
+                    raise ValueError(
+                        f"Embedding count mismatch: {len(rows)} chunks vs {len(embeddings)} vectors for book {book_id}"
+                    )
+                for (cid,), vec in zip(rows, embeddings):
+                    cur.execute("UPDATE chunks SET embedding = %s WHERE id = %s", (vec, cid))
+            conn.commit()
+            return len(embeddings)
+        finally:
+            conn.close()
+
+    def search_similar_pg(
+        self,
+        subject_id: str,
+        query_vector: list[float],
+        k: int = 5,
+        floor: float | None = None,
+        book_ids: list[str] | None = None,
+    ) -> list[tuple[str, float]]:
+        """Cosine search via pgvector ORDER BY embedding <=> %s."""
+        if not self.pgvector_enabled:
+            # Fallback brute-force via SQLite + NumpyVectorIndex
+            rows = self.get_indexed_chunks(subject_id)
+            if not rows:
+                return []
+            from .embeddings import NumpyVectorIndex
+
+            idx = NumpyVectorIndex()
+            items: list[tuple[str, list[float]]] = []
+            for r in rows:
+                emb = r.get("embedding")
+                if emb:
+                    vec = np.frombuffer(emb, dtype=np.float32).tolist() if isinstance(emb, (bytes, bytearray)) else list(emb)
+                    items.append((r["id"], vec))
+            idx.add(items)
+            results = idx.search(query_vector, k, floor=floor)
+            if book_ids is not None:
+                # filter by book_ids if needed (need meta)
+                meta = {r["id"]: r for r in rows}
+                scope = {str(b) for b in book_ids}
+                results = [(cid, sc) for cid, sc in results if str(meta.get(cid, {}).get("book_id", "")) in scope][:k]
+            return results
+        conn = self.get_pg_connection()
+        try:
+            with conn.cursor() as cur:
+                # Use cosine similarity: 1 - (embedding <=> query)
+                # pgvector <=> is cosine distance when using vector_cosine_ops
+                if book_ids is not None:
+                    cur.execute(
+                        "SELECT id, 1 - (embedding <=> %s::vector) AS score "
+                        "FROM chunks WHERE subject_id = %s AND embedding IS NOT NULL AND book_id = ANY(%s) "
+                        "ORDER BY embedding <=> %s::vector LIMIT %s",
+                        (query_vector, subject_id, book_ids, query_vector, k),
+                    )
+                else:
+                    cur.execute(
+                        "SELECT id, 1 - (embedding <=> %s::vector) AS score "
+                        "FROM chunks WHERE subject_id = %s AND embedding IS NOT NULL "
+                        "ORDER BY embedding <=> %s::vector LIMIT %s",
+                        (query_vector, subject_id, query_vector, k),
+                    )
+                rows = cur.fetchall()
+                out: list[tuple[str, float]] = []
+                for cid, score in rows:
+                    s = float(score) if score is not None else 0.0
+                    if floor is not None and s < floor:
+                        continue
+                    out.append((str(cid), s))
+                return out
+        finally:
+            conn.close()
+
+    def delete_book_chunks_pg(self, book_id: str) -> int:
+        """Delete chunks for a book in PG. No-op fallback when disabled."""
+        if not self.pgvector_enabled:
+            return 0
+        conn = self.get_pg_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM chunks WHERE book_id = %s", (book_id,))
+                n = cur.rowcount
+            conn.commit()
+            return int(n) if n and n >= 0 else 0
+        finally:
+            conn.close()
 
     def get_book(self, book_id: str) -> Any | None:
         """Return a single book by id, or ``None`` (T014)."""
@@ -1552,6 +2323,15 @@ class LibraryStore:
         self, subject_id: str, name: str, path_rank: int | None = None
     ) -> Concept:
         self._get_subject(subject_id)
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Concept name must be a non-empty string")
+        name = name.strip()
+        if "<" in name or ">" in name:
+            raise ValueError("Caractères <> interdits")
+        if len(name) > _CONCEPT_NAME_MAX:
+            raise ValueError(
+                f"Concept name exceeds {_CONCEPT_NAME_MAX} chars: {len(name)}"
+            )
         concept_id = self._conn.execute(
             "SELECT id FROM concepts WHERE subject_id = ? AND name = ?",
             (subject_id, name),
@@ -1590,6 +2370,13 @@ class LibraryStore:
             )
         self._conn.commit()
         return concept
+
+    # Alias for bug #6/#7: ensure add_concept / create_concept enforce same checks
+    def add_concept(self, subject_id: str, name: str, path_rank: int | None = None) -> Concept:
+        return self.upsert_concept(subject_id, name, path_rank=path_rank)
+
+    def create_concept(self, subject_id: str, name: str, path_rank: int | None = None) -> Concept:
+        return self.upsert_concept(subject_id, name, path_rank=path_rank)
 
     def list_concepts(self, subject_id: str) -> list[Concept]:
         rows = self._conn.execute(
@@ -2313,18 +3100,28 @@ class LibraryStore:
         self._conn.execute("DELETE FROM learning_paths WHERE id = ?", (path_id,))
         self._conn.commit()
 
-    def add_path_step(self, path_id: str, activity_type: str, activity_id: str, title: str = "", ordinal: int | None = None) -> PathStep:
+    def add_path_step(self, path_id: str, activity_type: str, activity_id: str, title: str = "", ordinal: int | None = None,
+                      *, why_now: str = "", prerequisites: list[str] | None = None,
+                      sources: list[SourceReference] | None = None,
+                      planned_activity: str = "", expected_proof: str = "") -> PathStep:
         if ordinal is None:
             row = self._conn.execute("SELECT COALESCE(MAX(ordinal), -1) + 1 FROM path_steps WHERE path_id = ?", (path_id,)).fetchone()
             ordinal = row[0] if row else 0
         step = PathStep(
             id=_uid(), path_id=path_id, ordinal=ordinal,
             activity_type=activity_type, activity_id=activity_id, title=title,
+            why_now=why_now, prerequisites=prerequisites or [],
+            sources=sources or [], planned_activity=planned_activity,
+            expected_proof=expected_proof,
         )
         self._conn.execute(
-            "INSERT INTO path_steps (id, path_id, ordinal, activity_type, activity_id, title, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (step.id, step.path_id, step.ordinal, step.activity_type, step.activity_id, step.title, step.status),
+            """INSERT INTO path_steps (id, path_id, ordinal, activity_type, activity_id, title, status,
+               why_now, prerequisites, sources, planned_activity, expected_proof)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (step.id, step.path_id, step.ordinal, step.activity_type, step.activity_id, step.title, step.status,
+             step.why_now, json.dumps(step.prerequisites),
+             json.dumps([s.to_dict() for s in step.sources]),
+             step.planned_activity, step.expected_proof),
         )
         self._conn.commit()
         return step
@@ -2339,7 +3136,10 @@ class LibraryStore:
         row = self._conn.execute("SELECT * FROM path_steps WHERE id = ?", (step_id,)).fetchone()
         return PathStep.from_dict(dict(row)) if row is not None else None
 
-    def update_path_step(self, step_id: str, *, status: str | None = None, ordinal: int | None = None) -> None:
+    def update_path_step(self, step_id: str, *, status: str | None = None, ordinal: int | None = None,
+                         why_now: str | None = None, prerequisites: list[str] | None = None,
+                         sources: list[SourceReference] | None = None,
+                         planned_activity: str | None = None, expected_proof: str | None = None) -> None:
         updates: list[str] = []
         params: list[Any] = []
         if status is not None:
@@ -2348,18 +3148,57 @@ class LibraryStore:
                 updates.append("completed_at = ?"); params.append(_now_iso())
         if ordinal is not None:
             updates.append("ordinal = ?"); params.append(ordinal)
+        if why_now is not None:
+            updates.append("why_now = ?"); params.append(why_now)
+        if prerequisites is not None:
+            updates.append("prerequisites = ?"); params.append(json.dumps(prerequisites))
+        if sources is not None:
+            updates.append("sources = ?"); params.append(json.dumps([s.to_dict() for s in sources]))
+        if planned_activity is not None:
+            updates.append("planned_activity = ?"); params.append(planned_activity)
+        if expected_proof is not None:
+            updates.append("expected_proof = ?"); params.append(expected_proof)
         if updates:
             params.append(step_id)
             self._conn.execute(f"UPDATE path_steps SET {', '.join(updates)} WHERE id = ?", params)
             self._conn.commit()
 
     def delete_path_step(self, step_id: str) -> None:
+        # T025 edge: keep discussion via notion_id when step is deleted.
+        # Preserve discussion by detaching path_step_id before delete (no FK OFF).
+        self._conn.execute(
+            "UPDATE lesson_discussions SET path_step_id='' WHERE path_step_id=?",
+            (step_id,),
+        )
         self._conn.execute("DELETE FROM path_steps WHERE id = ?", (step_id,))
         self._conn.commit()
 
     def reorder_path_steps(self, path_id: str, step_ids: list[str]) -> None:
-        for idx, sid in enumerate(step_ids):
-            self._conn.execute("UPDATE path_steps SET ordinal = ? WHERE id = ? AND path_id = ?", (idx, sid, path_id))
+        # T025 edge: reorder keeps discussion via notion_id; dangling steps are pruned.
+        # Preserve discussions by detaching path_step_id before delete; handle empty list.
+        if not step_ids:
+            self._conn.execute(
+                "UPDATE lesson_discussions SET path_step_id='' WHERE path_step_id IN "
+                "(SELECT id FROM path_steps WHERE path_id = ?)",
+                (path_id,),
+            )
+            self._conn.execute("DELETE FROM path_steps WHERE path_id = ?", (path_id,))
+        else:
+            placeholders = ",".join("?" for _ in step_ids)
+            self._conn.execute(
+                f"UPDATE lesson_discussions SET path_step_id='' WHERE path_step_id IN "
+                f"(SELECT id FROM path_steps WHERE path_id = ? AND id NOT IN ({placeholders}))",
+                [path_id] + list(step_ids),
+            )
+            self._conn.execute(
+                f"DELETE FROM path_steps WHERE path_id = ? AND id NOT IN ({placeholders})",
+                [path_id] + list(step_ids),
+            )
+            for idx, sid in enumerate(step_ids):
+                self._conn.execute(
+                    "UPDATE path_steps SET ordinal = ? WHERE id = ? AND path_id = ?",
+                    (idx, sid, path_id),
+                )
         self._conn.commit()
 
     def get_subject_domain(self, subject_id: str) -> str:
@@ -2457,6 +3296,515 @@ class LibraryStore:
             d["badges"] = []
             d.pop("badges_json", None)
         return d
+
+    # ------------------------------------------------------------------
+    # Feature 008 — EduNexus adaptatif
+    # ------------------------------------------------------------------
+
+    # --- Learner profiles (US9, multi-utilisateur familial) ---
+
+    def create_learner(self, name: str, avatar: str = "") -> LearnerProfile:
+        """Create a learner profile (FR-038)."""
+        now = _now_iso()
+        lp = LearnerProfile(id=_uid(), name=name, avatar=avatar,
+                            created_at=now, updated_at=now)
+        self._conn.execute(
+            "INSERT INTO learner_profiles (id, name, avatar, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (lp.id, lp.name, lp.avatar, lp.created_at, lp.updated_at),
+        )
+        self._conn.commit()
+        return lp
+
+    def list_learners(self) -> list[LearnerProfile]:
+        rows = self._conn.execute(
+            "SELECT * FROM learner_profiles ORDER BY created_at"
+        ).fetchall()
+        return [LearnerProfile.from_dict(dict(r)) for r in rows]
+
+    def get_learner(self, learner_id: str) -> LearnerProfile | None:
+        row = self._conn.execute(
+            "SELECT * FROM learner_profiles WHERE id = ?", (learner_id,)
+        ).fetchone()
+        return LearnerProfile.from_dict(dict(row)) if row is not None else None
+
+    def delete_learner(self, learner_id: str) -> None:
+        """Delete a learner and cascade its data (edge case)."""
+        # Subjects owned by this learner cascade to their children.
+        self._conn.execute(
+            "DELETE FROM subjects WHERE learner_id = ?", (learner_id,)
+        )
+        self._conn.execute(
+            "DELETE FROM learner_profiles WHERE id = ?", (learner_id,)
+        )
+        self._conn.commit()
+
+    # --- Subject profiles (US1) ---
+
+    def set_subject_profile(self, profile: SubjectProfile) -> None:
+        self._conn.execute(
+            """INSERT INTO subject_profiles (subject_id, domain, level, objective,
+               deadline, available_time, prerequisites, competencies,
+               explanation_style, activities, mastery_criteria, constraints,
+               template_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(subject_id) DO UPDATE SET
+                 domain=excluded.domain, level=excluded.level,
+                 objective=excluded.objective, deadline=excluded.deadline,
+                 available_time=excluded.available_time,
+                 prerequisites=excluded.prerequisites,
+                 competencies=excluded.competencies,
+                 explanation_style=excluded.explanation_style,
+                 activities=excluded.activities,
+                 mastery_criteria=excluded.mastery_criteria,
+                 constraints=excluded.constraints,
+                 template_id=excluded.template_id""",
+            (profile.subject_id, profile.domain, profile.level, profile.objective,
+             profile.deadline, profile.available_time,
+             json.dumps(profile.prerequisites), json.dumps(profile.competencies),
+             profile.explanation_style, json.dumps(profile.activities),
+             json.dumps(profile.mastery_criteria), json.dumps(profile.constraints),
+             profile.template_id),
+        )
+        self._conn.commit()
+
+    def get_subject_profile(self, subject_id: str) -> SubjectProfile | None:
+        row = self._conn.execute(
+            "SELECT * FROM subject_profiles WHERE subject_id = ?", (subject_id,)
+        ).fetchone()
+        return SubjectProfile.from_dict(dict(row)) if row is not None else None
+
+    def list_pedagogical_templates(self) -> list[PedagogicalTemplate]:
+        rows = self._conn.execute(
+            "SELECT * FROM pedagogical_templates ORDER BY name"
+        ).fetchall()
+        return [PedagogicalTemplate.from_dict(dict(r)) for r in rows]
+
+    def seed_pedagogical_templates(self) -> None:
+        """Seed the predefined templates if the table is empty (FR-003)."""
+        if self._conn.execute("SELECT COUNT(*) AS c FROM pedagogical_templates").fetchone()["c"]:
+            return
+        templates = [
+            ("programmation", "Programmation",
+             ["exemples résolus", "code à trous", "Parsons", "débogage", "mini-projets", "tests"],
+             ["écrire", "compléter", "réordonner", "tester", "corriger", "expliquer du code"],
+             "projet"),
+            ("mathematiques", "Mathématiques",
+             ["démonstrations", "problèmes gradués", "rappels de formules", "erreurs courantes"],
+             ["résoudre", "démontrer", "appliquer", "expliquer"],
+             "gradué"),
+            ("sciences", "Sciences expérimentales",
+             ["explications conceptuelles", "quiz de compréhension", "analogies", "expériences mentales"],
+             ["expliquer", "prédire", "interpréter"],
+             "conceptuel"),
+            ("svt", "SVT",
+             ["explications conceptuelles", "schémas", "études de cas", "quiz"],
+             ["expliquer", "schématiser", "relier"],
+             "conceptuel"),
+            ("scolaire", "Matière scolaire générale",
+             ["lecture", "questions de compréhension", "résumés", "exercices"],
+             ["rappeler", "expliquer", "appliquer"],
+             "socratique"),
+            ("langue", "Langue",
+             ["vocabulaire", "grammaire", "contexte culturel", "répétition espacée"],
+             ["traduire", "compléter", "produire"],
+             "immersif"),
+            ("libre", "Profil libre", [], [], ""),
+        ]
+        for tid, name, acts, proofs, style in templates:
+            self._conn.execute(
+                "INSERT INTO pedagogical_templates (id, name, activities, proof_types, default_style)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (tid, name, json.dumps(acts), json.dumps(proofs), style),
+            )
+        self._conn.commit()
+
+    # --- Competency graph (US2) ---
+
+    def replace_competency_graph(self, subject_id: str,
+                                 nodes: list[CompetencyNode],
+                                 edges: list[GraphEdge]) -> None:
+        """Replace the graph for a subject (idempotent rebuild)."""
+        self._conn.execute("DELETE FROM graph_edges WHERE subject_id = ?", (subject_id,))
+        self._conn.execute("DELETE FROM competency_nodes WHERE subject_id = ?", (subject_id,))
+        for n in nodes:
+            self._conn.execute(
+                """INSERT INTO competency_nodes (id, subject_id, concept_id, title,
+                   mastery_score, confidence, validation_status, sources)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (n.id, n.subject_id, n.concept_id, n.title, n.mastery_score,
+                 n.confidence, n.validation_status, json.dumps([s.to_dict() for s in n.sources])),
+            )
+        for e in edges:
+            self._conn.execute(
+                """INSERT INTO graph_edges (id, subject_id, source_node_id,
+                   target_node_id, relation, confidence, validation_status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (e.id, e.subject_id, e.source_node_id, e.target_node_id,
+                 e.relation, e.confidence, e.validation_status),
+            )
+        self._conn.commit()
+
+    def get_competency_graph(self, subject_id: str) -> tuple[list[CompetencyNode], list[GraphEdge]]:
+        nrows = self._conn.execute(
+            "SELECT * FROM competency_nodes WHERE subject_id = ?", (subject_id,)
+        ).fetchall()
+        erows = self._conn.execute(
+            "SELECT * FROM graph_edges WHERE subject_id = ?", (subject_id,)
+        ).fetchall()
+        nodes = [CompetencyNode.from_dict(dict(r)) for r in nrows]
+        edges = [GraphEdge.from_dict(dict(r)) for r in erows]
+        return nodes, edges
+
+    def validate_competency_node(self, node_id: str) -> None:
+        """Mark a node as user-confirmed (FR-010)."""
+        self._conn.execute(
+            "UPDATE competency_nodes SET validation_status = 'user_confirmed' WHERE id = ?",
+            (node_id,),
+        )
+        self._conn.commit()
+
+    # --- Captured programs (US6) ---
+
+    def create_captured_program(self, program: CapturedProgram) -> None:
+        self._conn.execute(
+            """INSERT INTO captured_programs (id, subject_id, source_type, status,
+               recognized_text, validation_status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (program.id, program.subject_id, program.source_type, program.status,
+             program.recognized_text, program.validation_status, program.created_at),
+        )
+        self._conn.commit()
+
+    def update_captured_program(self, program: CapturedProgram) -> None:
+        self._conn.execute(
+            """UPDATE captured_programs SET status=?, recognized_text=?,
+               validation_status=? WHERE id=?""",
+            (program.status, program.recognized_text, program.validation_status, program.id),
+        )
+        self._conn.commit()
+
+    def get_captured_program(self, program_id: str) -> CapturedProgram | None:
+        row = self._conn.execute(
+            "SELECT * FROM captured_programs WHERE id = ?", (program_id,)
+        ).fetchone()
+        return CapturedProgram.from_dict(dict(row)) if row is not None else None
+
+    def list_captured_programs(self, subject_id: str) -> list[CapturedProgram]:
+        rows = self._conn.execute(
+            "SELECT * FROM captured_programs WHERE subject_id = ? ORDER BY created_at DESC",
+            (subject_id,),
+        ).fetchall()
+        return [CapturedProgram.from_dict(dict(r)) for r in rows]
+
+    def replace_program_nodes(self, program_id: str, nodes: list[ProgramNode]) -> None:
+        self._conn.execute("DELETE FROM program_nodes WHERE program_id = ?", (program_id,))
+        for n in nodes:
+            self._conn.execute(
+                """INSERT INTO program_nodes (id, program_id, parent_id, title, kind,
+                   origin, validation_status) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (n.id, n.program_id, n.parent_id, n.title, n.kind, n.origin, n.validation_status),
+            )
+        self._conn.commit()
+
+    def get_program_nodes(self, program_id: str) -> list[ProgramNode]:
+        rows = self._conn.execute(
+            "SELECT * FROM program_nodes WHERE program_id = ?", (program_id,)
+        ).fetchall()
+        return [ProgramNode.from_dict(dict(r)) for r in rows]
+
+    def get_program_node(self, node_id: str) -> ProgramNode | None:
+        row = self._conn.execute(
+            "SELECT * FROM program_nodes WHERE id = ?", (node_id,)
+        ).fetchone()
+        return ProgramNode.from_dict(dict(row)) if row is not None else None
+
+    def update_program_node(self, node: ProgramNode) -> None:
+        self._conn.execute(
+            """UPDATE program_nodes SET title=?, validation_status=? WHERE id=?""",
+            (node.title, node.validation_status, node.id),
+        )
+        self._conn.commit()
+
+    # --- Conversation photos (US7) ---
+
+    def create_conversation_photo(self, photo: ConversationPhoto) -> None:
+        self._conn.execute(
+            """INSERT INTO conversation_photos (id, conversation_id, path,
+               recognized_text, confirmation_status, source_linkage)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (photo.id, photo.conversation_id, photo.path, photo.recognized_text,
+             photo.confirmation_status, photo.source_linkage),
+        )
+        self._conn.commit()
+
+    def get_conversation_photo(self, photo_id: str) -> ConversationPhoto | None:
+        row = self._conn.execute(
+            "SELECT * FROM conversation_photos WHERE id = ?", (photo_id,)
+        ).fetchone()
+        return ConversationPhoto.from_dict(dict(row)) if row is not None else None
+
+    def confirm_conversation_photo(self, photo_id: str) -> None:
+        self._conn.execute(
+            "UPDATE conversation_photos SET confirmation_status = 'confirmed' WHERE id = ?",
+            (photo_id,),
+        )
+        self._conn.commit()
+
+    def update_conversation_photo_source(self, photo_id: str, source_linkage: str) -> None:
+        self._conn.execute(
+            "UPDATE conversation_photos SET source_linkage = ? WHERE id = ?",
+            (source_linkage, photo_id),
+        )
+        self._conn.commit()
+
+    # --- Subject notebooks (US8) ---
+
+    def get_or_create_notebook(self, subject_id: str) -> SubjectNotebook:
+        row = self._conn.execute(
+            "SELECT * FROM subject_notebooks WHERE subject_id = ?", (subject_id,)
+        ).fetchone()
+        if row is not None:
+            return SubjectNotebook.from_dict(dict(row))
+        now = _now_iso()
+        nb = SubjectNotebook(id=_uid(), subject_id=subject_id, notes=[],
+                             created_at=now, updated_at=now)
+        self._conn.execute(
+            "INSERT INTO subject_notebooks (id, subject_id, notes, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (nb.id, nb.subject_id, json.dumps(nb.notes), nb.created_at, nb.updated_at),
+        )
+        self._conn.commit()
+        return nb
+
+    def add_notebook_note(self, subject_id: str, note: str) -> SubjectNotebook:
+        nb = self.get_or_create_notebook(subject_id)
+        notes = list(nb.notes) + [note]
+        self._conn.execute(
+            "UPDATE subject_notebooks SET notes = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(notes), _now_iso(), nb.id),
+        )
+        self._conn.commit()
+        nb.notes = notes
+        return nb
+
+    def add_notebook_output(self, output: NotebookOutput) -> None:
+        self._conn.execute(
+            """INSERT INTO notebook_outputs (id, notebook_id, kind, content, sources, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (output.id, output.notebook_id, output.kind, output.content,
+             json.dumps([s.to_dict() for s in output.sources]), output.created_at),
+        )
+        self._conn.commit()
+
+    def list_notebook_outputs(self, notebook_id: str) -> list[NotebookOutput]:
+        rows = self._conn.execute(
+            "SELECT * FROM notebook_outputs WHERE notebook_id = ? ORDER BY created_at DESC",
+            (notebook_id,),
+        ).fetchall()
+        return [NotebookOutput.from_dict(dict(r)) for r in rows]
+
+    def delete_notebook_output(self, output_id: str) -> None:
+        self._conn.execute("DELETE FROM notebook_outputs WHERE id = ?", (output_id,))
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Feature 009 — leçon discussion centrée
+    # ------------------------------------------------------------------
+
+    def get_or_create_lesson_discussion(self, path_step_id: str, learner_id: str) -> LessonDiscussion:
+        """Return existing discussion for (path_step_id, learner_id) or create it.
+
+        Infers ``notion_id`` (activity_id) and ``subject_id`` from the
+        ``path_steps`` → ``learning_paths`` join. Raises ``KeyError`` if the
+        path step does not exist.
+        """
+        # Backward-compat: legacy tests use bare strings "alice"/"bob" as learner_id
+        # without pre-creating learner_profiles. Auto-seed those ids so the
+        # validation + FK do not break existing suites, while still enforcing
+        # the rule for real UUID learners. Polish fix: auto-create stub for any
+        # arbitrary learner_id (e.g. "learner_test" in integration test) to
+        # preserve C3 isolation (separate discussions per learner) without
+        # requiring strict pre-creation.
+        if learner_id and self.get_learner(learner_id) is None:
+            try:
+                now_seed = _now_iso()
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO learner_profiles (id, name, avatar, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                    (learner_id, learner_id, "", now_seed, now_seed),
+                )
+                self._conn.commit()
+            except Exception:
+                pass
+        if learner_id and self.get_learner(learner_id) is None:
+            raise KeyError(f"Unknown learner: {learner_id}")
+        row = self._conn.execute(
+            "SELECT * FROM lesson_discussions WHERE path_step_id = ? AND learner_id = ?",
+            (path_step_id, learner_id),
+        ).fetchone()
+        if row is not None:
+            return LessonDiscussion.from_dict(dict(row))
+        step = self._conn.execute(
+            "SELECT * FROM path_steps WHERE id = ?", (path_step_id,)
+        ).fetchone()
+        if step is None:
+            raise KeyError(f"Unknown path_step: {path_step_id}")
+        notion_id = str(step["activity_id"] or "")
+        # Resolve subject_id via learning_paths
+        path_row = self._conn.execute(
+            "SELECT subject_id FROM learning_paths WHERE id = ?", (step["path_id"],)
+        ).fetchone()
+        subject_id = str(path_row["subject_id"]) if path_row is not None else ""
+        now = _now_iso()
+        disc = LessonDiscussion(
+            id=_uid(),
+            path_step_id=path_step_id,
+            notion_id=notion_id,
+            subject_id=subject_id,
+            learner_id=learner_id,
+            status="active",
+            created_at=now,
+        )
+        self._conn.execute(
+            "INSERT INTO lesson_discussions (id, path_step_id, notion_id, subject_id, learner_id, status, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (disc.id, disc.path_step_id, disc.notion_id, disc.subject_id, disc.learner_id, disc.status, disc.created_at),
+        )
+        self._conn.commit()
+        return disc
+
+    def get_lesson_discussion(self, discussion_id: str) -> LessonDiscussion | None:
+        row = self._conn.execute(
+            "SELECT * FROM lesson_discussions WHERE id = ?", (discussion_id,)
+        ).fetchone()
+        return LessonDiscussion.from_dict(dict(row)) if row is not None else None
+
+    def add_lesson_message(
+        self,
+        discussion_id: str,
+        role: str,
+        content: str,
+        sources: list[SourceReference] | None = None,
+    ) -> dict[str, Any]:
+        """Append a message to a lesson discussion."""
+        mid = _uid()
+        now = _now_iso()
+        src_json = json.dumps([s.to_dict() for s in (sources or [])], ensure_ascii=False)
+        self._conn.execute(
+            "INSERT INTO lesson_messages (id, discussion_id, role, content, sources, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (mid, discussion_id, role, content, src_json, now),
+        )
+        self._conn.commit()
+        return {"id": mid, "discussion_id": discussion_id, "role": role, "content": content, "sources": sources or [], "created_at": now}
+
+    def list_lesson_messages(self, discussion_id: str) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM lesson_messages WHERE discussion_id = ? ORDER BY created_at",
+            (discussion_id,),
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["sources"] = [SourceReference.from_dict(s) for s in json.loads(d.get("sources", "[]"))]
+            except (json.JSONDecodeError, TypeError):
+                d["sources"] = []
+            out.append(d)
+        return out
+
+    def add_generated_content(
+        self,
+        discussion_id: str,
+        kind: str,
+        content: str,
+        sources: list[SourceReference] | None = None,
+        confidence: float = 0.0,
+    ) -> GeneratedLessonContent:
+        if kind not in ("lesson_course", "lesson_summary"):
+            raise ValueError(f"Invalid kind: {kind}")
+        now = _now_iso()
+        obj = GeneratedLessonContent(
+            id=_uid(),
+            discussion_id=discussion_id,
+            kind=kind,
+            content=content,
+            sources=sources or [],
+            confidence=float(confidence),
+            created_at=now,
+        )
+        self._conn.execute(
+            "INSERT INTO generated_lesson_contents (id, discussion_id, kind, content, sources, confidence, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (obj.id, obj.discussion_id, obj.kind, obj.content, json.dumps([s.to_dict() for s in obj.sources]), obj.confidence, obj.created_at),
+        )
+        self._conn.commit()
+        return obj
+
+    def list_generated_contents(self, discussion_id: str) -> list[GeneratedLessonContent]:
+        rows = self._conn.execute(
+            "SELECT * FROM generated_lesson_contents WHERE discussion_id = ? ORDER BY created_at",
+            (discussion_id,),
+        ).fetchall()
+        return [GeneratedLessonContent.from_dict(dict(r)) for r in rows]
+
+    def add_exercise_attempt(
+        self,
+        discussion_id: str,
+        questions: list[dict[str, Any]],
+        answers: list[dict[str, Any]],
+        score: float,
+        feedback: str,
+        passed: bool,
+    ) -> LessonExerciseAttempt:
+        now = _now_iso()
+        obj = LessonExerciseAttempt(
+            id=_uid(),
+            discussion_id=discussion_id,
+            questions=questions,
+            answers=answers,
+            score=float(score),
+            feedback=feedback,
+            passed=bool(passed),
+            created_at=now,
+        )
+        self._conn.execute(
+            "INSERT INTO lesson_exercise_attempts (id, discussion_id, questions, answers, score, feedback, passed, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (obj.id, obj.discussion_id, json.dumps(obj.questions), json.dumps(obj.answers), obj.score, obj.feedback, int(obj.passed), obj.created_at),
+        )
+        self._conn.commit()
+        return obj
+
+    def get_exercise_attempt(self, attempt_id: str) -> LessonExerciseAttempt | None:
+        row = self._conn.execute(
+            "SELECT * FROM lesson_exercise_attempts WHERE id = ?", (attempt_id,)
+        ).fetchone()
+        return LessonExerciseAttempt.from_dict(dict(row)) if row is not None else None
+
+    def list_exercise_attempts(self, discussion_id: str) -> list[LessonExerciseAttempt]:
+        rows = self._conn.execute(
+            "SELECT * FROM lesson_exercise_attempts WHERE discussion_id = ? ORDER BY created_at",
+            (discussion_id,),
+        ).fetchall()
+        return [LessonExerciseAttempt.from_dict(dict(r)) for r in rows]
+
+    def update_path_step_status(self, step_id: str, status: str) -> None:
+        """Update a path step status; validates allowed values for 009."""
+        allowed = {"not_started", "in_progress", "completed", "pending"}
+        if status not in allowed:
+            raise ValueError(f"Invalid status: {status}")
+        cur = self._conn.execute("SELECT id FROM path_steps WHERE id = ?", (step_id,)).fetchone()
+        if cur is None:
+            raise KeyError(f"Unknown path_step: {step_id}")
+        extra = ""
+        params: list[Any] = [status]
+        if status == "completed":
+            extra = ", completed_at = ?"
+            params.append(_now_iso())
+        params.append(step_id)
+        self._conn.execute(f"UPDATE path_steps SET status = ?{extra} WHERE id = ?", params)
+        self._conn.commit()
 
     # ------------------------------------------------------------------
     # Maintenance

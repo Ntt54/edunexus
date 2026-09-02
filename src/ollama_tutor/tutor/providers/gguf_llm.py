@@ -38,6 +38,7 @@ class _LLMStreamState:
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    finish_reason: str | None = None
 
 
 class GGUFLLMProvider:
@@ -182,6 +183,9 @@ class GGUFLLMProvider:
                     choices = chunk.get("choices", [])
                     delta = choices[0].get("delta", {}) if choices else {}
 
+                    if choices and choices[0].get("finish_reason"):
+                        state.finish_reason = choices[0].get("finish_reason")
+
                     # Reasoning / thinking content.
                     reasoning = delta.get("reasoning_content") or delta.get(
                         "reasoning"
@@ -228,7 +232,7 @@ class GGUFLLMProvider:
                 total_duration=elapsed,
             )
 
-        yield StreamEvent(kind="done", stats=stats)
+        yield StreamEvent(kind="done", stats=stats, truncated=(state.finish_reason == "length"))
 
     # ------------------------------------------------------------------
     # Embeddings (non-streaming, /v1/embeddings)

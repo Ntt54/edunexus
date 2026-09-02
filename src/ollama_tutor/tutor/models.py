@@ -301,7 +301,11 @@ class Exercise:
 
 @dataclass
 class ExerciseAttempt:
-    """A learner attempt at an exercise (data-model.md: ``exercise_attempts``)."""
+    """A learner attempt at an exercise (data-model.md: ``exercise_attempts``).
+
+    Feature 008 (FR-018) adds ``time_ms``, ``hints_used`` and ``source`` so
+    the adaptation engine can record answer/time/hints/source per activity.
+    """
 
     id: str
     exercise_id: str
@@ -309,6 +313,9 @@ class ExerciseAttempt:
     answer: str = ""
     feedback: str = ""
     created_at: str = ""
+    time_ms: int = 0
+    hints_used: int = 0
+    source: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -318,6 +325,9 @@ class ExerciseAttempt:
             "answer": self.answer,
             "feedback": self.feedback,
             "created_at": self.created_at,
+            "time_ms": self.time_ms,
+            "hints_used": self.hints_used,
+            "source": self.source,
         }
 
     @classmethod
@@ -329,6 +339,9 @@ class ExerciseAttempt:
             answer=str(raw.get("answer", "")),
             feedback=str(raw.get("feedback", "")),
             created_at=str(raw.get("created_at", "")),
+            time_ms=int(raw.get("time_ms", 0) or 0),
+            hints_used=int(raw.get("hints_used", 0) or 0),
+            source=str(raw.get("source", "")),
         )
 
 
@@ -810,7 +823,11 @@ class LearningPath:
 
 @dataclass
 class PathStep:
-    """One step in a learning path (Feature 006)."""
+    """One step in a learning path (Feature 006, extended for Feature 008 US3).
+
+    Feature 008 adds explicability fields: ``why_now``, ``prerequisites``,
+    ``sources``, ``planned_activity``, ``expected_proof`` (FR-013).
+    """
 
     id: str
     path_id: str
@@ -818,8 +835,19 @@ class PathStep:
     activity_type: str  # concept | quiz | exercise | flashcard_review | reading
     activity_id: str    # ID of the referenced concept/quiz/exercise/flashcard/book
     title: str = ""
-    status: str = "pending"  # pending | in_progress | completed
+    status: str = "not_started"  # not_started | in_progress | completed (legacy pending -> not_started)
     completed_at: str | None = None
+    why_now: str = ""
+    prerequisites: list[str] = None  # type: ignore[assignment]
+    sources: list[SourceReference] = None  # type: ignore[assignment]
+    planned_activity: str = ""
+    expected_proof: str = ""
+
+    def __post_init__(self) -> None:
+        if self.prerequisites is None:
+            self.prerequisites = []
+        if self.sources is None:
+            self.sources = []
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -831,6 +859,11 @@ class PathStep:
             "title": self.title,
             "status": self.status,
             "completed_at": self.completed_at,
+            "why_now": self.why_now,
+            "prerequisites": self.prerequisites,
+            "sources": [s.to_dict() for s in self.sources],
+            "planned_activity": self.planned_activity,
+            "expected_proof": self.expected_proof,
         }
 
     @classmethod
@@ -842,6 +875,600 @@ class PathStep:
             activity_type=str(raw.get("activity_type", "")),
             activity_id=str(raw.get("activity_id", "")),
             title=str(raw.get("title", "")),
-            status=str(raw.get("status", "pending")),
+            status=str(raw.get("status", "not_started")),
             completed_at=raw.get("completed_at"),
+            why_now=str(raw.get("why_now", "")),
+            prerequisites=list(_coerce_json(raw.get("prerequisites"), [])),
+            sources=[SourceReference.from_dict(s) for s in _coerce_json(raw.get("sources"), [])],
+            planned_activity=str(raw.get("planned_activity", "")),
+            expected_proof=str(raw.get("expected_proof", "")),
+        )
+
+
+# ----------------------------------------------------------------------
+# Feature 008 — EduNexus adaptatif
+# ----------------------------------------------------------------------
+
+
+@dataclass
+class LearnerProfile:
+    """A family member's profile on a single machine (Feature 008, US9).
+
+    Owns its own subjects, graphs, paths, progression, conversations and
+    notebook. All data stays local (FR-037/FR-038/FR-039).
+    """
+
+    id: str
+    name: str
+    avatar: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "avatar": self.avatar,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "LearnerProfile":
+        return cls(
+            id=str(raw["id"]),
+            name=str(raw.get("name", "")),
+            avatar=str(raw.get("avatar", "")),
+            created_at=str(raw.get("created_at", "")),
+            updated_at=str(raw.get("updated_at", "")),
+        )
+
+
+@dataclass
+class PedagogicalTemplate:
+    """Predefined profile preset (Feature 008, US1).
+
+    Prefills activities and proof types but remains fully editable (FR-003).
+    """
+
+    id: str
+    name: str
+    activities: list[str]
+    proof_types: list[str]
+    default_style: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "activities": self.activities,
+            "proof_types": self.proof_types,
+            "default_style": self.default_style,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "PedagogicalTemplate":
+        return cls(
+            id=str(raw["id"]),
+            name=str(raw.get("name", "")),
+            activities=list(_coerce_json(raw.get("activities"), [])),
+            proof_types=list(_coerce_json(raw.get("proof_types"), [])),
+            default_style=str(raw.get("default_style", "")),
+        )
+
+
+@dataclass
+class SubjectProfile:
+    """Structured pedagogical configuration of a subject (Feature 008, US1).
+
+    Domain, level, objective, deadline, prerequisites, competencies, style,
+    activities, mastery criteria, constraints (FR-001).
+    """
+
+    subject_id: str
+    domain: str = ""
+    level: str = ""
+    objective: str = ""
+    deadline: str = ""
+    available_time: str = ""
+    prerequisites: list[str] = None  # type: ignore[assignment]
+    competencies: list[str] = None  # type: ignore[assignment]
+    explanation_style: str = ""
+    activities: list[str] = None  # type: ignore[assignment]
+    mastery_criteria: list[str] = None  # type: ignore[assignment]
+    constraints: dict[str, Any] = None  # type: ignore[assignment]
+    template_id: str = ""
+
+    def __post_init__(self) -> None:
+        if self.prerequisites is None:
+            self.prerequisites = []
+        if self.competencies is None:
+            self.competencies = []
+        if self.activities is None:
+            self.activities = []
+        if self.mastery_criteria is None:
+            self.mastery_criteria = []
+        if self.constraints is None:
+            self.constraints = {}
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "subject_id": self.subject_id,
+            "domain": self.domain,
+            "level": self.level,
+            "objective": self.objective,
+            "deadline": self.deadline,
+            "available_time": self.available_time,
+            "prerequisites": self.prerequisites,
+            "competencies": self.competencies,
+            "explanation_style": self.explanation_style,
+            "activities": self.activities,
+            "mastery_criteria": self.mastery_criteria,
+            "constraints": self.constraints,
+            "template_id": self.template_id,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "SubjectProfile":
+        return cls(
+            subject_id=str(raw["subject_id"]),
+            domain=str(raw.get("domain", "")),
+            level=str(raw.get("level", "")),
+            objective=str(raw.get("objective", "")),
+            deadline=str(raw.get("deadline", "")),
+            available_time=str(raw.get("available_time", "")),
+            prerequisites=list(_coerce_json(raw.get("prerequisites"), [])),
+            competencies=list(_coerce_json(raw.get("competencies"), [])),
+            explanation_style=str(raw.get("explanation_style", "")),
+            activities=list(_coerce_json(raw.get("activities"), [])),
+            mastery_criteria=list(_coerce_json(raw.get("mastery_criteria"), [])),
+            constraints=dict(_coerce_json(raw.get("constraints"), {})),
+            template_id=str(raw.get("template_id", "")),
+        )
+
+
+@dataclass
+class SourceReference:
+    """Book/chapter/page reference with justifying excerpt and confidence."""
+
+    book_id: str = ""
+    chapter: str = ""
+    page: int | None = None
+    excerpt: str = ""
+    confidence: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "book_id": self.book_id,
+            "chapter": self.chapter,
+            "page": self.page,
+            "excerpt": self.excerpt,
+            "confidence": self.confidence,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "SourceReference":
+        return cls(
+            book_id=str(raw.get("book_id", "")),
+            chapter=str(raw.get("chapter", "")),
+            page=raw.get("page"),
+            excerpt=str(raw.get("excerpt", "")),
+            confidence=float(raw.get("confidence", 0.0)),
+        )
+
+
+@dataclass
+class CompetencyNode:
+    """A notion/competency in the graph (Feature 008, US2).
+
+    Mastery score, sources, confidence, validation status (FR-007..FR-010).
+    """
+
+    id: str
+    subject_id: str
+    concept_id: str = ""
+    title: str = ""
+    mastery_score: float = 0.0
+    confidence: float = 0.0
+    validation_status: str = "extracted"  # extracted | ai_proposed | user_confirmed
+    sources: list[SourceReference] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.sources is None:
+            self.sources = []
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "subject_id": self.subject_id,
+            "concept_id": self.concept_id,
+            "title": self.title,
+            "mastery_score": self.mastery_score,
+            "confidence": self.confidence,
+            "validation_status": self.validation_status,
+            "sources": [s.to_dict() for s in self.sources],
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "CompetencyNode":
+        return cls(
+            id=str(raw["id"]),
+            subject_id=str(raw.get("subject_id", "")),
+            concept_id=str(raw.get("concept_id", "")),
+            title=str(raw.get("title", "")),
+            mastery_score=float(raw.get("mastery_score", 0.0)),
+            confidence=float(raw.get("confidence", 0.0)),
+            validation_status=str(raw.get("validation_status", "extracted")),
+            sources=[SourceReference.from_dict(s) for s in _coerce_json(raw.get("sources"), [])],
+        )
+
+
+@dataclass
+class GraphEdge:
+    """A relation between nodes (Feature 008, US2).
+
+    requires | supports | covered_by | contrasts_with (FR-007).
+    """
+
+    id: str
+    subject_id: str
+    source_node_id: str
+    target_node_id: str
+    relation: str = "requires"
+    confidence: float = 0.0
+    validation_status: str = "extracted"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "subject_id": self.subject_id,
+            "source_node_id": self.source_node_id,
+            "target_node_id": self.target_node_id,
+            "relation": self.relation,
+            "confidence": self.confidence,
+            "validation_status": self.validation_status,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "GraphEdge":
+        return cls(
+            id=str(raw["id"]),
+            subject_id=str(raw.get("subject_id", "")),
+            source_node_id=str(raw.get("source_node_id", "")),
+            target_node_id=str(raw.get("target_node_id", "")),
+            relation=str(raw.get("relation", "requires")),
+            confidence=float(raw.get("confidence", 0.0)),
+            validation_status=str(raw.get("validation_status", "extracted")),
+        )
+
+
+@dataclass
+class CapturedProgram:
+    """A program/table of contents captured from photo or PDF (Feature 008, US6)."""
+
+    id: str
+    subject_id: str
+    source_type: str = "photo"  # photo | pdf
+    status: str = "processing"  # processing | ready | error
+    recognized_text: str = ""
+    validation_status: str = "pending"  # pending | confirmed
+    created_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "subject_id": self.subject_id,
+            "source_type": self.source_type,
+            "status": self.status,
+            "recognized_text": self.recognized_text,
+            "validation_status": self.validation_status,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "CapturedProgram":
+        return cls(
+            id=str(raw["id"]),
+            subject_id=str(raw.get("subject_id", "")),
+            source_type=str(raw.get("source_type", "photo")),
+            status=str(raw.get("status", "processing")),
+            recognized_text=str(raw.get("recognized_text", "")),
+            validation_status=str(raw.get("validation_status", "pending")),
+            created_at=str(raw.get("created_at", "")),
+        )
+
+
+@dataclass
+class ProgramNode:
+    """A chapter/sub-part/competency in the captured program tree (Feature 008, US6)."""
+
+    id: str
+    program_id: str
+    parent_id: str = ""
+    title: str = ""
+    kind: str = "chapter"  # chapter | sub_part | competency
+    origin: str = "ocr"  # ocr | book | ai_generated
+    validation_status: str = "pending"  # pending | confirmed | corrected
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "program_id": self.program_id,
+            "parent_id": self.parent_id,
+            "title": self.title,
+            "kind": self.kind,
+            "origin": self.origin,
+            "validation_status": self.validation_status,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "ProgramNode":
+        return cls(
+            id=str(raw["id"]),
+            program_id=str(raw.get("program_id", "")),
+            parent_id=str(raw.get("parent_id", "")),
+            title=str(raw.get("title", "")),
+            kind=str(raw.get("kind", "chapter")),
+            origin=str(raw.get("origin", "ocr")),
+            validation_status=str(raw.get("validation_status", "pending")),
+        )
+
+
+@dataclass
+class CaptureImage:
+    """A retained sharp page from a photo or PDF (Feature 008, US6)."""
+
+    id: str
+    program_id: str
+    path: str = ""
+    preprocess_state: str = "raw"  # raw | deskewed | cropped | contrasted
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "program_id": self.program_id,
+            "path": self.path,
+            "preprocess_state": self.preprocess_state,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "CaptureImage":
+        return cls(
+            id=str(raw["id"]),
+            program_id=str(raw.get("program_id", "")),
+            path=str(raw.get("path", "")),
+            preprocess_state=str(raw.get("preprocess_state", "raw")),
+        )
+
+
+@dataclass
+class ConversationPhoto:
+    """A photo imported into a tutoring conversation (Feature 008, US7)."""
+
+    id: str
+    conversation_id: str
+    path: str = ""
+    recognized_text: str = ""
+    confirmation_status: str = "pending"  # pending | confirmed
+    source_linkage: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "conversation_id": self.conversation_id,
+            "path": self.path,
+            "recognized_text": self.recognized_text,
+            "confirmation_status": self.confirmation_status,
+            "source_linkage": self.source_linkage,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "ConversationPhoto":
+        return cls(
+            id=str(raw["id"]),
+            conversation_id=str(raw.get("conversation_id", "")),
+            path=str(raw.get("path", "")),
+            recognized_text=str(raw.get("recognized_text", "")),
+            confirmation_status=str(raw.get("confirmation_status", "pending")),
+            source_linkage=str(raw.get("source_linkage", "")),
+        )
+
+
+@dataclass
+class SubjectNotebook:
+    """A local space grouping books, program, objectives, notes, path (Feature 008, US8)."""
+
+    id: str
+    subject_id: str
+    notes: list[str] = None  # type: ignore[assignment]
+    created_at: str = ""
+    updated_at: str = ""
+
+    def __post_init__(self) -> None:
+        if self.notes is None:
+            self.notes = []
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "subject_id": self.subject_id,
+            "notes": self.notes,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "SubjectNotebook":
+        return cls(
+            id=str(raw["id"]),
+            subject_id=str(raw.get("subject_id", "")),
+            notes=list(_coerce_json(raw.get("notes"), [])),
+            created_at=str(raw.get("created_at", "")),
+            updated_at=str(raw.get("updated_at", "")),
+        )
+
+
+@dataclass
+class NotebookOutput:
+    """A generated artifact linked to its sources and deletable (Feature 008, US8)."""
+
+    id: str
+    notebook_id: str
+    kind: str = "summary"  # summary | study_sheet | quiz | comparison | explanation
+    content: str = ""
+    sources: list[SourceReference] = None  # type: ignore[assignment]
+    created_at: str = ""
+
+    def __post_init__(self) -> None:
+        if self.sources is None:
+            self.sources = []
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "notebook_id": self.notebook_id,
+            "kind": self.kind,
+            "content": self.content,
+            "sources": [s.to_dict() for s in self.sources],
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "NotebookOutput":
+        return cls(
+            id=str(raw["id"]),
+            notebook_id=str(raw.get("notebook_id", "")),
+            kind=str(raw.get("kind", "summary")),
+            content=str(raw.get("content", "")),
+            sources=[SourceReference.from_dict(s) for s in _coerce_json(raw.get("sources"), [])],
+            created_at=str(raw.get("created_at", "")),
+        )
+
+
+# ----------------------------------------------------------------------
+# Feature 009 — Lesson centred on notion (lesson discussion)
+# ----------------------------------------------------------------------
+
+
+@dataclass
+class LessonDiscussion:
+    """Discussion centred on a lesson/notion (Feature 009).
+
+    Isolated by ``learner_id`` (FR-014) and bound to a ``path_step_id``.
+    """
+
+    id: str
+    path_step_id: str
+    notion_id: str
+    subject_id: str
+    learner_id: str
+    status: str = "active"  # active | closed
+    created_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "path_step_id": self.path_step_id,
+            "notion_id": self.notion_id,
+            "subject_id": self.subject_id,
+            "learner_id": self.learner_id,
+            "status": self.status,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "LessonDiscussion":
+        return cls(
+            id=str(raw["id"]),
+            path_step_id=str(raw.get("path_step_id", "")),
+            notion_id=str(raw.get("notion_id", "")),
+            subject_id=str(raw.get("subject_id", "")),
+            learner_id=str(raw.get("learner_id", "")),
+            status=str(raw.get("status", "active")),
+            created_at=str(raw.get("created_at", "")),
+        )
+
+
+@dataclass
+class GeneratedLessonContent:
+    """Generated course or summary for a lesson discussion (Feature 009)."""
+
+    id: str
+    discussion_id: str
+    kind: str  # lesson_course | lesson_summary
+    content: str = ""
+    sources: list[SourceReference] = None  # type: ignore[assignment]
+    confidence: float = 0.0
+    created_at: str = ""
+
+    def __post_init__(self) -> None:
+        if self.sources is None:
+            self.sources = []
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "discussion_id": self.discussion_id,
+            "kind": self.kind,
+            "content": self.content,
+            "sources": [s.to_dict() for s in self.sources],
+            "confidence": self.confidence,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "GeneratedLessonContent":
+        return cls(
+            id=str(raw["id"]),
+            discussion_id=str(raw.get("discussion_id", "")),
+            kind=str(raw.get("kind", "lesson_course")),
+            content=str(raw.get("content", "")),
+            sources=[SourceReference.from_dict(s) for s in _coerce_json(raw.get("sources"), [])],
+            confidence=float(raw.get("confidence", 0.0)),
+            created_at=str(raw.get("created_at", "")),
+        )
+
+
+@dataclass
+class LessonExerciseAttempt:
+    """Exercise attempt for a lesson discussion (Feature 009, FR-007/FR-008)."""
+
+    id: str
+    discussion_id: str
+    questions: list[dict[str, Any]] = None  # type: ignore[assignment]
+    answers: list[dict[str, Any]] = None  # type: ignore[assignment]
+    score: float = 0.0
+    feedback: str = ""
+    passed: bool = False
+    created_at: str = ""
+
+    def __post_init__(self) -> None:
+        if self.questions is None:
+            self.questions = []
+        if self.answers is None:
+            self.answers = []
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "discussion_id": self.discussion_id,
+            "questions": self.questions,
+            "answers": self.answers,
+            "score": self.score,
+            "feedback": self.feedback,
+            "passed": self.passed,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "LessonExerciseAttempt":
+        return cls(
+            id=str(raw["id"]),
+            discussion_id=str(raw.get("discussion_id", "")),
+            questions=list(_coerce_json(raw.get("questions"), [])),
+            answers=list(_coerce_json(raw.get("answers"), [])),
+            score=float(raw.get("score", 0.0)),
+            feedback=str(raw.get("feedback", "")),
+            passed=bool(raw.get("passed", False)),
+            created_at=str(raw.get("created_at", "")),
         )

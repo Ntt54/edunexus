@@ -485,6 +485,103 @@ def build_learning_path_prompt(
     return "\n".join(lines)
 
 
+def build_path_from_books_prompt(
+    book_structures: list[dict],
+    level: str = "intermediate",
+) -> str:
+    """Build a system prompt asking the LLM to create a learning path from books' TOC.
+
+    ``book_structures`` is a list of dicts with keys: title, chapters (list of
+    dicts with title, sections).
+    ``level`` is the learner's level.
+
+    The LLM must return a JSON array of step objects with keys:
+    - title: string
+    - type: "concept" | "exercise" | "quiz" | "reading"
+    - duration: number (minutes)
+    - source: string (book title or "Général")
+
+    Structure: 2 lessons → exercises → 2 lessons → exercises → ... → project.
+    """
+    level = _normalize_level(level)
+
+    # Format book structures as readable text.
+    book_blocks: list[str] = []
+    for bs in book_structures:
+        title = bs.get("title", "Sans titre")
+        chapters = bs.get("chapters", [])
+        chapter_lines: list[str] = []
+        for ch in chapters:
+            ch_title = ch.get("title", "")
+            sections = ch.get("sections", [])
+            if sections:
+                section_str = ", ".join(sections)
+                chapter_lines.append(f"  - {ch_title} : {section_str}")
+            else:
+                chapter_lines.append(f"  - {ch_title}")
+        chapters_str = "\n".join(chapter_lines) if chapter_lines else "  (aucun chapitre)"
+        book_blocks.append(f"📖 {title}\n{chapters_str}")
+    books_str = "\n\n".join(book_blocks) if book_blocks else "(aucun livre)"
+
+    lines: list[str] = []
+    lines.append(
+        "Tu es un tuteur pédagogique qui conçoit un parcours d'apprentissage "
+        "structuré en français."
+    )
+    lines.append("")
+    lines.append(
+        "Tâche — Créer un parcours d'apprentissage à partir des tables des matières "
+        "de livres sélectionnés."
+    )
+    lines.append("")
+    lines.append(f"Niveau de l'élève : {level}.")
+    lines.append("")
+    lines.append("Structure des livres :")
+    lines.append(books_str)
+    lines.append("")
+    lines.append("Règles de construction du parcours :")
+    lines.append(
+        "- Le parcours alterne 2 leçons (concept ou reading) puis des exercices "
+        "qui testent les leçons précédentes."
+    )
+    lines.append(
+        "- Après chaque bloc de 2-3 leçons, insère un quiz de validation."
+    )
+    lines.append(
+        "- Les exercices testent les concepts des leçons précédentes (pas les suivantes)."
+    )
+    lines.append(
+        "- La dernière étape est un projet qui synthétise tout le parcours."
+    )
+    lines.append(
+        "- Chaque étape doit avoir un titre explicite, un type, une durée estimée "
+        "(en minutes) et une source (titre du livre ou 'Général')."
+    )
+    lines.append(
+        "- Répartis les leçons sur les différents livres quand c'est pertinent."
+    )
+    lines.append("")
+    lines.append("Réponds STRICTEMENT en JSON, sans aucun texte autour, sous la forme :")
+    lines.append(
+        '[{"title": "Titre de l\'étape", "type": "concept", "duration": 15, '
+        '"source": "Titre du livre"}]'
+    )
+    lines.append("")
+    lines.append(
+        "Les valeurs de type possibles sont : \"concept\", \"exercise\", \"quiz\", "
+        "\"reading\"."
+    )
+    lines.append(
+        "Le parcours doit contenir au moins 6 étapes et au plus 20 étapes."
+    )
+    lines.append("")
+    lines.append(
+        "Toute la réponse est en français. Chaque étape doit être pertinente "
+        "par rapport au contenu des livres fournis."
+    )
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # US3 — Diagnostic initial / quiz de positionnement (T020)
 # ---------------------------------------------------------------------------

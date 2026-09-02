@@ -21,9 +21,20 @@ def find_ollama_binary() -> str | None:
 
 
 def get_config_dir() -> Path:
-    """Get platform-appropriate config directory."""
+    """Get platform-appropriate config directory.
+
+    Default is ``~/.config/ollama-tui`` on POSIX and ``%APPDATA%/ollama-tui``
+    on Windows. ``EDUNEXUS_DATA_DIR`` env var is an opt-in override (when set
+    it takes precedence for testing / custom locations).
+    """
+    import os
+
+    env = os.environ.get("EDUNEXUS_DATA_DIR")
+    if env:
+        p = Path(env)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
     if is_windows():
-        import os
         base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
         return base / "ollama-tui"
     return Path.home() / ".config" / "ollama-tui"
