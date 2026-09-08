@@ -51,7 +51,7 @@ from ..tutor.providers.gguf_embedding import (
 )
 from ..tutor.providers.hybrid_parser import HybridDocumentParser
 from ..tutor.conversations import ConversationService
-from ..tutor.errors import AppError
+from ..tutor.errors import AppError, NotFoundError
 from ..tutor.service import (
     MAX_UPLOAD_BYTES,
     TutorService,
@@ -182,6 +182,26 @@ class TutorPathRequest(BaseModel):
 
 class TutorGradeRequest(BaseModel):
     success: bool = False
+    # 010 P2-Adaptatif (FSRS, opt-in) : notation 1=Oublié … 4=Facile.
+    # Quand rating est fourni (1-4), la route grade via FSRS ; sinon le
+    # booléen legacy ``success`` (échelle D8) est conservé à l'identique.
+    rating: int | None = None
+
+
+class SandboxRunRequest(BaseModel):
+    """Code Python à exécuter en sandbox (010 P0-A, FR-002/FR-003)."""
+
+    code: str = ""
+    stdin: str = ""
+
+
+class FeedbackCreate(BaseModel):
+    """Avis apprenant HITL minimal (010 P2, item 9 : note + commentaire)."""
+
+    target_type: str = ""
+    target_id: str = ""
+    rating: int = 0
+    comment: str = ""
 
 
 class TutorQuizRequest(BaseModel):
@@ -1531,18 +1551,139 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
 
     @app.get("/api/tutor/subjects/{subject_id}/reviews/due")
     async def tutor_reviews_due(subject_id: str) -> dict[str, Any]:
-        """List due flashcards (pure SQL, no LLM — SC-008)."""
+        """List due flashcards (pure SQL, no LLM — SC-008).
+
+        Chaque carte est enrichie (additif) de sa planification
+        ``review_schedule`` quand elle existe : ``next_due``,
+        ``streak_index``, ``last_result`` + état FSRS (``difficulty``,
+        ``stability``, ``fsrs_state``, ``reps``, ``lapses``) — absents
+        (= jamais révisée) tant que la carte n'a pas été notée.
+        """
         cards = tutor_service.due_reviews(subject_id)
-        return {"due": [c.to_dict() for c in cards]}
+        out: list[dict[str, Any]] = []
+        for c in cards:
+            d = c.to_dict()
+            try:
+                sched = tutor_service.review.get_review(c.id)
+            except Exception:
+                sched = None
+            if sched:
+                for k in (
+                    "next_due",
+                    "streak_index",
+                    "last_result",
+                    "difficulty",
+                    "stability",
+                    "fsrs_state",
+                    "reps",
+                    "lapses",
+                ):
+                    d.setdefault(k, sched.get(k))
+            out.append(d)
+        return {"due": out}
 
     @app.post("/api/tutor/reviews/{flashcard_id}/grade")
     async def tutor_grade_review(flashcard_id: str, payload: TutorGradeRequest) -> dict[str, Any]:
-        """Grade a flashcard review; walks the D8 ladder."""
+        """Grade a flashcard review; walks the D8 ladder.
+
+        010 P2-Adaptatif (FSRS, opt-in) : si ``rating`` ∈ 1-4
+        (1=Oublié, 2=Difficile, 3=Correct, 4=Facile), la notation FSRS
+        réelle est appliquée et la réponse inclut ``next_due``,
+        ``stability``, ``difficulty``, ``state``, ``reps``, ``lapses``.
+        Sans ``rating``, le comportement legacy ``success`` est inchangé.
+        """
+        if payload.rating is not None:
+            try:
+                rating = int(payload.rating)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail="rating 1-4 requis") from exc
+            try:
+                return tutor_service.review.grade_review_fsrs(flashcard_id, rating)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except KeyError:
+                raise HTTPException(status_code=404, detail="flashcard introuvable")
         try:
             result = tutor_service.grade_review(flashcard_id, bool(payload.success))
         except KeyError:
             raise HTTPException(status_code=404, detail="flashcard introuvable")
         return result
+
+    # ------------------------------------------------------------------
+    # Feature 010 P2 (items 8/9) : sandbox + feedback — thin transport.
+    # Délèguent aux services existants ; jamais de logique dupliquée ici.
+    # ------------------------------------------------------------------
+
+    @app.post("/api/tutor/sandbox/run")
+    async def tutor_sandbox_run(payload: SandboxRunRequest) -> dict[str, Any]:
+        """Exécute du Python en sandbox et renvoie stdout/stderr/sortie.
+
+        010 P0-A (FR-002/FR-003) : le scanner de sécurité reste TOUJOURS
+        actif côté réseau (``skip_safety`` n'est jamais exposé) ; les
+        échecs élève (syntaxe, timeout, sortie non nulle, code bloqué)
+        sont encodés dans la réponse, jamais en 500.
+        """
+        from ..tutor.sandbox import RunnerError, run_python
+
+        code = payload.code or ""
+        if not code.strip():
+            raise HTTPException(status_code=400, detail="code requis")
+        try:
+            result = await run_python(code, stdin=payload.stdin or "")
+        except RunnerError as exc:
+            # Code trop volumineux (plafond anti-abus du runner).
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        return {
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "exit_code": result.exit_code,
+            "duration_ms": result.duration_ms,
+            "timed_out": result.timed_out,
+            "truncated": result.truncated,
+            "blocked": result.blocked,
+            "safety_events": result.safety_events,
+        }
+
+    @app.post("/api/tutor/feedback")
+    async def tutor_feedback_submit(payload: FeedbackCreate, request: Request) -> dict[str, Any]:
+        """Enregistre un avis apprenant (note 1-5 + commentaire).
+
+        010 P2 (item 9, HITL minimal) : ``target_type`` ∈ book|exercise|
+        session|quiz ; la cible doit exister (404 sinon) ; le propriétaire
+        est l'apprenant local (header ``X-Learner-Id`` ou « local »).
+        """
+        owner = (request.headers.get("x-learner-id") or "").strip() or "local"
+        try:
+            rating = int(payload.rating)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="rating 1-5 requis") from exc
+        try:
+            return tutor_service.submit_feedback(
+                (payload.target_type or "").strip(),
+                (payload.target_id or "").strip(),
+                rating,
+                payload.comment or "",
+                owner_id=owner,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except NotFoundError as exc:
+            # Cible inexistante → 404 en français (au lieu du libellé EN du service).
+            raise HTTPException(status_code=404, detail="cible introuvable") from exc
+
+    @app.get("/api/tutor/feedback")
+    async def tutor_feedback_list(
+        target_type: str = "", target_id: str = "", limit: int = 50
+    ) -> dict[str, Any]:
+        """Avis les plus récents d'une cible (lecture seule)."""
+        target_type = (target_type or "").strip()
+        target_id = (target_id or "").strip()
+        if not target_type or not target_id:
+            raise HTTPException(
+                status_code=400, detail="target_type et target_id requis"
+            )
+        items = tutor_service.list_feedback(target_type, target_id, limit=limit)
+        return {"feedbacks": items, "count": len(items)}
 
     @app.post("/api/tutor/subjects/{subject_id}/quizzes")
     async def tutor_create_quiz(subject_id: str, payload: TutorQuizRequest) -> dict[str, Any]:

@@ -380,17 +380,8 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent);outline:none;
 .msg-kind.k-hint{color:var(--gold)}
 .tutor-body{white-space:pre-wrap;overflow-wrap:anywhere}
 .tutor-think{color:var(--ink-dim);font-style:italic}
-/* ThinkBox (010 P2) : pensée du modèle pliable — <details> rempli au fil
-   du stream via ensureThinkBox, refermé à la fin. */
-.thinkbox{border:1px dashed var(--line-strong);border-radius:10px;padding:6px 10px;margin:6px 0;background:var(--surface2)}
-.thinkbox>summary{cursor:pointer;font-size:11.5px;font-weight:700;color:var(--ink-dim);list-style:none}
-.thinkbox>summary::-webkit-details-marker{display:none}
-.thinkbox>summary::before{content:"▸ ";color:var(--accent)}
-.thinkbox[open]>summary::before{content:"▾ "}
-/* KaTeX-lite offline (010 P2) : SANS CDN — pas de parse TeX complet, rendu
-   typographique (chasse + italique) ; dégrade proprement en texte brut. */
-.math-inline{font-family:Georgia,"Times New Roman",serif;font-style:italic;background:var(--surface2);border-radius:6px;padding:0 5px;overflow-wrap:anywhere}
-.math-block{font-family:Georgia,"Times New Roman",serif;font-size:15px;text-align:center;background:var(--surface2);border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin:10px 0;overflow-x:auto;white-space:pre-wrap}
+/* ThinkBox + maths : définition unique harmonisée plus bas
+   (§ « surfaces 010 ») — même filet accent, même ombre douce. */
 .tutor-text{display:block}
 .tutor-para{white-space:pre-wrap;overflow-wrap:anywhere}
 .md-h{font-weight:750;line-height:1.3;margin:12px 0 6px;letter-spacing:-.02em}
@@ -624,6 +615,105 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent);outline:none;
 .flip .back{background:var(--accent-soft);border-color:var(--accent-line);transform:rotateY(180deg)}
 .flip .face .face-label{font-size:10px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-dim);margin-bottom:6px}
 .due-counter{font-family:var(--mono);font-size:12px;color:var(--ink-dim)}
+
+/* ============ surfaces 010 — bac à sable, FSRS, feedback, jobs ============ */
+/* Bloc résultat d'exécution sandboxée : états succès / échec / timeout /
+   bloqué-sécurité. Alimenté par les réponses de notation quand elles
+   joignent une preuve d'exécution (stdout/stderr/exit/timeout/bloqué). */
+.exec{border:1px solid var(--line);border-radius:12px;background:var(--surface);margin-top:10px;overflow:hidden;box-shadow:var(--shadow-sm)}
+.exec-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:9px 12px;background:var(--surface2);border-bottom:1px solid var(--line)}
+.exec-title{font-weight:800;font-size:12.5px;color:var(--ink)}
+.exec-state{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:800;letter-spacing:.02em;border:1px solid;white-space:nowrap}
+.exec-state .dot{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+.exec-ok{color:var(--ok);border-color:#a7f3d0;background:var(--ok-soft)}
+.exec-fail{color:var(--err);border-color:#fecaca;background:var(--err-soft)}
+.exec-timeout{color:var(--warn);border-color:var(--gold-line);background:var(--warn-soft)}
+.exec-blocked{color:#7c3aed;border-color:#ddd6fe;background:#f5f3ff}
+.exec-meta{font-family:var(--mono);font-size:11px;color:var(--ink-dim);margin-left:auto}
+.exec-body{padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.exec-io>span{font-size:10.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-dim)}
+.exec-io pre{font-family:var(--mono);font-size:12px;line-height:1.55;background:#0f172a;color:#e2e8f0;border:1px solid #1e293b;border-radius:10px;padding:10px 12px;margin:4px 0 0;max-height:220px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+.exec-io pre.stderr{color:#fecaca}
+.exec-empty{font-size:12.5px;color:var(--ink-dim);padding:2px 0}
+.exec-note{font-size:11.5px;color:var(--ink-faint)}
+/* Encadré pédagogique permanent : garanties du bac à sable (visible même
+   sans exécution jointe — honest empty state). */
+.sandbox-note{border:1px dashed var(--line-strong);border-radius:12px;background:var(--surface2);margin-top:10px;padding:0}
+.sandbox-note>summary{cursor:pointer;list-style:none;padding:9px 12px;font-size:12.5px;font-weight:700;color:var(--ink-dim);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sandbox-note>summary::-webkit-details-marker{display:none}
+.sandbox-note>summary::before{content:"▸ ";color:var(--accent)}
+.sandbox-note[open]>summary::before{content:"▾ "}
+.sandbox-note .sandbox-body{padding:0 12px 10px;font-size:12.5px;color:var(--ink-dim)}
+.sandbox-note .sandbox-body ul{margin:6px 0 2px 18px;padding:0}
+.sandbox-note .sandbox-body li{margin:3px 0}
+/* Révision FSRS : notation 1-4 (1=Oublié … 4=Facile) envoyée à
+    POST /api/tutor/reviews/{id}/grade ; la réponse affiche la prochaine
+    révision + difficulté/stabilité. Cartes jamais notées : niveau seul. */
+.fsrs-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:10px;font-size:12px;color:var(--ink-dim)}
+.fsrs-level{font-family:var(--mono);font-size:11px;border:1px solid var(--line);border-radius:999px;padding:2px 9px;background:var(--surface2);font-weight:700}
+.fsrs-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.fsrs-btn{flex:1 1 110px;display:flex;flex-direction:column;align-items:center;gap:2px;border:1px solid var(--line);background:var(--surface);border-radius:12px;padding:9px 6px;font-weight:700;font-size:12.5px;color:var(--ink-soft);box-shadow:var(--shadow-sm);transition:border-color .16s,background .16s,transform .16s,box-shadow .16s}
+.fsrs-btn .n{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:var(--surface2);border:1px solid var(--line-strong);font-family:var(--mono);font-size:12px;font-weight:800}
+.fsrs-btn:hover:not(:disabled){transform:translateY(-1px);box-shadow:var(--shadow-md)}
+.fsrs-btn[data-r="1"]:hover:not(:disabled){border-color:#fecaca;background:var(--err-soft)}
+.fsrs-btn[data-r="2"]:hover:not(:disabled){border-color:var(--gold-line);background:var(--warn-soft)}
+.fsrs-btn[data-r="3"]:hover:not(:disabled){border-color:#a7f3d0;background:var(--ok-soft)}
+.fsrs-btn[data-r="4"]:hover:not(:disabled){border-color:var(--accent-line);background:var(--accent-soft)}
+.fsrs-btn:disabled{opacity:.55;cursor:wait}
+.fsrs-sched{font-size:12px;color:var(--ink-dim);margin-top:8px}
+.fsrs-sched strong{color:var(--ink)}
+/* Feedback HITL : note 1-5 + commentaire persistés via
+   POST /api/tutor/feedback (cible : exercice courant) + relecture
+   GET /api/tutor/feedback ; propriétaire local visible. */
+.fb{border:1px solid var(--line);border-radius:14px;background:var(--surface);margin-top:12px;padding:12px 14px;box-shadow:var(--shadow-sm)}
+.fb-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px}
+.fb-title{font-weight:800;font-size:13px;color:var(--ink)}
+.fb-local{font-size:10.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-faint);border:1px solid var(--line);border-radius:999px;padding:2px 8px}
+.fb-stars{display:flex;gap:4px;margin:8px 0 4px}
+.fb-star{width:34px;height:34px;border-radius:10px;border:1px solid var(--line);background:var(--surface2);font-size:16px;line-height:1;color:var(--ink-faint);transition:all .14s}
+.fb-star:hover{border-color:var(--gold-line);transform:translateY(-1px)}
+.fb-star.on{border-color:var(--gold-line);background:var(--gold-soft);color:#b45309}
+.fb textarea{min-height:56px;margin-top:6px}
+.fb-owner-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px}
+.fb-owner-row input{width:auto;flex:1;min-width:140px;font-family:var(--mono);font-size:12px}
+.fb-guard{font-size:11.5px;color:var(--ink-dim);margin-top:6px}
+.fb-item{border-top:1px dashed var(--line);margin-top:10px;padding-top:10px;font-size:12.5px}
+.fb-item .fb-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.fb-item .fb-who{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--accent-deep);background:var(--accent-soft);border:1px solid var(--accent-line);border-radius:999px;padding:2px 9px}
+.fb-item .fb-rating{font-weight:800;color:#b45309}
+.fb-item .fb-text{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:4px;color:var(--ink-soft)}
+.fb-item .fb-acts{display:flex;gap:6px;margin-top:6px}
+/* Panneau jobs d'ingestion intégré : carte par import (phase + progression
+   + erreur lisible), replié quand aucun job actif ni en échec. */
+.jobs-panel{flex-direction:column;align-items:stretch;gap:8px}
+.jobs-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.jobs-title{font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-dim)}
+.jobs-list{display:flex;flex-direction:column;gap:8px;width:100%}
+.job{border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:10px 12px;box-shadow:var(--shadow-sm)}
+.job-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.job-name{font-weight:700;font-size:13px;color:var(--ink);overflow-wrap:anywhere;flex:1;min-width:120px}
+.job-phase{font-size:11px;font-weight:800}
+.job-track{position:relative;height:6px;margin-top:8px;border-radius:999px;background:var(--surface2);border:1px solid var(--line);overflow:hidden}
+.job-fill{position:absolute;top:0;bottom:0;left:0;width:0%;border-radius:999px;background:linear-gradient(90deg,var(--gold),var(--accent));transition:width .4s ease}
+.job-fill.failed{background:var(--err)}
+.job-sub{font-family:var(--mono);font-size:11px;color:var(--ink-dim);margin-top:6px}
+.job-err{font-size:12px;color:var(--err);background:var(--err-soft);border:1px solid #fecaca;border-radius:8px;padding:6px 9px;margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere}
+/* ThinkBox harmonisée : même langage que les citations (pastille) et les
+   blocs de code (filet accent) — pliable, discrète au repos. */
+.thinkbox{border:1px solid var(--accent-line);border-left:3px solid var(--accent);border-radius:10px;padding:7px 11px;margin:8px 0;background:linear-gradient(180deg,var(--accent-soft),var(--surface));box-shadow:var(--shadow-sm)}
+.thinkbox>summary{cursor:pointer;font-size:10.5px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-dim);list-style:none;display:flex;align-items:center;gap:6px}
+.thinkbox>summary::-webkit-details-marker{display:none}
+.thinkbox>summary::before{content:"▸ ";color:var(--accent);font-size:12px}
+.thinkbox[open]>summary::before{content:"▾ "}
+.thinkbox>summary:hover{color:var(--accent-deep)}
+/* Maths harmonisées : serif italique teinté indigo, cohérent avec les
+   blocs de code (même rayon, même ombre douce). */
+.math-inline{font-family:Georgia,"Times New Roman",serif;font-style:italic;color:var(--accent-deep);background:var(--accent-soft);border:1px solid var(--accent-line);border-radius:6px;padding:0 5px;overflow-wrap:anywhere}
+.math-block{font-family:Georgia,"Times New Roman",serif;font-size:15px;font-style:italic;color:var(--ink);text-align:center;background:linear-gradient(180deg,var(--accent-soft),var(--surface));border:1px solid var(--accent-line);border-left:3px solid var(--accent);border-radius:12px;padding:12px 14px;margin:10px 0;overflow-x:auto;white-space:pre-wrap;box-shadow:var(--shadow-sm)}
+@media (prefers-color-scheme: dark){
+  .math-inline{color:#c7d2fe}
+  .exec-io pre{background:#020617}
+}
 .player{display:flex;align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap}
 .rate{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--ink-dim)}
 .rate input[type=range]{width:120px;accent-color:var(--accent)}
@@ -1051,8 +1141,12 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent);outline:none;
           <button id="indexQueueStartBtn" class="btn btn-ghost btn-sm">Démarrer</button>
           <button id="indexQueueStopBtn" class="btn btn-ghost btn-sm" hidden>Pause</button>
         </div>
-        <div class="queue-row" id="ingestionJobsPanel" hidden>
-          <span class="hint grow" id="ingestionJobsText">Imports : chargement…</span>
+        <div class="queue-row jobs-panel" id="ingestionJobsPanel" hidden>
+          <div class="jobs-head">
+            <span class="jobs-title">Imports en cours</span>
+            <span class="hint grow" id="ingestionJobsText" style="margin:0;">Imports : chargement…</span>
+          </div>
+          <div class="jobs-list" id="ingestionJobsList" role="status" aria-live="polite"></div>
         </div>
 
         <div class="import-panel import-card" id="importPanel" hidden>
@@ -1197,7 +1291,7 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent);outline:none;
             <button id="prepareBtn" class="btn btn-ghost btn-sm" title="Génère fiches, glossaire et notions (idempotent)">Préparer le cours</button>
             <button id="dueLoadBtn" class="btn btn-primary btn-sm">Fiches à réviser</button>
           </div>
-          <p class="hint">Cliquez sur une fiche pour la retourner.</p>
+          <p class="hint">Cliquez sur une fiche pour la retourner, puis notez-la de 1 (oublié) à 4 (facile).</p>
           <div id="dueFlow"></div>
         </div>
       </div>
@@ -1246,7 +1340,31 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent);outline:none;
             </div>
             <div class="feedback" id="exFeedback" hidden></div>
             <div class="feedback solution" id="exSolutionBox" hidden></div>
+            <div id="exExecBox"></div>
+            <details class="sandbox-note">
+              <summary>Exécution de code en bac à sable <span class="hint" style="margin:0;">— garanties, même sans exécution jointe</span></summary>
+              <div class="sandbox-body">
+                <ul>
+                  <li>Environnement vide, dossier temporaire, sorties tronquées.</li>
+                  <li>Timeout borné (~5 s) — tout dépassement est signalé « timeout ».</li>
+                  <li>Imports dangereux bloqués avant exécution (« bloqué-sécurité »).</li>
+                </ul>
+                <div class="exec-note">Quand la correction joint une preuve d'exécution, son détail (stdout, stderr, code de sortie) s'affiche ci-dessus.</div>
+              </div>
+            </details>
+            <div id="exFeedbackWrap"></div>
           </div>
+        </div>
+        <div class="studio-card">
+          <h3>Bac à sable Python</h3>
+          <p class="hint">Exécutez du code Python en sandbox locale (aucun envoi réseau) — idéal pour tester un extrait avant de répondre à l'exercice.</p>
+          <label class="field-label" for="sbCode">Code Python</label>
+          <textarea id="sbCode" rows="6" spellcheck="false" placeholder="print(6 * 7)" style="font-family:var(--mono);font-size:12.5px;" aria-describedby="sbCodeErr"></textarea><span id="sbCodeErr" class="err" role="alert" style="color:var(--err)"></span>
+          <div class="row-btns">
+            <button id="sbRunBtn" class="btn btn-primary btn-sm">Exécuter</button>
+            <button id="sbClearBtn" class="btn btn-ghost btn-sm">Effacer</button>
+          </div>
+          <div id="sbResult" aria-live="polite"><div class="empty-note" style="padding:14px 8px;">Écrivez du code puis « Exécuter » — stdout, stderr, code de sortie, timeout et blocages sécurité s'affichent ici.</div></div>
         </div>
       </div>
     </div>
@@ -3280,7 +3398,8 @@ let _jobsInFlight = false;
 async function refreshIngestionJobs() {
   const panel = $("ingestionJobsPanel");
   const text = $("ingestionJobsText");
-  if (!panel || !text) return;
+  const list = $("ingestionJobsList");
+  if (!panel || !text || !list) return;
   clearTimeout(_jobsTimer);
   _jobsTimer = null;
   if (_jobsInFlight) return;
@@ -3288,18 +3407,74 @@ async function refreshIngestionJobs() {
   let active = false;
   try {
     const data = await jf("/api/ingestion/jobs");
-    const running = (data.jobs || []).filter(
-      (j) => j.status !== "completed" && j.status !== "failed"
-    ).slice(0, 3);
-    active = running.length > 0;
-    panel.hidden = !active;
-    if (active) {
-      text.textContent = "Imports : " + running.map((j) =>
-        (j.original_filename || String(j.id).slice(0, 8)) + " — " +
-        (j.phase_label || j.status) + " " + ((j.progress_percent | 0)) + " %"
-      ).join(" · ");
+    // Carte par import non terminé : phase + progression + erreur lisible.
+    // Replié quand aucun job actif ni en échec.
+    const visible = ((data.jobs || []).filter(
+      (j) => j.status !== "completed"
+    )).slice(0, 5);
+    const failed = visible.filter((j) => j.status === "failed");
+    active = visible.some((j) => j.status !== "failed");
+    panel.hidden = visible.length === 0;
+    list.innerHTML = "";
+    if (visible.length === 0) {
+      text.textContent = "Imports : aucun en cours.";
+    } else {
+      const bits = [];
+      if (active) bits.push(String(visible.length - failed.length) + " en cours");
+      if (failed.length) bits.push(String(failed.length) + " en échec");
+      text.textContent = "Imports : " + bits.join(" · ") + ".";
+      for (const j of visible) {
+        const isFail = j.status === "failed";
+        const pct = Math.max(0, Math.min(100, j.progress_percent | 0));
+        const card = document.createElement("div");
+        card.className = "job";
+        const top = document.createElement("div");
+        top.className = "job-top";
+        const name = document.createElement("span");
+        name.className = "job-name";
+        name.textContent = j.original_filename || ("import " + String(j.id).slice(0, 8));
+        const phase = document.createElement("span");
+        phase.className = "badge " + (isFail ? "failed" : "indexing");
+        if (!isFail) {
+          const sp = document.createElement("span");
+          sp.className = "spin";
+          sp.setAttribute("aria-hidden", "true");
+          phase.appendChild(sp);
+        }
+        const lab = document.createElement("span");
+        lab.textContent = (j.phase_label || j.status) + " · " + pct + " %";
+        phase.appendChild(lab);
+        top.append(name, phase);
+        card.appendChild(top);
+        const track = document.createElement("div");
+        track.className = "job-track";
+        track.setAttribute("role", "progressbar");
+        track.setAttribute("aria-valuemin", "0");
+        track.setAttribute("aria-valuemax", "100");
+        track.setAttribute("aria-valuenow", String(pct));
+        track.setAttribute("aria-label", "Progression de « " + (j.original_filename || j.id) + " »");
+        const fill = document.createElement("div");
+        fill.className = "job-fill" + (isFail ? " failed" : "");
+        fill.style.width = pct + "%";
+        track.appendChild(fill);
+        card.appendChild(track);
+        const sub = document.createElement("div");
+        sub.className = "job-sub";
+        sub.textContent = "job " + String(j.id).slice(0, 8) + " · " + j.status;
+        card.appendChild(sub);
+        if (isFail && j.error_message) {
+          const err = document.createElement("div");
+          err.className = "job-err";
+          err.textContent = String(j.error_message);
+          card.appendChild(err);
+        }
+        list.appendChild(card);
+      }
     }
-  } catch (_) { /* réseau ou 5xx : on retentera au prochain passage */ }
+  } catch (_) {
+    // réseau ou 5xx : bandeau discret, on retentera au prochain passage
+    if (text) text.textContent = "Imports : suivi momentanément indisponible.";
+  }
   _jobsInFlight = false;
   if (active) _jobsTimer = setTimeout(refreshIngestionJobs, 1500);
 }
@@ -4626,10 +4801,12 @@ async function genExercise() {
     $("exHints").innerHTML = "";
     $("exFeedback").hidden = true;
     $("exSolutionBox").hidden = true;
+    if ($("exExecBox")) $("exExecBox").innerHTML = "";
     // keep answer? spec says keep data on error, only clear on success - but genExercise creates new ex, so clearing is ok on success
     $("exAnswer").value = "";
     const errA=$("exAnswerErr"); if(errA) errA.textContent=""; const errB=$("answerBoxErr"); if(errB) errB.textContent="";
     $("exCard").hidden = false;
+    renderFeedbackWidget();
     setStatus("prêt");
   } catch (e) { /* journalisé */ setStatus("prêt"); }
   finally { if(btn) btn.disabled=false; }
@@ -4673,6 +4850,13 @@ async function submitExerciseAnswer() {
     fb.textContent = "Verdict : " + (data.verdict || "—") +
       (data.feedback ? "\n" + data.feedback : "") +
       (data.hint ? "\nIndice : " + data.hint : "");
+    // Preuve d'exécution jointe par la correction (010 P0-A) : rendue
+    // telle quelle dans la console, sinon zone laissée vide.
+    const execBox = $("exExecBox");
+    if (execBox) {
+      if (data && data.execution) renderExec(execBox, data.execution);
+      else execBox.innerHTML = "";
+    }
     // keep answer value on error, clear only on success is not needed here (answer is kept for review)
     loadConceptsAndProgress();
   } catch (e) { /* journalisé : keep value */ }
@@ -4691,6 +4875,251 @@ async function requestSolution() {
     sb.textContent = "Solution :\n" + (data.solution || "");
   } catch (e) {
     toast("Solution refusée par le serveur (doit être demandée explicitement).");
+  }
+}
+
+/* ============ bac à sable Python (010 P0-A) — console d'exécution ===== */
+function execStateOf(res) {
+  if (res.blocked) return { cls: "exec-blocked", label: "Exécution bloquée (sécurité)" };
+  if (res.timed_out) return { cls: "exec-timeout", label: "Timeout" };
+  if ((res.exit_code | 0) !== 0) return { cls: "exec-fail", label: "Échec (exit " + (res.exit_code | 0) + ")" };
+  return { cls: "exec-ok", label: "Succès (exit 0)" };
+}
+
+function renderExec(box, res) {
+  if (!box || !res) return;
+  box.innerHTML = "";
+  const st = execStateOf(res);
+  const card = document.createElement("div");
+  card.className = "exec";
+  const head = document.createElement("div");
+  head.className = "exec-head";
+  const title = document.createElement("span");
+  title.className = "exec-title";
+  title.textContent = "Exécution sandboxée";
+  const chip = document.createElement("span");
+  chip.className = "exec-state " + st.cls;
+  const dot = document.createElement("span");
+  dot.className = "dot";
+  dot.setAttribute("aria-hidden", "true");
+  const lab = document.createElement("span");
+  lab.textContent = st.label;
+  chip.append(dot, lab);
+  const meta = document.createElement("span");
+  meta.className = "exec-meta";
+  meta.textContent = "exit " + (res.exit_code | 0) + " · " + (res.duration_ms | 0) + " ms" +
+    (res.truncated ? " · sortie tronquée" : "");
+  head.append(title, chip, meta);
+  card.appendChild(head);
+  const body = document.createElement("div");
+  body.className = "exec-body";
+  const mkIO = (label, text, isErr) => {
+    const w = document.createElement("div");
+    w.className = "exec-io";
+    const s = document.createElement("span");
+    s.textContent = label;
+    const pre = document.createElement("pre");
+    if (isErr) pre.className = "stderr";
+    pre.textContent = text && String(text).length ? String(text) : "(vide)";
+    w.append(s, pre);
+    return w;
+  };
+  body.appendChild(mkIO("stdout", res.stdout, false));
+  body.appendChild(mkIO("stderr", res.stderr, true));
+  if (res.blocked && Array.isArray(res.safety_events) && res.safety_events.length) {
+    const ev = document.createElement("div");
+    ev.className = "exec-note";
+    ev.textContent = "Raison du blocage : " + res.safety_events.map(
+      (e) => (e && ((e.type || "?") + (e.detail ? " — " + e.detail : ""))) || "?"
+    ).join(" · ");
+    body.appendChild(ev);
+  }
+  card.appendChild(body);
+  box.appendChild(card);
+}
+
+async function runSandbox() {
+  const code = ($("sbCode") && $("sbCode").value) || "";
+  const errEl = $("sbCodeErr");
+  if (errEl) errEl.textContent = "";
+  const box = $("sbResult");
+  const btn = $("sbRunBtn");
+  if (!code.trim()) {
+    if (errEl) errEl.textContent = "Écrivez du code Python avant d'exécuter.";
+    return;
+  }
+  if (btn) btn.disabled = true;
+  if (box) box.innerHTML = '<div class="empty-note" style="padding:14px 8px;">Exécution en cours…</div>';
+  setStatus("exécution sandboxée…");
+  try {
+    const r = await sf("/api/tutor/sandbox/run", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    let data = null;
+    try { data = await r.json(); } catch (_) { data = null; }
+    if (!r.ok || !data) {
+      const detail = (data && data.detail) ? String(data.detail) : ("HTTP " + r.status);
+      if (box) box.innerHTML = '<div class="empty-note" style="padding:14px 8px;">Exécution impossible : ' + esc(detail) + "</div>";
+      toast("Exécution impossible (" + detail + ").");
+    } else if (box) {
+      renderExec(box, data);
+    }
+    setStatus("prêt");
+  } catch (e) {
+    if (box) box.innerHTML = "<div class=\"empty-note\" style=\"padding:14px 8px;\">Serveur injoignable — vérifiez qu'EduNexus tourne.</div>";
+    setStatus("prêt");
+  } finally { if (btn) btn.disabled = false; }
+}
+
+/* ============ feedback HITL (010 P2, item 9) — note 1-5 + avis ====== */
+let _fbRating = 0;
+
+function renderFeedbackWidget() {
+  const wrap = $("exFeedbackWrap");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  const box = document.createElement("div");
+  box.className = "fb";
+  const head = document.createElement("div");
+  head.className = "fb-head";
+  const title = document.createElement("span");
+  title.className = "fb-title";
+  title.textContent = "Votre avis sur cet exercice";
+  head.appendChild(title);
+  box.appendChild(head);
+  if (!currentExerciseId) {
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.style.margin = "0";
+    hint.textContent = "Générez un exercice ci-dessus pour pouvoir donner votre avis.";
+    box.appendChild(hint);
+    wrap.appendChild(box);
+    return;
+  }
+  const stars = document.createElement("div");
+  stars.className = "fb-stars";
+  stars.setAttribute("role", "group");
+  stars.setAttribute("aria-label", "Note de 1 à 5 étoiles");
+  for (let s = 1; s <= 5; s++) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "fb-star" + (s <= _fbRating ? " on" : "");
+    b.textContent = "★";
+    b.setAttribute("aria-label", "Noter " + s + " sur 5");
+    b.setAttribute("aria-pressed", s <= _fbRating ? "true" : "false");
+    b.addEventListener("click", () => { _fbRating = s; renderFeedbackWidget(); });
+    stars.appendChild(b);
+  }
+  box.appendChild(stars);
+  const area = document.createElement("textarea");
+  area.id = "fbComment";
+  area.rows = 2;
+  area.maxLength = 2000;
+  area.placeholder = "Qu'avez-vous pensé de cet exercice ? (requis)";
+  area.setAttribute("aria-label", "Votre commentaire");
+  box.appendChild(area);
+  const err = document.createElement("span");
+  err.id = "fbErr";
+  err.className = "err";
+  err.setAttribute("role", "alert");
+  box.appendChild(err);
+  const row = document.createElement("div");
+  row.className = "row-btns";
+  const send = document.createElement("button");
+  send.type = "button";
+  send.id = "fbSendBtn";
+  send.className = "btn btn-primary btn-sm";
+  send.textContent = "Envoyer mon avis";
+  send.addEventListener("click", sendFeedback);
+  row.appendChild(send);
+  box.appendChild(row);
+  const guard = document.createElement("div");
+  guard.className = "fb-guard";
+  guard.textContent = "Avis enregistré sur ce serveur local, visible avec votre identifiant.";
+  box.appendChild(guard);
+  const list = document.createElement("div");
+  list.id = "fbList";
+  list.innerHTML = '<p class="hint" style="margin:8px 0 0;">Chargement des avis…</p>';
+  box.appendChild(list);
+  wrap.appendChild(box);
+  loadFeedbackList();
+}
+
+async function sendFeedback() {
+  if (!currentExerciseId) return;
+  const err = $("fbErr");
+  const btn = $("fbSendBtn");
+  const comment = ($("fbComment") && $("fbComment").value.trim()) || "";
+  if (err) err.textContent = "";
+  if (_fbRating < 1 || _fbRating > 5) {
+    if (err) err.textContent = "Choisissez une note de 1 à 5.";
+    return;
+  }
+  if (!comment) {
+    if (err) err.textContent = "Écrivez un commentaire (requis).";
+    return;
+  }
+  if (btn) { btn.disabled = true; btn.textContent = "Envoi…"; }
+  try {
+    const r = await sf("/api/tutor/feedback", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target_type: "exercise", target_id: currentExerciseId, rating: _fbRating, comment }),
+    });
+    let data = null;
+    try { data = await r.json(); } catch (_) { data = null; }
+    if (!r.ok || !data) {
+      const detail = (data && data.detail) ? String(data.detail) : ("HTTP " + r.status);
+      if (err) err.textContent = detail;
+      return;
+    }
+    _fbRating = 0;
+    toast("Merci ! Votre avis est enregistré.");
+    renderFeedbackWidget();
+  } catch (e) {
+    if (err) err.textContent = "Serveur injoignable — réessayez.";
+  } finally {
+    const b2 = $("fbSendBtn");
+    if (b2) { b2.disabled = false; b2.textContent = "Envoyer mon avis"; }
+  }
+}
+
+async function loadFeedbackList() {
+  const list = $("fbList");
+  if (!list || !currentExerciseId) return;
+  try {
+    const data = await jf("/api/tutor/feedback?target_type=" + encodeURIComponent("exercise") +
+      "&target_id=" + encodeURIComponent(currentExerciseId));
+    const items = (data && data.feedbacks) || [];
+    list.innerHTML = "";
+    if (!items.length) {
+      list.innerHTML = '<p class="hint" style="margin:8px 0 0;">Aucun avis pour cet exercice — soyez le premier.</p>';
+      return;
+    }
+    for (const f of items.slice(0, 10)) {
+      const it = document.createElement("div");
+      it.className = "fb-item";
+      const top = document.createElement("div");
+      top.className = "fb-top";
+      const who = document.createElement("span");
+      who.className = "fb-who";
+      who.textContent = String(f.owner_id || "local");
+      const rating = document.createElement("span");
+      rating.className = "fb-rating";
+      rating.textContent = "★ " + (f.rating | 0) + "/5";
+      const when = document.createElement("span");
+      when.className = "hint";
+      when.style.margin = "0";
+      when.textContent = fmtDateFR(String(f.created_at || "").slice(0, 10));
+      top.append(who, rating, when);
+      const tx = document.createElement("div");
+      tx.className = "fb-text";
+      tx.textContent = String(f.comment || "");
+      it.append(top, tx);
+      list.appendChild(it);
+    }
+  } catch (e) {
+    list.innerHTML = '<p class="hint" style="margin:8px 0 0;">Avis momentanément indisponibles.</p>';
   }
 }
 
@@ -4960,22 +5389,66 @@ async function loadDueReviews() {
 
 let dueCards = [];
 let dueIdx = 0;
+let _lastSched = null;
+
+const FSRS_LABELS = { 1: "Oublié", 2: "Difficile", 3: "Correct", 4: "Facile" };
+const LEVEL_LABELS = { beginner: "Débutant", intermediate: "Intermédiaire", advanced: "Avancé", expert: "Expert" };
+
+function fmtDateFR(iso) {
+  if (!iso) return "—";
+  try {
+    const d = new Date(String(iso).length <= 10 ? String(iso) + "T00:00:00" : String(iso));
+    const s = d.toLocaleDateString("fr-FR", { day: "numeric", month: "long", year: "numeric" });
+    return s === "Invalid Date" ? String(iso) : s;
+  } catch (_) { return String(iso); }
+}
 
 function renderDueCard() {
   const box = $("dueFlow");
+  if (!box) return;
   box.innerHTML = "";
+  if (_lastSched) {
+    const sched = document.createElement("div");
+    sched.className = "fsrs-sched";
+    sched.innerHTML = "Dernière notation : <strong>" + esc(String(_lastSched.rating)) + "/4 (" +
+      esc(FSRS_LABELS[_lastSched.rating] || "") + ")</strong> — prochaine révision : <strong>" +
+      esc(fmtDateFR(_lastSched.next_due)) + "</strong>" +
+      (_lastSched.difficulty != null ? " · difficulté " + esc(Number(_lastSched.difficulty).toFixed(1)) + " sur 10" : "") +
+      (_lastSched.stability != null ? " · mémorisation stable " + esc(Number(_lastSched.stability).toFixed(1)) + " jours" : "");
+    box.appendChild(sched);
+  }
   if (!dueCards.length) {
-    box.innerHTML = '<div class="empty-note">Aucune fiche à réviser.<br>Lancez « Préparer le cours » puis revenez plus tard.</div>';
+    box.innerHTML += '<div class="empty-note">Aucune fiche à réviser.<br>Lancez « Préparer le cours » puis revenez plus tard.</div>';
     return;
   }
   if (dueIdx >= dueCards.length) {
-    box.innerHTML = '<div class="empty-note">Toutes les fiches dues ont été révisées. Bravo !</div>';
+    box.innerHTML += '<div class="empty-note">Toutes les fiches dues ont été révisées. Bravo !</div>';
     return;
   }
   const card = dueCards[dueIdx];
   const counter = document.createElement("div");
   counter.className = "due-counter";
   counter.textContent = "Fiche " + (dueIdx + 1) + " / " + dueCards.length;
+  box.appendChild(counter);
+  const meta = document.createElement("div");
+  meta.className = "fsrs-meta";
+  const lvl = document.createElement("span");
+  lvl.className = "fsrs-level";
+  lvl.textContent = "Niveau : " + (LEVEL_LABELS[card.level] || card.level || "—");
+  meta.appendChild(lvl);
+  if (card.difficulty != null) {
+    const d = document.createElement("span");
+    d.className = "fsrs-level";
+    d.textContent = "Difficulté : " + Number(card.difficulty).toFixed(1) + " sur 10";
+    meta.appendChild(d);
+  }
+  if (card.next_due) {
+    const e = document.createElement("span");
+    e.className = "fsrs-level";
+    e.textContent = "À revoir depuis le " + fmtDateFR(card.next_due);
+    meta.appendChild(e);
+  }
+  box.appendChild(meta);
   const flip = document.createElement("div");
   flip.className = "flip";
   flip.tabIndex = 0;
@@ -4994,26 +5467,48 @@ function renderDueCard() {
   flip.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); doFlip(); }
   });
+  box.appendChild(flip);
   const row = document.createElement("div");
-  row.className = "row-btns";
-  const ok = document.createElement("button");
-  ok.className = "btn btn-primary btn-sm";
-  ok.textContent = "Je savais";
-  ok.addEventListener("click", () => gradeDueCard(card.id, true));
-  const ko = document.createElement("button");
-  ko.className = "btn btn-danger btn-sm";
-  ko.textContent = "À revoir";
-  ko.addEventListener("click", () => gradeDueCard(card.id, false));
-  row.append(ok, ko);
-  box.append(counter, flip, row);
+  row.className = "fsrs-row";
+  row.setAttribute("role", "group");
+  row.setAttribute("aria-label", "Noter la fiche de 1 (oublié) à 4 (facile)");
+  for (const r of [1, 2, 3, 4]) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "fsrs-btn";
+    b.dataset.r = String(r);
+    b.title = "Noter " + r + "/4 — " + FSRS_LABELS[r];
+    const n = document.createElement("span");
+    n.className = "n";
+    n.textContent = String(r);
+    const t = document.createElement("span");
+    t.textContent = FSRS_LABELS[r];
+    b.append(n, t);
+    b.addEventListener("click", () => gradeDueCard(card.id, r));
+    row.appendChild(b);
+  }
+  box.appendChild(row);
 }
 
-async function gradeDueCard(flashcardId, success) {
+async function gradeDueCard(flashcardId, rating) {
+  const box = $("dueFlow");
+  const btns = box ? box.querySelectorAll(".fsrs-btn") : [];
+  btns.forEach((b) => { b.disabled = true; });
   try {
-    await sf("/api/tutor/reviews/" + flashcardId + "/grade", {
+    const r = await sf("/api/tutor/reviews/" + flashcardId + "/grade", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ success }),
+      body: JSON.stringify({ rating }),
     });
+    if (!r.ok) throw new Error("notation refusée HTTP " + r.status);
+    let data = {};
+    try { data = await r.json(); } catch (_) { data = {}; }
+    _lastSched = {
+      rating,
+      next_due: data.next_due || null,
+      difficulty: data.difficulty != null ? data.difficulty : null,
+      stability: data.stability != null ? data.stability : null,
+    };
+    toast("Fiche notée " + rating + "/4 — prochaine révision : " + fmtDateFR(data.next_due));
   } catch (e) { /* best-effort : on avance quand même */ }
   dueIdx += 1;
   renderDueCard();
@@ -5579,6 +6074,13 @@ function wireAll() {
   $("exSolutionBtn").addEventListener("click", requestSolution);
   $("exAddConceptBtn").addEventListener("click", addConcept);
   $("exNewConcept").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addConcept(); } });
+  $("sbRunBtn").addEventListener("click", runSandbox);
+  $("sbClearBtn").addEventListener("click", () => {
+    if ($("sbCode")) $("sbCode").value = "";
+    if ($("sbCodeErr")) $("sbCodeErr").textContent = "";
+    if ($("sbResult")) $("sbResult").innerHTML = '<div class="empty-note" style="padding:14px 8px;">Écrivez du code puis « Exécuter » — stdout, stderr, code de sortie, timeout et blocages sécurité s\'affichent ici.</div>';
+  });
+  renderFeedbackWidget();
 
   // Quiz / Examens
   $("quizStartBtn").addEventListener("click", startQuiz);
