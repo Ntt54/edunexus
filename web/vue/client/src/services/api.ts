@@ -34,6 +34,10 @@ export type {
 };
 
 const apiBase = import.meta.env.VITE_EDUNEXUS_API_BASE ?? "/api/tutor";
+// Racine API (sans le suffixe /api/tutor) pour les routes hors namespace
+// tutor — ex. GET /api/ingestion/jobs (US3). Même origine que le serveur
+// qui sert le dist (port 9215) ; aucun hôte inventé.
+const apiRoot = apiBase.replace(/\/api\/tutor\/?$/, "");
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, {
@@ -41,6 +45,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   if (!response.ok) throw new Error(`Erreur API ${response.status}`);
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
@@ -53,6 +58,25 @@ async function requestForm<T>(path: string, body: FormData): Promise<T> {
     throw new Error(detail);
   }
   return response.json() as Promise<T>;
+}
+
+/** Same-origin request hors namespace /api/tutor (ex. /api/ingestion/jobs). */
+async function requestRoot<T>(path: string): Promise<T> {
+  const response = await fetch(`${apiRoot}${path}`, {
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!response.ok) throw new Error(`Erreur API ${response.status}`);
+  return response.json() as Promise<T>;
+}
+
+// ── Types ingestion (US3 : progression réelle des jobs) ────────
+export interface IngestionJob {
+  id: string;
+  status: string;
+  original_filename?: string | null;
+  phase_label?: string | null;
+  progress_percent?: number;
+  error_message?: string | null;
 }
 
 // ── Types header (engine, models) ──────────────────────────────
@@ -111,6 +135,9 @@ export const tutorApi = {
   },
   async getSubjects(): Promise<SubjectsResponse> {
     return request<SubjectsResponse>("/subjects");
+  },
+  async deleteSubject(id: string): Promise<{ deleted: boolean }> {
+    return request<{ deleted: boolean }>(`/subjects/${encodeURIComponent(id)}`, { method: "DELETE" });
   },
 
   // ── Dashboard existant ─────────────────────────────────────────
@@ -371,7 +398,8 @@ export const tutorApi = {
     return requestForm<{ book_id: string }>("/import", fd);
   },
   async deleteBook(id: string): Promise<void> {
-    await request(`/books/${encodeURIComponent(id)}`, { method: "DELETE" });
+    // Route serveur au singulier : DELETE /api/tutor/book/{book_id} (204).
+    await request(`/book/${encodeURIComponent(id)}`, { method: "DELETE" });
   },
   async reindexBook(id: string): Promise<void> {
     await request(`/books/${encodeURIComponent(id)}/reindex`, { method: "POST" });
@@ -408,6 +436,10 @@ export const tutorApi = {
   async getIndexStatus(): Promise<{ books: Array<{ id: string; status: string }> }> {
     return request("/index-status");
   },
+  // ── Ingestion jobs (US3) : progression réelle + phase_label FR ───
+  async getIngestionJobs(limit = 10): Promise<{ jobs: IngestionJob[]; count: number }> {
+    return requestRoot<{ jobs: IngestionJob[]; count: number }>(`/api/ingestion/jobs?limit=${limit}`);
+  },
 
   // ── Learning paths CRUD ──────────────────────────────────────────
   async getPaths(subjectId: string): Promise<{ paths: Array<{ id: string; title: string; description: string; status: string; progress?: number }> }> {
@@ -433,5 +465,274 @@ export const tutorApi = {
   },
   async deletePathStep(stepId: string): Promise<void> {
     await request(`/paths/steps/${encodeURIComponent(stepId)}`, { method: "DELETE" });
+  },
+
+  // ── Practice — Concepts / Exercises / Answers / Solution ─────────
+  async listConcepts(subjectId: string): Promise<{ concepts: Array<{ id: string; name: string; subject_id: string; path_rank?: number | null }> }> {
+    return request(`/subjects/${encodeURIComponent(subjectId)}/concepts`);
+  },
+  async createConcept(subjectId: string, name: string, pathRank?: number | null): Promise<{ id: string; name: string; subject_id: string }> {
+    return request(`/subjects/${encodeURIComponent(subjectId)}/concepts`, {
+      method: "POST",
+      body: JSON.stringify({ name, path_rank: pathRank ?? null }),
+    });
+  },
+  async generateExercise(conceptId: string, difficulty = "medium"): Promise<{ id: string; subject_id: string; concept_id: string; difficulty: string; statement: string; hints: string[]; status: string }> {
+    return request("/exercises", { method: "POST", body: JSON.stringify({ concept_id: conceptId, difficulty }) });
+  },
+  async gradeExercise(exerciseId: string, answer: string, revealHint = false): Promise<{ verdict: string; feedback: string; hint_level: number; hint: string | null }> {
+    return request(`/exercises/${encodeURIComponent(exerciseId)}/answers`, { method: "POST", body: JSON.stringify({ answer, reveal_hint: revealHint }) });
+  },
+  async gradeExerciseAlias(exerciseId: string, answer: string, revealHint = false): Promise<{ verdict: string; feedback: string; hint_level: number; hint: string | null }> {
+    return request("/answers", { method: "POST", body: JSON.stringify({ exercise_id: exerciseId, answer, reveal_hint: revealHint }) });
+  },
+  async requestSolution(exerciseId: string, explicit = true): Promise<{ solution: string }> {
+    return request(`/exercises/${encodeURIComponent(exerciseId)}/solution`, { method: "POST", body: JSON.stringify({ explicit }) });
+  },
+  async requestSolutionAlias(exerciseId: string, explicit = true): Promise<{ solution: string }> {
+    return request("/solution", { method: "POST", body: JSON.stringify({ exercise_id: exerciseId, explicit }) });
+  },
+
+  // ── Quiz / Exam ──────────────────────────────────────────────────
+  async createQuiz(subjectId: string, size = 5, kinds: string[] = ["mcq", "true_false", "open"]): Promise<Record<string, unknown>> {
+    return request(`/subjects/${encodeURIComponent(subjectId)}/quizzes`, { method: "POST", body: JSON.stringify({ size, kinds }) });
+  },
+  async createExam(subjectId: string, size = 10, timeLimitS = 600, categoryIds?: number[] | null, corpusIds?: number[] | null): Promise<Record<string, unknown>> {
+    return request(`/subjects/${encodeURIComponent(subjectId)}/exams`, {
+      method: "POST",
+      body: JSON.stringify({ size, time_limit_s: timeLimitS, category_ids: categoryIds ?? null, corpus_ids: corpusIds ?? null }),
+    });
+  },
+  async submitQuiz(quizId: string, answers: Record<string, unknown>, hintRequested = false): Promise<Record<string, unknown>> {
+    return request(`/quizzes/${encodeURIComponent(quizId)}/submit`, { method: "POST", body: JSON.stringify({ answers, hint_requested: hintRequested }) });
+  },
+  async getQuiz(quizId: string): Promise<Record<string, unknown>> {
+    return request(`/quizzes/${encodeURIComponent(quizId)}`);
+  },
+  async importExam(paths: string[]): Promise<{ exam_text: string }> {
+    return request("/exam/import", { method: "POST", body: JSON.stringify({ paths }) });
+  },
+  async analyzeExam(examText: string): Promise<{ questions: unknown[] }> {
+    return request("/exam/analyze", { method: "POST", body: JSON.stringify({ exam_text: examText }) });
+  },
+  async resolveExamQuestion(questionId: string, payload: { question_statement: string; concepts?: string[]; hint_level?: number; rag_context?: string }): Promise<Record<string, unknown>> {
+    return request(`/exam/questions/${encodeURIComponent(questionId)}/resolve`, { method: "POST", body: JSON.stringify(payload) });
+  },
+
+  // ── Progression — progress / gaps / errors / reviews ────────────
+  async getProgress(subjectId?: string): Promise<{ progress: Array<{ concept: string; concept_id: string; score: number; label: string; path_rank: number | null }> }> {
+    const qs = subjectId ? `/subjects/${encodeURIComponent(subjectId)}/progress` : "/progress";
+    return request(qs);
+  },
+  async getGaps(subjectId?: string): Promise<{ gaps: Array<{ concept: string; concept_id: string; score: number; recent_failures: number }> }> {
+    const qs = subjectId ? `/subjects/${encodeURIComponent(subjectId)}/gaps` : "/gaps";
+    return request(qs);
+  },
+  async getErrors(subjectId?: string, conceptName = "", limit = 50): Promise<{ errors: unknown[] }> {
+    const base = subjectId ? `/subjects/${encodeURIComponent(subjectId)}/errors` : "/errors";
+    const params = new URLSearchParams();
+    if (conceptName) params.set("concept_name", conceptName);
+    if (limit !== 50) params.set("limit", String(limit));
+    const qs = params.toString() ? `${base}?${params.toString()}` : base;
+    return request(qs);
+  },
+  async getReviewsDue(subjectId: string): Promise<{ due: Array<{ id: string; concept: string; due: string }> }> {
+    return request(`/subjects/${encodeURIComponent(subjectId)}/reviews/due`);
+  },
+  async gradeReview(flashcardId: string, success: boolean): Promise<Record<string, unknown>> {
+    return request(`/reviews/${encodeURIComponent(flashcardId)}/grade`, { method: "POST", body: JSON.stringify({ success }) });
+  },
+  async prepareKnowledge(subjectId: string): Promise<Record<string, unknown>> {
+    return request(`/subjects/${encodeURIComponent(subjectId)}/prepare`, { method: "POST" });
+  },
+  async autoGeneratePath(subjectId: string): Promise<Record<string, unknown>> {
+    return request(`/subjects/${encodeURIComponent(subjectId)}/auto-path`, { method: "POST" });
+  },
+  async listSessions(subjectId: string): Promise<{ sessions: unknown[] }> {
+    return request(`/subjects/${encodeURIComponent(subjectId)}/sessions`);
+  },
+  async closeSession(sessionId: string): Promise<Record<string, unknown>> {
+    return request(`/sessions/${encodeURIComponent(sessionId)}/close`, { method: "POST" });
+  },
+  async resumeBriefing(subjectId: string): Promise<Record<string, unknown>> {
+    return request(`/subjects/${encodeURIComponent(subjectId)}/resume`);
+  },
+
+  // ── Explorer — locate / rank-books / compare / glossary / map ───
+  async locate(subjectId: string, notion: string): Promise<{ results: unknown[] }> {
+    return request(`/subjects/${encodeURIComponent(subjectId)}/locate?notion=${encodeURIComponent(notion)}`);
+  },
+  async rankBooks(subjectId: string, notion: string): Promise<{ results: unknown[] }> {
+    return request(`/subjects/${encodeURIComponent(subjectId)}/rank-books?notion=${encodeURIComponent(notion)}`);
+  },
+  async compare(subjectId: string, notion: string): Promise<unknown> {
+    const resp = await fetch(`${apiBase}/subjects/${encodeURIComponent(subjectId)}/compare`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ a: notion, b: "", notion }),
+    });
+    if (!resp.ok) throw new Error(`Erreur API ${resp.status}`);
+    const text = await resp.text();
+    const frames: unknown[] = [];
+    for (const line of text.split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      try { frames.push(JSON.parse(t)); } catch { frames.push({ text: t }); }
+    }
+    return frames.length ? frames : text;
+  },
+  async getGlossary(subjectId: string): Promise<{ terms: Array<{ term: string; definition: string }> }> {
+    return request(`/subjects/${encodeURIComponent(subjectId)}/glossary`);
+  },
+  async explainTerm(subjectId: string, term: string): Promise<unknown> {
+    const resp = await fetch(`${apiBase}/subjects/${encodeURIComponent(subjectId)}/glossary/${encodeURIComponent(term)}/explain`);
+    if (!resp.ok) throw new Error(`Erreur API ${resp.status}`);
+    const text = await resp.text();
+    const frames: unknown[] = [];
+    for (const line of text.split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      try { frames.push(JSON.parse(t)); } catch { frames.push({ text: t }); }
+    }
+    return frames.length ? frames : text;
+  },
+  async getKnowledgeMap(subjectId: string): Promise<{ nodes: unknown[]; edges: unknown[] }> {
+    return request(`/subjects/${encodeURIComponent(subjectId)}/map`);
+  },
+
+  // ── Leçon — lesson-discussions (Feature 009) ───────────────────
+  async createLessonDiscussion(stepId: string, learnerId: string): Promise<{ discussion: Record<string, unknown> }> {
+    return request(`/path-steps/${encodeURIComponent(stepId)}/discussion?learner_id=${encodeURIComponent(learnerId)}`, {
+      method: "POST",
+      headers: { "X-Learner-Id": learnerId },
+    });
+  },
+  async getLessonDiscussion(discussionId: string): Promise<Record<string, unknown>> {
+    return request(`/lesson-discussions/${encodeURIComponent(discussionId)}`);
+  },
+  async generateCourse(discussionId: string, learnerId?: string): Promise<{ content: unknown }> {
+    const headers: Record<string, string> = {};
+    if (learnerId) headers["X-Learner-Id"] = learnerId;
+    const qs = learnerId ? `?learner_id=${encodeURIComponent(learnerId)}` : "";
+    return request(`/lesson-discussions/${encodeURIComponent(discussionId)}/generate-course${qs}`, { method: "POST", headers });
+  },
+  async generateSummary(discussionId: string, learnerId?: string): Promise<{ content: unknown }> {
+    const headers: Record<string, string> = {};
+    if (learnerId) headers["X-Learner-Id"] = learnerId;
+    const qs = learnerId ? `?learner_id=${encodeURIComponent(learnerId)}` : "";
+    return request(`/lesson-discussions/${encodeURIComponent(discussionId)}/generate-summary${qs}`, { method: "POST", headers });
+  },
+  async generateLessonExercises(discussionId: string, learnerId?: string): Promise<{ attempt: unknown }> {
+    const headers: Record<string, string> = {};
+    if (learnerId) headers["X-Learner-Id"] = learnerId;
+    const qs = learnerId ? `?learner_id=${encodeURIComponent(learnerId)}` : "";
+    return request(`/lesson-discussions/${encodeURIComponent(discussionId)}/exercises${qs}`, { method: "POST", headers });
+  },
+  async submitLessonExercises(discussionId: string, attemptId: string, answers: Record<string, unknown>, learnerId?: string): Promise<{ attempt: unknown }> {
+    const headers: Record<string, string> = {};
+    if (learnerId) headers["X-Learner-Id"] = learnerId;
+    const qs = learnerId ? `?learner_id=${encodeURIComponent(learnerId)}` : "";
+    return request(`/lesson-discussions/${encodeURIComponent(discussionId)}/exercises/${encodeURIComponent(attemptId)}/submit${qs}`, { method: "POST", headers, body: JSON.stringify({ answers }) });
+  },
+  async completeLessonManual(discussionId: string, learnerId?: string): Promise<Record<string, unknown>> {
+    const headers: Record<string, string> = {};
+    if (learnerId) headers["X-Learner-Id"] = learnerId;
+    const qs = learnerId ? `?learner_id=${encodeURIComponent(learnerId)}` : "";
+    return request(`/lesson-discussions/${encodeURIComponent(discussionId)}/complete-manual${qs}`, { method: "POST", headers });
+  },
+
+  // ── Socle — pgvector / pleias / config / profile / stale (lane 3) ──
+  async getPgvectorStatus(): Promise<{ enabled: boolean; ok: boolean; dsn: string; detail: string }> {
+    return request("/pgvector/status");
+  },
+  async getPleiasStatus(): Promise<{ enabled: boolean; model: string; ctx: number; available: boolean }> {
+    return request("/pleias/status");
+  },
+  async askPleias(subject: string, question: string, k = 5): Promise<{ answer: string; citations: unknown[]; sections: Record<string, unknown>; sources: unknown[]; warnings: unknown[] }> {
+    return request("/pleias/ask", {
+      method: "POST",
+      body: JSON.stringify({ subject, question, k }),
+    });
+  },
+  async getConfigSnapshot(): Promise<Record<string, unknown>> {
+    return request("/config");
+  },
+  async getLearnerProfile(): Promise<{ profile: Record<string, unknown> }> {
+    return request("/profile");
+  },
+  async getStaleBooks(subjectId: string): Promise<{ model: string; stale: unknown[] }> {
+    return request(`/stale-books?subject_id=${encodeURIComponent(subjectId)}`);
+  },
+
+  // ── Domain / classification / résumé / fiche révision ───────────
+  async getDomain(subjectId: string): Promise<{ domain: string }> {
+    return request(`/subjects/${encodeURIComponent(subjectId)}/domain`);
+  },
+  async setDomain(subjectId: string, domain: string): Promise<{ domain: string }> {
+    return request(`/subjects/${encodeURIComponent(subjectId)}/domain`, {
+      method: "PUT",
+      body: JSON.stringify({ domain }),
+    });
+  },
+  async classifySubject(subjectId: string): Promise<{ domain: string }> {
+    return request(`/subjects/${encodeURIComponent(subjectId)}/classify`, { method: "POST" });
+  },
+  async summarizeBook(bookId: string, chapter?: string | null): Promise<Record<string, unknown>> {
+    return request(`/books/${encodeURIComponent(bookId)}/summary`, {
+      method: "POST",
+      body: JSON.stringify({ chapter: chapter ?? null }),
+    });
+  },
+  async revisionSheet(subjectId: string, bookId?: string | null, chapter?: string | null): Promise<Record<string, unknown>> {
+    return request(`/subjects/${encodeURIComponent(subjectId)}/revision-sheet`, {
+      method: "POST",
+      body: JSON.stringify({ book_id: bookId ?? null, chapter: chapter ?? null }),
+    });
+  },
+
+  // ── Diagnostic initial (US3) ─────────────────────────────────────
+  async startDiagnostic(subjectId: string): Promise<Record<string, unknown>> {
+    return request(`/subjects/${encodeURIComponent(subjectId)}/diagnostic`, { method: "POST" });
+  },
+  async submitDiagnosticAnswer(sessionId: string, answer: string): Promise<Record<string, unknown>> {
+    return request(`/diagnostic/${encodeURIComponent(sessionId)}/answer`, {
+      method: "POST",
+      body: JSON.stringify({ answer }),
+    });
+  },
+  async getDiagnosticResult(sessionId: string): Promise<Record<string, unknown>> {
+    return request(`/diagnostic/${encodeURIComponent(sessionId)}/result`);
+  },
+
+  // ── Corpora (bibliothèque bis) ───────────────────────────────────
+  async getCorpora(): Promise<{ corpora: Array<{ id: number; name: string; book_count: number }> }> {
+    return request("/corpora");
+  },
+  async createCorpus(name: string): Promise<{ corpus: { id: number; name: string } }> {
+    return request("/corpora", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+  },
+  async renameCorpus(id: number, name: string): Promise<{ corpus: { id: number; name: string } }> {
+    return request(`/corpora/${id}/rename`, {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+  },
+  async deleteCorpus(id: number): Promise<{ deleted: boolean }> {
+    return request(`/corpora/${id}`, { method: "DELETE" });
+  },
+  async getBookCorpora(bookId: string): Promise<{ corpora: Array<{ id: number; name: string }> }> {
+    return request(`/books/${encodeURIComponent(bookId)}/corpora`);
+  },
+  async addBookToCorpus(bookId: string, corpusId: number): Promise<{ added: boolean }> {
+    return request(`/books/${encodeURIComponent(bookId)}/corpora`, {
+      method: "PUT",
+      body: JSON.stringify({ corpus_id: corpusId }),
+    });
+  },
+  async removeBookFromCorpus(bookId: string, corpusId: number): Promise<{ removed: boolean }> {
+    return request(`/books/${encodeURIComponent(bookId)}/corpora/${corpusId}`, { method: "DELETE" });
   },
 };

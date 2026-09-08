@@ -13,6 +13,7 @@ import {
   Upload,
 } from "lucide-vue-next";
 import { tutorApi } from "@/services/api";
+import type { IngestionJob } from "@/services/api";
 import type { LibraryCategory, QueueStatus, SearchResult, SourceBook } from "@/types";
 import { useLearningStore } from "@/stores/learning";
 import { usePreferences } from "@/stores/preferences";
@@ -25,6 +26,8 @@ const categories = ref<LibraryCategory[]>([]);
 const booksBySubject = ref<Map<string, SourceBook[]>>(new Map());
 const allBooks = ref<SourceBook[]>([]);
 const queue = ref<QueueStatus>({ running: false, pending_count: 0, completed_count: 0 });
+const activeJobs = ref<IngestionJob[]>([]);
+const etaText = ref("");
 const searchQuery = ref("");
 const showImport = ref(false);
 const showSearchModal = ref(false);
@@ -44,7 +47,7 @@ const renamingCategoryId = ref<number | null>(null);
 const renamingName = ref("");
 const loading = ref(true);
 
-let pollTimer: ReturnType<typeof setTimeout> | null = null;
+// (pollTimer déclaré dans la section Polling ci-dessous)
 
 // ── Helpers ────────────────────────────────────────────────────
 const subject = computed(() => state.data?.subject);
@@ -91,6 +94,7 @@ async function loadAll() {
     ]);
     categories.value = catRes.categories ?? [];
     queue.value = queueRes;
+    await refreshJobs();
 
     // Load subjects and books
     try {
@@ -132,9 +136,80 @@ async function refreshQueue() {
   } catch { /* best-effort */ }
 }
 
+// ── Progression réelle des jobs (US3) ────────────────────────────
+// Multi-jobs : on affiche le job le plus avancé — le worker étant
+// séquentiel, c'est lui qui détermine la fin visible du traitement.
+const shownJob = computed<IngestionJob | null>(() => {
+  let best: IngestionJob | null = null;
+  for (const j of activeJobs.value) {
+    if (!best || Number(j.progress_percent ?? 0) > Number(best.progress_percent ?? 0)) best = j;
+  }
+  return best;
+});
+
+const shownPercent = computed(() =>
+  Math.max(0, Math.min(100, Math.round(Number(shownJob.value?.progress_percent ?? 0)))),
+);
+
+// ── Estimateur de temps restant (fenêtre glissante, lissée) ──────
+// Vélocité = pente (%/s) entre le premier et le dernier échantillon du
+// job affiché (≤ 6 échantillons, ≤ 60 s). ETA = (100 − p) / vélocité.
+// Aucune vélocité mesurable (début, phase lente) ⇒ phase_label seul,
+// jamais de chiffre inventé. Reset à chaque nouveau job affiché.
+interface EtaSample { t: number; p: number; }
+let etaJobId: string | null = null;
+let etaSamples: EtaSample[] = [];
+
+function resetEta(jobId: string | null) {
+  etaJobId = jobId;
+  etaSamples = [];
+  etaText.value = "";
+}
+
+function trackProgress(job: IngestionJob) {
+  if (etaJobId !== job.id) resetEta(job.id);
+  const p = Math.max(0, Math.min(100, Number(job.progress_percent ?? 0)));
+  const now = Date.now();
+  etaSamples.push({ t: now, p });
+  while (etaSamples.length > 6) etaSamples.shift();
+  while (etaSamples.length > 1 && now - etaSamples[0].t > 60000) etaSamples.shift();
+  const first = etaSamples[0];
+  const last = etaSamples[etaSamples.length - 1];
+  const dt = (last.t - first.t) / 1000;
+  if (etaSamples.length >= 2 && dt >= 3) {
+    const v = (last.p - first.p) / dt; // %/s
+    if (v > 0.02 && p < 100) {
+      const remain = Math.max(0, (100 - p) / v);
+      etaText.value = remain < 60
+        ? (t("library.etaSoon") as string)
+        : (t("library.etaMinutes", { count: Math.ceil(remain / 60) }) as string);
+      return;
+    }
+  }
+  etaText.value = "";
+}
+
+async function refreshJobs() {
+  try {
+    const res = await tutorApi.getIngestionJobs(10);
+    activeJobs.value = (res.jobs ?? []).filter((j) => j.status !== "completed" && j.status !== "failed");
+  } catch {
+    // Erreur transitoire : on garde la dernière liste connue (pas de reset
+    // de l'estimateur sur un simple raté réseau).
+    const job = shownJob.value;
+    if (job) trackProgress(job);
+    return;
+  }
+  const job = shownJob.value;
+  if (job) trackProgress(job);
+  else resetEta(null);
+}
+
 async function refreshBooks() {
   try {
     const subjectsRes = await tutorApi.getSubjects();
+    // Reconstruction complète : un domaine supprimé disparaît de la liste.
+    booksBySubject.value = new Map();
     for (const sub of subjectsRes.subjects) {
       const booksRes = await tutorApi.getBooks(sub.name).catch(() => ({ books: [] as SourceBook[] }));
       booksBySubject.value.set(sub.id, booksRes.books ?? []);
@@ -143,20 +218,54 @@ async function refreshBooks() {
   } catch { /* best-effort */ }
 }
 
+// ── Domain operations ──────────────────────────────────────────
+async function deleteDomain(domain: TreeNode) {
+  const n = domain.books.length;
+  const base = t("library.deleteDomainConfirm", { name: domain.name });
+  const msg = n > 0 ? `${base}\n\n${n} document(s).` : base;
+  if (!confirm(msg)) return;
+  try {
+    await tutorApi.deleteSubject(domain.id);
+    openDomains.value.delete(domain.id);
+    importProgress.value = t("library.domainDeleted");
+    await refreshBooks();
+    setTimeout(() => { importProgress.value = ""; }, 2500);
+  } catch { /* best-effort */ }
+}
+
 // ── Polling ────────────────────────────────────────────────────
+// Boucle de suivi d'indexation : chaque passage rafraîchit la file PUIS
+// les livres (statuts + nouveaux livres indexés), et ne s'arrête que
+// quand tout est quiescent (file vide ET aucun livre pending/indexing).
+let pollTimer: ReturnType<typeof setTimeout> | null = null;
+let pollInFlight = false;
+
+function hasActiveWork(): boolean {
+  if (queue.value.running || queue.value.pending_count > 0) return true;
+  if (activeJobs.value.length > 0) return true;
+  return allBooksFlat.value.some((b) => b.status === "indexing" || b.status === "pending");
+}
+
+async function pollTick(): Promise<void> {
+  pollTimer = null;
+  if (pollInFlight) return;
+  pollInFlight = true;
+  try {
+    await refreshQueue();
+    // Livres : fait apparaître les documents dès leur indexation terminée
+    // (completed) ou en échec (error), sans refresh manuel.
+    await refreshBooks();
+    // Jobs : progression réelle + ETA de la bannière.
+    await refreshJobs();
+  } finally {
+    pollInFlight = false;
+  }
+  if (hasActiveWork()) pollTimer = setTimeout(pollTick, 2000);
+}
+
 function startPolling() {
   stopPolling();
-  const poll = async () => {
-    await refreshQueue();
-    if (queue.value.running || queue.value.pending_count > 0) {
-      pollTimer = setTimeout(poll, 2000);
-    } else {
-      // Check once more for any indexing books
-      const hasIndexing = allBooksFlat.value.some((b) => b.status === "indexing");
-      if (hasIndexing) pollTimer = setTimeout(poll, 2000);
-    }
-  };
-  pollTimer = setTimeout(poll, 2000);
+  pollTimer = setTimeout(pollTick, 2000);
 }
 
 function stopPolling() {
@@ -165,8 +274,7 @@ function stopPolling() {
 
 onMounted(() => {
   loadAll().then(() => {
-    const hasIndexing = allBooksFlat.value.some((b) => b.status === "indexing");
-    if (hasIndexing || queue.value.running || queue.value.pending_count > 0) startPolling();
+    if (hasActiveWork()) startPolling();
   });
 });
 onUnmounted(stopPolling);
@@ -200,8 +308,12 @@ function onFileChange(e: Event) {
 
 async function doImport() {
   const file = importFile.value;
+  // Domaine optionnel : vide ⇒ le backend infère depuis le nom du fichier.
   const domain = importSubject.value.trim();
-  if (!file || !domain) return;
+  if (!file) {
+    importProgress.value = t("library.importNeedFile");
+    return;
+  }
   importLoading.value = true;
   importProgress.value = t("library.importing");
   try {
@@ -485,6 +597,7 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
         type="text"
         :placeholder="t('library.importDomainPlaceholder')"
       />
+      <div style="font-size: 11px; color: var(--faint); margin-top: 2px;">{{ t('library.importDomainHint') }}</div>
       <label class="field-label" for="imp-file">{{ t('library.importFile') }}</label>
       <div
         class="import-drop"
@@ -514,7 +627,7 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
         type="button"
         class="primary-action"
         style="margin-top: 8px;"
-        :disabled="importLoading || !importFile || !importSubject.trim()"
+        :disabled="importLoading || !importFile"
         @click="doImport"
       >
         <LoaderCircle v-if="importLoading" :size="16" class="spin" aria-hidden="true" />
@@ -537,6 +650,19 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
           }}
         </strong>
         <p>{{ t('library.queueReason', { count: queue.completed_count }) }}</p>
+        <div v-if="shownJob" class="lib-job-progress">
+          <div
+            class="lib-progress-track"
+            role="progressbar"
+            :aria-valuenow="shownPercent"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            :aria-label="t('library.queueWorking')"
+          >
+            <div class="lib-progress-fill" :style="{ width: shownPercent + '%' }" />
+          </div>
+          <p class="lib-progress-line">{{ t('library.jobProgress', { phase: shownJob.phase_label || shownJob.status, percent: shownPercent }) }}<template v-if="etaText"> · {{ etaText }}</template></p>
+        </div>
       </div>
       <button type="button" class="secondary-action" @click="toggleQueueBtn">
         <Pause v-if="queue.running" :size="17" aria-hidden="true" />
@@ -571,6 +697,9 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
             </span>
             <strong class="lib-tlabel" @click="toggleDomain(domain.id)">{{ domain.name }}</strong>
             <span class="lib-tcount">{{ domain.books.length }} doc</span>
+            <span class="lib-tacts">
+              <button type="button" class="lib-tact del" :title="t('library.deleteDomain')" @click.stop="deleteDomain(domain)">🗑</button>
+            </span>
           </div>
           <div class="lib-tkids">
             <div v-if="domain.open">
@@ -678,4 +807,8 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
 }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.lib-job-progress { margin-top: 10px; }
+.lib-progress-track { height: 6px; border-radius: 99px; background: #e7e8f7; overflow: hidden; }
+.lib-progress-fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--orange), #f5ad4e); transition: width .4s ease; }
+.lib-progress-line { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
 </style>

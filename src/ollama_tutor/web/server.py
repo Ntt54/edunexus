@@ -857,10 +857,10 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
 
                     existing_book = _Book.from_dict(dict(row))
                     # resolve subject again (register_import already created it)
-                    # subject may be None (auto-inferred) — infer again if needed
+                    # subject may be None → same resolver (lexical recovery,
+                    # else shared « Non classé » bin, never a file-named subject)
                     try:
-                        _subj = str(subject).strip() if subject and str(subject).strip() else tutor_service._infer_subject_from_path(path)
-                        sid = tutor_service._resolve_subject(_subj)
+                        sid = tutor_service.resolve_import_subject(subject, path)
                     except Exception:
                         sid = None
                     if sid is not None:
@@ -1159,6 +1159,20 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             "subjects": [{"id": s.id, "name": s.name} for s in subjects],
             "active_id": active.id if active else None,
         }
+
+    @app.delete("/api/tutor/subjects/{subject_id}")
+    async def tutor_subject_delete(subject_id: str) -> dict[str, Any]:
+        """Delete a subject (thin transport: delegates to LibraryStore).
+
+        Books survive as orphans (subject_books joins CASCADE) and stay
+        visible via GET /api/tutor/books; re-import re-links them by
+        fingerprint. Unknown id → 404.
+        """
+        try:
+            tutor_store.delete_subject(subject_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="domaine inconnu")
+        return {"deleted": True}
 
     # ------------------------------------------------------------------
     # Feature 008 — Profil pédagogique (US1) — thin transport only

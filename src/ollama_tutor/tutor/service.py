@@ -2242,8 +2242,11 @@ class TutorService:
     def _infer_subject_from_path(self, path: Any) -> str:
         """Infer a subject name from a file path stem.
 
-        Normalises separators ``_ . -`` to spaces, collapses whitespace,
-        trims, falls back to ``Général`` when empty, and caps at 80 chars.
+        .. deprecated::
+            No longer used for domain naming (it created one domain per
+            file). Import paths must use :meth:`resolve_import_subject`
+            instead. Kept for backward compatibility; returns the cleaned
+            stem, ``Général`` when empty, capped at 80 chars.
         """
         base = Path(str(path)).stem if path is not None else ""
         clean = re.sub(r"[_.\-]+", " ", base)
@@ -2263,6 +2266,51 @@ class TutorService:
             if s.name.lower() == name.lower():
                 return s.id
         return self.store.create_subject(name).id
+
+    #: Bac unique et stable des imports sans domaine ni recouvrement lexical.
+    UNCLASSIFIED_SUBJECT_NAME = "Non classé"
+
+    @staticmethod
+    def _subject_tokens(text: str) -> set[str]:
+        """Tokens significatifs d'un texte (≥4 lettres, insensible à la
+        casse et aux accents : « mathématiques » matche « MATHEMATIQUES »).
+
+        Sert au recouvrement lexical fichier ↔ domaines existants : seuls
+        les tokens de ≥4 lettres comptent (« art », « dut », « td » ne
+        suffisent jamais à rattacher).
+        """
+        import unicodedata
+
+        ascii_folded = "".join(
+            ch
+            for ch in unicodedata.normalize("NFD", text or "")
+            if not unicodedata.combining(ch)
+        )
+        return set(re.findall(r"[a-z]{4,}", ascii_folded.lower()))
+
+    def resolve_import_subject(
+        self, subject_name: str | None = None, path: Any = None
+    ) -> str:
+        """Resolve the subject id for an import (returns ``subject_id``).
+
+        - Nom explicite non vide → comportement actuel : match insensible
+          à la casse, sinon création (via :meth:`_resolve_subject`).
+        - Vide/None → (a) recouvrement lexical : si le stem du fichier
+          partage ≥1 token significatif avec un domaine existant, rattache
+          à ce domaine ; (b) sinon bac UNIQUE et stable « Non classé »
+          (créé une fois puis réutilisé — JAMAIS un domaine par fichier,
+          JAMAIS de nom issu du nom de fichier).
+        """
+        cleaned = str(subject_name).strip()[:80] if subject_name is not None else ""
+        if cleaned:
+            return self._resolve_subject(cleaned)
+        stem = Path(str(path)).stem if path is not None else ""
+        file_tokens = self._subject_tokens(stem)
+        if file_tokens:
+            for s in self.store.list_subjects():
+                if file_tokens & self._subject_tokens(s.name):
+                    return s.id
+        return self._resolve_subject(self.UNCLASSIFIED_SUBJECT_NAME)
 
     # ------------------------------------------------------------------
     # Cancellation
@@ -2335,7 +2383,8 @@ class TutorService:
         problems (unknown format, missing file) raise before any row exists.
 
         ``subject_name`` may be empty/whitespace/None — in that case it is
-        inferred from ``path`` via :meth:`_infer_subject_from_path`.
+        resolved via :meth:`resolve_import_subject` (lexical recovery,
+        else the shared « Non classé » bin — never a file-named subject).
         """
         # Support positional calling convention register_import(path) if ever used
         # (path as first arg when subject omitted). Detect and shift.
@@ -2347,11 +2396,7 @@ class TutorService:
                 subject_name = None  # type: ignore[assignment]
         if path is None:
             raise FileNotFoundError("missing file path for import")
-        if not subject_name or not str(subject_name).strip():
-            subject_name = self._infer_subject_from_path(path)
-        else:
-            subject_name = str(subject_name).strip()[:80] or self._infer_subject_from_path(path)
-        subject_id = self._resolve_subject(str(subject_name))
+        subject_id = self.resolve_import_subject(subject_name, path)
         return subject_id, self.store.import_document(subject_id, path)
 
     async def reindex_book(self, book_id: str) -> dict[str, Any]:
@@ -2450,11 +2495,7 @@ class TutorService:
         """
         if path is None:
             raise FileNotFoundError("missing file path for import")
-        if not subject_name or not str(subject_name).strip():
-            subject_name = self._infer_subject_from_path(path)
-        else:
-            subject_name = str(subject_name).strip()[:80] or self._infer_subject_from_path(path)
-        subject_id = self._resolve_subject(str(subject_name))
+        subject_id = self.resolve_import_subject(subject_name, path)
         book = self.store.import_document(subject_id, path)
         content_hash: str | None = None
         try:
@@ -2763,7 +2804,8 @@ class TutorService:
         ``background`` is True the pipeline runs in the background and
         returns immediately; otherwise it runs synchronously.
 
-        ``subject_name`` may be empty/whitespace/None — inferred from ``path``.
+        ``subject_name`` may be empty/whitespace/None — resolved via
+        :meth:`resolve_import_subject` (lexical recovery, else « Non classé »).
         """
         subject_id, book, job, duplicate = self._prepare_ingestion_job(
             subject_name, path, fmt

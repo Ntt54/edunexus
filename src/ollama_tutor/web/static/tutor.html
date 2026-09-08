@@ -1121,6 +1121,7 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent);outline:none;
         <div class="head-tools">
           <span class="count-chip" id="libCount">0 document actif</span>
           <button id="addSourceBtn" class="btn btn-primary btn-sm" aria-expanded="false" aria-controls="importPanel"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg> Ajouter un document</button>
+          <button id="delSpaceBtn" class="btn btn-ghost btn-sm" title="Supprimer définitivement l'espace actif — les documents sont conservés">Supprimer l'espace…</button>
         </div>
       </div>
       <div class="lib-toolbar">
@@ -1160,12 +1161,12 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent);outline:none;
 
           <!-- Primary CTA: large drop-zone, no form friction -->
           <div class="field-group">
-            <label class="field-label" for="impFile" style="margin-top:0;">Fichier <span style="color:var(--ink-faint);font-weight:600;text-transform:none;letter-spacing:0">· TXT, MD, PDF, EPUB</span></label>
-            <div class="drop-zone large" id="dropZone" tabindex="0" role="button" aria-label="Zone de dépôt — glisser-déposer ou cliquer pour parcourir">
-              <input type="file" id="impFile" accept=".txt,.md,.pdf,.epub" hidden>
+            <label class="field-label" for="impFile" style="margin-top:0;">Fichiers <span style="color:var(--ink-faint);font-weight:600;text-transform:none;letter-spacing:0">· TXT, MD, PDF, EPUB — plusieurs acceptés</span></label>
+            <div class="drop-zone large" id="dropZone" tabindex="0" role="button" aria-label="Zone de dépôt — glisser-déposer ou cliquer pour parcourir (plusieurs fichiers acceptés)">
+              <input type="file" id="impFile" accept=".txt,.md,.pdf,.epub" multiple hidden>
               <div class="dz-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/><path d="M12 11v7"/><path d="M9 14l3 3 3-3"/></svg></div>
-              <div class="dz-text"><strong>Glisser-déposer</strong> votre fichier ici ou <span class="dz-link">cliquer pour parcourir</span></div>
-              <div class="dz-hint">Aucun autre champ requis — le titre et la catégorie sont détectés depuis le nom du fichier.</div>
+              <div class="dz-text"><strong>Glisser-déposer</strong> vos fichiers ici ou <span class="dz-link">cliquer pour parcourir</span></div>
+              <div class="dz-hint">Aucun autre champ requis — le titre et la catégorie sont détectés depuis le nom de chaque fichier.</div>
               <div class="dz-preview" id="dzPreview" hidden>
                 <span class="dz-fileicon" aria-hidden="true">📄</span>
                 <span class="dz-filename" id="dzFileName"></span>
@@ -2908,6 +2909,28 @@ async function loadBooksStatuses() {
   } catch (e) { /* best-effort */ }
 }
 
+/* --- Suppression d'un domaine (espace) : les livres survivent -------- */
+async function deleteActiveSubject() {
+  const subj = activeSubject();
+  if (!subj) { toast("Aucun espace à supprimer."); return; }
+  // FR-011 / research §7 : jamais de suppression silencieuse d'un conteneur.
+  if (!confirm("Supprimer définitivement « " + subj.name + " » ? Les documents seront conservés.")) return;
+  try {
+    const r = await sf("/api/tutor/subjects/" + encodeURIComponent(subj.id), { method: "DELETE" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    toast("Espace « " + subj.name + " » supprimé — documents conservés.");
+    // Invalidation locale : l'espace actif n'existe plus, ses caches non plus.
+    delete S.domainBooks[subj.id];
+    delete S.hydrated[subj.id];
+    localStorage.removeItem("edunexus.space");
+    S.activeId = null;
+    await loadSubjects();
+    S.libLoaded = false;
+    await loadSpaceBooks();
+    renderLibrary();
+  } catch (e) { /* déjà journalisé par sf */ }
+}
+
 async function deleteBook(b) {
   if (!confirm("Supprimer « " + b.title + " » et ses fragments ?")) return;
   try {
@@ -3003,13 +3026,15 @@ function updateAutoDetectPreview(){
     if(btn) btn.disabled = true;
     return;
   }
+  // Multi-fichiers : aperçu basé sur le premier fichier + compteur.
   const file = f.files[0];
+  const moreCount = f.files.length - 1;
   const rawTitle = cleanTitleFromFilename(file.name);
   const fmt = (file.name.split(".").pop()||"?").toLowerCase();
   const sug = suggestCategory(rawTitle);
   preview.hidden = false;
   if(badge){ badge.innerHTML = '<span class="spin"></span> Détection automatique en cours…'; badge.className="badge indexing"; setTimeout(()=>{ if(badge) { badge.textContent="✓ Détection terminée"; badge.className="badge done"; } }, 700); }
-  if(titleEl) titleEl.textContent = rawTitle;
+  if(titleEl) titleEl.textContent = rawTitle + (moreCount > 0 ? " (+" + moreCount + " autres)" : "");
   if(fmtEl) fmtEl.textContent = fmt.toUpperCase();
   if(catEl){
     if(sug){ catEl.textContent = "Catégorie : " + sug.name; catEl.className="badge done"; }
@@ -3096,7 +3121,11 @@ function updateDropPreview() {
   if (!preview || !f) return;
   if (f.files && f.files.length) {
     const file = f.files[0];
-    if (nameEl) nameEl.textContent = file.name;
+    // Multi-fichiers : premier fichier + compteur « +N autres ».
+    const extra = f.files.length > 1
+      ? " (+" + (f.files.length - 1) + " autre" + (f.files.length > 2 ? "s" : "") + ")"
+      : "";
+    if (nameEl) nameEl.textContent = file.name + extra;
     if (sizeEl) sizeEl.textContent = formatFileSize(file.size);
     preview.hidden = false;
   } else {
@@ -3179,8 +3208,9 @@ function setupImportDragDrop() {
     zone.classList.remove("drag-over");
     const files = e.dataTransfer && e.dataTransfer.files;
     if (files && files.length) {
+      // Multi-fichiers : tous les fichiers déposés sont conservés.
       const dt = new DataTransfer();
-      dt.items.add(files[0]);
+      for (const f of files) dt.items.add(f);
       input.files = dt.files;
       input.dispatchEvent(new Event("change", {bubbles:true}));
     }
@@ -3195,69 +3225,95 @@ function setupImportDragDrop() {
 async function importSource() {
   const fileInput = $("impFile");
   if (!fileInput.files.length) { toast("Choisissez un fichier."); return; }
-  const file = fileInput.files[0];
-  // Subject is optional: infer from filename + category suggestion if empty.
+  // Multi-fichiers : envoi SÉQUENTIEL (cible ≤ 8 Go : un seul upload et
+  // un seul job à la fois, jamais d'envois concurrents ; même
+  // subject/catégorie appliqués à tous).
+  const files = Array.from(fileInput.files);
+  // Subject is optional: empty stays empty so the backend auto-detects
+  // from the file (register_import infers from the filename). Never
+  // substitute a hardcoded fallback here — the field promises auto-detect.
   const rawSubject = ($("impSubject") ? $("impSubject").value.trim() : "");
-  let subject = rawSubject;
-  if(!subject){
-    const inferredTitle = cleanTitleFromFilename(file.name);
-    subject = inferSubjectFromFilename(inferredTitle);
-    // ensure pattern compliance (no <>) and non-empty
-    subject = String(subject||"").replace(/[<>]/g,"").trim() || "Général";
-  }
-  // Optional soft validation (no hard block): clean <> and length
-  subject = String(subject).replace(/[<>]/g,"").trim().slice(0,80) || "Général";
-  const title = cleanTitleFromFilename(file.name) || file.name.replace(/\.[^.]+$/, "") || file.name;
-  const fmt = (file.name.split(".").pop() || "?").toLowerCase();
-  const fd = new FormData();
-  fd.append("subject", subject);
-  fd.append("file", file);
-  // The nocturnal worker is deliberately the default UI path: one worker,
-  // ordered books, bounded embedding batches, and resumable pending rows.
-  fd.append("queue", "true");
+  // Optional soft validation (no hard block): clean <> and length.
+  const subject = String(rawSubject || "").replace(/[<>]/g,"").trim().slice(0,80);
+  // Rangement suggéré / choisi : même catégorie appliquée à chaque fichier.
+  const catSel = $("impCatSel");
+  const catId = catSel && catSel.value ? parseInt(catSel.value, 10) : null;
+  // Snapshot des domaines AVANT la boucle (bascule auto-détectée après).
+  const knownIds = new Set((S.subjects || []).map(s => s.id));
 
   const btn = $("impBtn");
   const origBtnHtml = btn.innerHTML;
   btn.disabled = true;
-  btn.innerHTML = '<span class="spin spin-light" style="width:13px;height:13px;border-width:2px"></span> Importation…';
   $("importProgress").hidden = false;
   setDomainDetecting();
-  setStatus("envoi du document…");
+  // Un résultat par fichier : importé / doublon / échec (résumé final).
+  const outcomes = [];
   try {
-    const r = await sf("/api/tutor/import", { method: "POST", body: fd });
-    if (!r.ok) {
-      let detail = "HTTP " + r.status;
-      try { const j = await r.json(); if (j && j.detail) detail = String(j.detail); } catch (_) {}
-      throw new Error(detail);
-    }
-    const rep = await r.json().catch(() => ({}));
-    // Duplicate fingerprint case — backend returns status "ready" immediately
-    if (rep.status === "ready" && rep.book_id) {
-      // already indexed, no queue; toast duplicate but still handle membership
-      toast("Document déjà présent — « " + title + " » est déjà indexé.");
-    }
-
-    // Rangement suggéré / choisi (membership, jamais de ré-indexation).
-    const catSel = $("impCatSel");
-    if (rep.book_id != null && catSel && catSel.value) {
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const title = cleanTitleFromFilename(file.name) || file.name.replace(/\.[^.]+$/, "") || file.name;
+      const fmt = (file.name.split(".").pop() || "?").toLowerCase();
+      const fd = new FormData();
+      // Empty subject ⇒ omit the field: backend infers from the filename.
+      if (subject) fd.append("subject", subject);
+      fd.append("file", file);
+      // The nocturnal worker is deliberately the default UI path: one worker,
+      // ordered books, bounded embedding batches, and resumable pending rows.
+      fd.append("queue", "true");
+      btn.innerHTML = '<span class="spin spin-light" style="width:13px;height:13px;border-width:2px"></span> Importation ' + (i + 1) + "/" + files.length + "…";
+      setStatus("envoi du document " + (i + 1) + "/" + files.length + "…");
       try {
-        await sf("/api/tutor/books/" + encodeURIComponent(rep.book_id) + "/categories", {
-          method: "PUT", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ category_id: parseInt(catSel.value, 10) }),
-        });
-        const c = S.categories.find(x => String(x.id) === String(catSel.value));
-        toast("Rangé dans « " + (c ? c.name : "catégorie") + " ».");
-      } catch (e) { /* rangement non bloquant */ }
+        const r = await sf("/api/tutor/import", { method: "POST", body: fd });
+        if (!r.ok) {
+          let detail = "HTTP " + r.status;
+          try { const j = await r.json(); if (j && j.detail) detail = String(j.detail); } catch (_) {}
+          throw new Error(detail);
+        }
+        const rep = await r.json().catch(() => ({}));
+        // Duplicate fingerprint case — backend returns status "ready" immediately
+        const isDup = rep.status === "ready" && rep.book_id;
+        if (isDup && files.length === 1) {
+          // Single-file UX inchangée : toast doublon dédié.
+          toast("Document déjà présent — « " + title + " » est déjà indexé.");
+        }
+
+        // Rangement suggéré / choisi (membership, jamais de ré-indexation).
+        if (rep.book_id != null && catId) {
+          try {
+            await sf("/api/tutor/books/" + encodeURIComponent(rep.book_id) + "/categories", {
+              method: "PUT", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ category_id: catId }),
+            });
+            if (files.length === 1) {
+              const c = S.categories.find(x => String(x.id) === String(catId));
+              toast("Rangé dans « " + (c ? c.name : "catégorie") + " ».");
+            }
+          } catch (e) { /* rangement non bloquant */ }
+        }
+        outcomes.push({ title, fmt, book_id: rep.book_id, status: rep.status || "indexing", dup: !!isDup });
+      } catch (e) {
+        outcomes.push({ title, fmt, book_id: null, status: "failed", dup: false, error: e.message || e });
+        postLog("import refusé (" + file.name + ") : " + (e.message || e));
+      }
     }
 
     // Bascule vers le domaine cible si l'import en crée/rejoint un autre.
+    // Sujet vide ⇒ détection auto backend : on rejoint le domaine nouvellement
+    // créé (snapshot avant/après import), jamais un nom forcé côté client.
     const wanted = subject.toLowerCase();
     const cur = activeSubject();
     let targetSubjectId = cur ? cur.id : null;
-    if (!cur || cur.name.toLowerCase() !== wanted) {
+    if (!cur || (wanted && cur.name.toLowerCase() !== wanted) || !wanted) {
+      // knownIds : snapshot pris AVANT la boucle (domaines créés par l'import).
       await loadSubjects();
       populateSubjectDatalist();
-      const target = S.subjects.find(s => s.name.toLowerCase() === wanted);
+      let target = wanted
+        ? S.subjects.find(s => s.name.toLowerCase() === wanted)
+        : null;
+      if (!target) {
+        const fresh = (S.subjects || []).filter(s => !knownIds.has(s.id));
+        if (fresh.length === 1) target = fresh[0];
+      }
       if (target) {
         targetSubjectId = target.id;
         if (target.id !== S.activeId) {
@@ -3302,11 +3358,13 @@ async function importSource() {
     }
 
     await loadBooksStatuses();
-    if (rep.book_id != null && !S.books.some(b => b.id === rep.book_id)) {
-      S.books.unshift({
-        id: rep.book_id, title, format: fmt,
-        status: rep.status || "indexing", chunks_total: 0,
-      });
+    for (const o of outcomes) {
+      if (o.book_id != null && !S.books.some(b => b.id === o.book_id)) {
+        S.books.unshift({
+          id: o.book_id, title: o.title, format: o.fmt,
+          status: o.status, chunks_total: 0,
+        });
+      }
     }
     S.libLoaded = true;
     if (activeSubject()) S.domainBooks[activeSubject().id] = S.books;
@@ -3314,11 +3372,30 @@ async function importSource() {
     ensureIndexPolling();
     await refreshIndexQueue();
     const domLabel = $("domainBadge") && !$("domainBadge").hidden ? $("domainBadge").textContent.trim() : "";
-    if (rep.status !== "ready") {
-      toast("« " + title + " » ajouté" + (domLabel ? " — " + domLabel : "") + " — placé dans la file d’indexation.");
+    const nOk = outcomes.filter(o => o.book_id != null && !o.dup).length;
+    const nDup = outcomes.filter(o => o.dup).length;
+    const nFail = outcomes.filter(o => o.book_id == null).length;
+    if (outcomes.length === 1) {
+      // Single-file UX inchangée.
+      const o = outcomes[0];
+      if (o.book_id == null) {
+        toast("Import impossible : " + (o.error || "?"));
+      } else if (!o.dup) {
+        toast("« " + o.title + " » ajouté" + (domLabel ? " — " + domLabel : "") + " — placé dans la file d’indexation.");
+      } else if (!document.querySelector("#toast.show")) {
+        // duplicate toast already shown; add subtle confirmation
+        toast("« " + o.title + " » — aucun ré-import nécessaire.");
+      }
     } else {
-      // duplicate toast already shown; add subtle confirmation
-      if (!document.querySelector("#toast.show")) toast("« " + title + " » — aucun ré-import nécessaire.");
+      // Multi-fichiers : résumé final (X importés, Y doublons, Z échecs).
+      const bits = [];
+      if (nOk) bits.push(nOk + " importé" + (nOk > 1 ? "s" : ""));
+      if (nDup) bits.push(nDup + " doublon" + (nDup > 1 ? "s" : ""));
+      if (nFail) {
+        const names = outcomes.filter(o => o.book_id == null).map(o => o.title).join(", ");
+        bits.push(nFail + " échec" + (nFail > 1 ? "s" : "") + " (" + names + ")");
+      }
+      toast(bits.length ? bits.join(" · ") + "." : "Aucun fichier traité.");
     }
     // Laisse le badge visible un instant avant de fermer le panneau
     await new Promise(r => setTimeout(r, 900));
@@ -6030,6 +6107,7 @@ function wireAll() {
   $("impBtn").addEventListener("click", importSource);
   $("impFile").addEventListener("change", refreshImportSuggestion);
   $("autoClassifyBtn").addEventListener("click", autoClassify);
+  $("delSpaceBtn").addEventListener("click", deleteActiveSubject);
   $("indexQueueStartBtn").addEventListener("click", startIndexQueue);
   $("indexQueueStopBtn").addEventListener("click", stopIndexQueue);
   $("srcSearch").addEventListener("input", () => renderLibrary());
