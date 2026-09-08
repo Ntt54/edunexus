@@ -16,8 +16,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from typing import Any
+import re
 
 from ..models import Message, MessageRole, OllamaOptions
+from .sandbox import RunResult
 from .models import (
     ExamSession,
     Exercise,
@@ -45,6 +47,7 @@ class AttemptResult:
     hint_level: int
     hint: str | None
     solution: str | None = None
+    next_step: str | None = None  # 010 P2 : extrait du feedback (T047)
 
 
 # ---------------------------------------------------------------------------
@@ -93,8 +96,19 @@ def build_exercise_prompt(
     ]
 
 
-def build_grade_prompt(exercise: Exercise, answer: str) -> list[Message]:
-    """Build the messages that ask the LLM to grade a learner's answer."""
+def build_grade_prompt(
+    exercise: Exercise,
+    answer: str,
+    execution: RunResult | None = None,
+) -> list[Message]:
+    """Build the messages that ask the LLM to grade a learner's answer.
+
+    ``execution`` is the FR-020 opt-in hook: when a sandboxed
+    :class:`RunResult` is provided, its stdout/stderr/exit code (and
+    timeout/blocked flags) are injected into the prompt so the grader
+    can cite the real output. ``None`` (default) keeps the legacy prompt
+    byte-identical.
+    """
     system = (
         "Tu es un correcteur qui évalue la réponse d'un élève à un exercice. "
         "Réponds STRICTEMENT en JSON, sans aucun texte autour, selon la forme : "
@@ -110,6 +124,16 @@ def build_grade_prompt(exercise: Exercise, answer: str) -> list[Message]:
         f"Réponse de l'élève :\n{answer}\n\n"
         "Donne le verdict et un retour constructif."
     )
+    if execution is not None:
+        user += (
+            "\n\nPreuve d'exécution sandboxée (ne pas révéler la solution) :\n"
+            f"stdout :\n{execution.stdout or '(vide)'}\n"
+            f"stderr :\n{execution.stderr or '(vide)'}\n"
+            f"exit code : {execution.exit_code}\n"
+            f"timed_out : {execution.timed_out}\n"
+            f"blocked : {execution.blocked}\n"
+            "Cite l'output réel (stdout/stderr/code de sortie) dans ton feedback."
+        )
     return [
         Message(role=MessageRole.SYSTEM, content=system),
         Message(role=MessageRole.USER, content=user),
@@ -195,6 +219,104 @@ def parse_grade_response(text: str) -> tuple[str, str]:
         verdict = "incorrect"
     feedback = str(data.get("feedback", "")).strip()
     return verdict, feedback
+
+
+# ---------------------------------------------------------------------------
+# Feedback standard (010 P2-Pédagogie, T047)
+#
+# Adapté de python-tutor ``main.py`` (evidence packet, ``_classify_assessment``,
+# ``_extract_next_step``) : format verdict + next_step. Verdicts
+# passed/needs_work/error ; repli sur la preuve d'exécution quand la
+# première ligne est inexploitable.
+# ---------------------------------------------------------------------------
+
+ASSESSMENT_VERDICTS = ("passed", "needs_work", "error")
+
+
+def classify_assessment_verdict(
+    text: str,
+    exit_code: int = 0,
+    timed_out: bool = False,
+    stderr: str = "",
+) -> str:
+    """Première ligne → verdict, sinon repli preuve d'exécution (source)."""
+    first = (text or "").strip().splitlines()
+    first_line = first[0].lower() if first else ""
+    for label in ("passed", "needs_work", "needs work", "error"):
+        if label in first_line:
+            return "needs_work" if label == "needs work" else label
+    if timed_out or exit_code != 0:
+        return "error" if stderr else "needs_work"
+    return "needs_work"
+
+
+def extract_next_step(text: str) -> str | None:
+    """Extrait la suggestion « Next step … » (source, séparateurs :, —, -)."""
+    if not text:
+        return None
+    for line in text.splitlines():
+        stripped = line.strip().lstrip("-*0123456789. ").strip()
+        if stripped.lower().startswith("next step"):
+            for sep in (":", "—", "-"):
+                if sep in stripped:
+                    return stripped.split(sep, 1)[1].strip() or None
+            return stripped
+    return None
+
+
+def build_evaluation_prompt(
+    code: str,
+    exit_code: int,
+    duration_ms: int,
+    stdout: str,
+    stderr: str,
+    timed_out: bool = False,
+    blocked: bool = False,
+    section: str | None = None,
+    question: str | None = None,
+    refs: list[dict[str, Any]] | None = None,
+) -> str:
+    """Paquet d'évidence factuel pour le juge LLM (source, sans invention)."""
+    lines: list[str] = [
+        "You are reviewing a student's Python attempt. Use only the runtime"
+        " evidence below — do not claim outputs or behaviour you can't see."
+        " Reply in three short parts:",
+        "  1. Assessment — one line: passed | needs_work | error.",
+        "  2. Feedback — 2-4 sentences, hint-first.",
+        "  3. Next step — one short concrete suggestion.",
+    ]
+    if refs:
+        lines.append(
+            "  4. If you cite documentation, use only URLs from the"
+            " 'Reference material' list below. Do not invent links."
+        )
+    lines.append("")
+    if section:
+        lines.append(f'Section context: "{section}".')
+    if question:
+        lines.append(f"Student question: {question}")
+    lines.append("")
+    lines += [
+        "Student code:",
+        "```python",
+        code,
+        "```",
+        "",
+        f"Exit code: {exit_code}",
+        f"Duration: {duration_ms} ms",
+    ]
+    if timed_out:
+        lines.append("NOTE: execution hit the runner's timeout.")
+    if blocked:
+        lines.append(
+            "NOTE: the static safety scanner blocked execution; see safety_events."
+        )
+    lines += ["Stdout:", "```", stdout or "(empty)", "```",
+              "Stderr:", "```", stderr or "(empty)", "```"]
+    if refs:
+        lines += ["", "Reference material (curated, on the docs allowlist):"]
+        lines += [f"- {r.get('label', '')} — {r.get('url', '')}" for r in refs]
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +560,219 @@ def _response_to_text(qtype: str, payload: dict[str, Any], response: Any) -> str
         return str(response)
 
 
+# ---------------------------------------------------------------------------
+# Diagnostic erreurs 5 catégories (010 P2-Adaptatif, T033)
+#
+# Adapté de ``autreprojet/OpenTutor-main``
+# (``services/diagnosis/classifier.py`` : 5 catégories + confidence +
+# evidence en JSON contraint, ``derive.py`` : version clean simplifiée).
+# Ici : prompts FR, parsing via ``_extract_json`` local, heuristiques
+# offline quand aucun JSON LLM n'est fourni (coût nul, 100 % offline).
+# ---------------------------------------------------------------------------
+
+#: Les cinq catégories d'erreur (source : classifier.py OpenTutor).
+ERROR_CATEGORIES = (
+    "conceptual",
+    "procedural",
+    "computational",
+    "reading",
+    "careless",
+)
+
+#: Diagnostic pair (source : WrongAnswer.diagnosis OpenTutor).
+DIAGNOSIS_ENUM = (
+    "fundamental_gap",
+    "trap_vulnerability",
+    "carelessness",
+    "mastered",
+)
+
+_CATEGORY_TO_DIAGNOSIS = {
+    "careless": "carelessness",
+    "conceptual": "fundamental_gap",
+    "procedural": "fundamental_gap",
+    "computational": "trap_vulnerability",
+    "reading": "trap_vulnerability",
+}
+
+_ERROR_DIAGNOSIS_PROMPT = (
+    "Tu es un analyste d'erreurs d'élève. Classe l'erreur ci-dessous dans "
+    "UNE catégorie exactement, et réponds UNIQUEMENT avec un objet JSON "
+    "valide, rien d'autre.\n\n"
+    "Catégories :\n"
+    "- conceptual : incompréhension du concept ou de la définition\n"
+    "- procedural : mauvaise méthode, mauvaises étapes, mauvaise formule\n"
+    "- computational : démarche juste mais erreur de calcul\n"
+    "- reading : consigne mal lue, condition manquée, unités confondues\n"
+    "- careless : coquille, erreur de signe, étourderie évidente\n\n"
+    "Question : {question}\n"
+    "Bonne réponse : {correct_answer}\n"
+    "Réponse de l'élève : {user_answer}\n"
+    "Concept testé : {related_concept}\n\n"
+    'JSON attendu : {{"category": "une_des_cinq", "confidence": 0.0-1.0, '
+    '"evidence": "brève justification", '
+    '"related_concept": "concept testé"}}'
+)
+
+
+def build_error_diagnosis_prompt(
+    question: str,
+    correct_answer: str,
+    user_answer: str,
+    related_concept: str = "",
+) -> list[Message]:
+    """Construit les messages du diagnostic d'erreur (JSON contraint)."""
+    return [
+        Message(
+            role=MessageRole.SYSTEM,
+            content="Tu analyses des erreurs d'élève. Réponds uniquement en JSON valide.",
+        ),
+        Message(
+            role=MessageRole.USER,
+            content=_ERROR_DIAGNOSIS_PROMPT.format(
+                question=question,
+                correct_answer=correct_answer,
+                user_answer=user_answer,
+                related_concept=related_concept or "inconnu",
+            ),
+        ),
+    ]
+
+
+def parse_error_diagnosis(text: str) -> dict[str, Any]:
+    """Parse et valide un diagnostic ``{category, confidence, evidence,
+    related_concept}`` (repli conceptual/0.3 si inexploitable)."""
+    fallback = {
+        "category": "conceptual",
+        "confidence": 0.3,
+        "evidence": str(text or "").strip(),
+        "related_concept": "unknown",
+    }
+    data = _extract_json(text)
+    if not isinstance(data, dict) or not data:
+        return fallback
+    category = str(data.get("category", "conceptual")).strip().lower()
+    if category not in ERROR_CATEGORIES:
+        category = "conceptual"
+    try:
+        confidence = float(data.get("confidence", 0.5))
+    except (TypeError, ValueError):
+        confidence = 0.5
+    confidence = max(0.0, min(1.0, confidence))
+    return {
+        "category": category,
+        "confidence": confidence,
+        "evidence": str(data.get("evidence", "")),
+        "related_concept": str(data.get("related_concept", "unknown")),
+    }
+
+
+def _normalize_answer(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip().casefold())
+
+
+def _numbers_of(text: str) -> list[str]:
+    return re.findall(r"\d+", str(text or ""))
+
+
+def diagnose_error(
+    question: str,
+    correct_answer: str,
+    user_answer: str,
+    related_concept: str = "",
+    llm_result: dict[str, Any] | str | None = None,
+) -> dict[str, Any]:
+    """Diagnostique une erreur d'élève (5 catégories + confiance + preuve).
+
+    Voie LLM (primaire quand disponible) : ``llm_result`` (dict ou JSON brut)
+    parsé via :func:`parse_error_diagnosis`. Sinon heuristiques offline
+    (coût nul) : quasi-identique → careless, vide → reading, chiffres
+    transposés → careless, nombres distincts → computational, défaut →
+    conceptual (repli source).
+    """
+    if llm_result is not None:
+        raw = llm_result if isinstance(llm_result, str) else json.dumps(llm_result)
+        out = parse_error_diagnosis(raw)
+        if not out["related_concept"] or out["related_concept"] == "unknown":
+            out["related_concept"] = related_concept or "unknown"
+        return out
+    concept = related_concept or "unknown"
+    given, expected = _normalize_answer(user_answer), _normalize_answer(correct_answer)
+    if given == expected:
+        return {
+            "category": "careless",
+            "confidence": 0.7,
+            "evidence": "Réponse quasi identique (casse/espaces) : étourderie.",
+            "related_concept": concept,
+        }
+    if not given:
+        return {
+            "category": "reading",
+            "confidence": 0.4,
+            "evidence": "Réponse vide : consigne ou question manquée ?",
+            "related_concept": concept,
+        }
+    given_nums, expected_nums = _numbers_of(given), _numbers_of(expected)
+    if given_nums and expected_nums:
+        if sorted("".join(given_nums)) == sorted("".join(expected_nums)):
+            return {
+                "category": "careless",
+                "confidence": 0.6,
+                "evidence": "Mêmes chiffres dans un ordre différent : transposition.",
+                "related_concept": concept,
+            }
+        return {
+            "category": "computational",
+            "confidence": 0.5,
+            "evidence": "Nombres distincts avec démarche possiblement juste : calcul.",
+            "related_concept": concept,
+        }
+    if re.search(r"[=→+-/*]", given) and len(given_nums) > len(expected_nums):
+        return {
+            "category": "procedural",
+            "confidence": 0.45,
+            "evidence": "Étapes ou opérateurs superflus : mauvaise méthode.",
+            "related_concept": concept,
+        }
+    return {
+        "category": "conceptual",
+        "confidence": 0.3,
+        "evidence": "Défaut : incompréhension probable du concept.",
+        "related_concept": concept,
+    }
+
+
+def derive_clean_question(
+    question: str, correct_answer: str, user_answer: str, concept: str
+) -> dict[str, Any]:
+    """Version clean offline d'une question ratée (adapté de derive.py).
+
+    Sans LLM : conserve le cœur (première phrase), retire le verbiage
+    (détailler/étapes), et fabrique l'explication gabarit. La variante LLM
+    complète (derive_diagnostic source) reste du P2 ultérieur.
+    """
+    first = re.split(r"[.!?\n]", str(question or "").strip())[0].strip()
+    core = first or str(question or "").strip() or f"Question sur {concept}"
+    simplified = re.sub(
+        r"(?i)\s+en détaillant.*$", "", core
+    ).strip()
+    if not simplified:
+        simplified = core
+    return {
+        "question": f"Vérification ({concept}) : {simplified}",
+        "correct_answer": str(correct_answer or ""),
+        "explanation": (
+            f"Cette version simplifiée vérifie le concept « {concept} » "
+            "sans les pièges ni la complexité de l'énoncé d'origine."
+        ),
+        "simplifications_made": [
+            "Énoncé réduit à sa première phrase.",
+            "Verbiage de méthode retiré.",
+        ],
+        "core_concept_preserved": str(concept or "unknown"),
+    }
+
+
 class QuizEngine:
     """Quiz/exam generation, correction and reporting (US5 / T040).
 
@@ -574,6 +909,7 @@ class QuizEngine:
         quiz_id: str,
         answers: dict[str, Any],
         hint_requested: bool = False,
+        diagnose: bool = False,
     ) -> QuizReport:
         """Correct a quiz/exam submission and persist the report.
 
@@ -582,6 +918,10 @@ class QuizEngine:
           REST layer can return 409).
         - a timed exam whose window has elapsed scores any unanswered question as
           incorrect (auto-submit semantics).
+        - ``diagnose=True`` (010 P2, opt-in) : les réponses incorrectes sont
+          diagnostiquées (5 catégories offline) et enregistrées avec
+          ``error_category`` + ``knowledge_points`` + ``diagnosis`` ; défaut
+          False = comportement historique inchangé.
         """
         quiz = self._get_quiz_row(quiz_id)
         if quiz is None:
@@ -653,6 +993,21 @@ class QuizEngine:
                 question_text = q_payload.get("question", "")
                 correct_answer_text = _answer_to_text(q["type"], q_payload, q_answer)
                 given_answer_text = _response_to_text(q["type"], q_payload, response)
+                diag_kwargs: dict[str, Any] = {}
+                if diagnose:
+                    # 010 P2 : diagnostic 5 catégories (offline) + pair.
+                    safe_concept = str(concept_name or concept_id or "unknown")
+                    diag = diagnose_error(
+                        question_text,
+                        correct_answer_text,
+                        given_answer_text,
+                        safe_concept,
+                    )
+                    diag_kwargs = {
+                        "error_category": diag["category"],
+                        "knowledge_points": [safe_concept],
+                        "diagnosis": _CATEGORY_TO_DIAGNOSIS[diag["category"]],
+                    }
                 self.store.record_error(
                     subject_id=quiz["subject_id"],
                     concept_name=concept_name,
@@ -660,6 +1015,7 @@ class QuizEngine:
                     given_answer=given_answer_text,
                     correct_answer=correct_answer_text,
                     error_type=verdict,
+                    **diag_kwargs,
                 )
             self._insert_answer(QuizAnswer(
                 question_id=qid, verdict=verdict,

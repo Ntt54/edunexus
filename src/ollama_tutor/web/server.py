@@ -51,7 +51,13 @@ from ..tutor.providers.gguf_embedding import (
 )
 from ..tutor.providers.hybrid_parser import HybridDocumentParser
 from ..tutor.conversations import ConversationService
-from ..tutor.service import TutorService
+from ..tutor.errors import AppError
+from ..tutor.service import (
+    MAX_UPLOAD_BYTES,
+    TutorService,
+    read_limited_upload,
+    validate_upload_length,
+)
 from ..tutor.store import LibraryStore
 from ..tutor.voice import VoiceError, WhisperTranscriber
 from ..utils.platform import get_config_dir  # re-exported for tests/monkeypatch
@@ -78,6 +84,16 @@ ALLOWED_HOSTS = LOCAL_HOST_NAMES | _EXTRA_ALLOWED | {"testserver"}
 
 #: Mutating HTTP methods guarded by the same-origin check (T024).
 _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _mask_api_key(key: str) -> str:
+    """Masque une clé API : "" si vide, sinon "****" + 4 derniers chars."""
+    if not key:
+        return ""
+    key = str(key)
+    if len(key) <= 4:
+        return "****"
+    return "****" + key[-4:]
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +516,17 @@ class SettingsUpdate(BaseModel):
     nightly_only_on_ac: bool | None = None
     nightly_max_runtime_minutes: int | None = None
     nightly_prepare_enabled: bool | None = None
+    pleias_model: str | None = None
+    pleias_enabled: bool | None = None
+    pleias_ctx: int | None = None
+
+
+class PleiasAskRequest(BaseModel):
+    """Requête Pleias RAG — thin transport (Oracle blueprint)."""
+
+    subject: str = ""
+    question: str = ""
+    k: int = 5
 
 
 def create_app(config_dir: Path | None = None) -> FastAPI:
@@ -641,6 +668,24 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         )
 
     # ------------------------------------------------------------------
+    # 010 P2-Robustesse (T040) : erreurs applicatives typées.
+    # Enregistré APRES le handler générique : FastAPI route vers le
+    # handler le plus spécifique, les AppError obtiennent leur statut
+    # (404/409/413/422/503…) au lieu du 500 masqué. 5xx loggées (VI),
+    # 4xx routinières tues. Middleware Origin/Host inchangé (principe IV).
+    # ------------------------------------------------------------------
+
+    @app.exception_handler(AppError)
+    async def _app_error_handler(request: Request, exc: AppError) -> JSONResponse:
+        if exc.status >= 500:
+            _log_error(
+                config,
+                "http-app-error",
+                f"{request.method} {request.url.path}: [{exc.code}] {exc.message}",
+            )
+        return JSONResponse(status_code=exc.status, content=exc.to_dict())
+
+    # ------------------------------------------------------------------
     # Hardening: same-origin guard for mutating HTTP requests and WS upgrades.
     # ------------------------------------------------------------------
 
@@ -702,6 +747,10 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         path: str | None = None
         queue_requested = False
         if "multipart/form-data" in ctype:
+            # 010 P2-Robustesse (T041) : 413 précoce via content-length AVANT
+            # toute lecture du corps (lève PayloadTooLargeError → 413 JSON
+            # via le handler AppError, jamais 500).
+            validate_upload_length(request.headers.get("content-length"))
             form = await request.form()
             subject = form.get("subject")
             fmt = form.get("fmt")
@@ -725,7 +774,7 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                 dest = uploads_dir / (
                     f"{dest.stem}-{uuid.uuid4().hex[:8]}{dest.suffix}"
                 )
-            dest.write_bytes(await upload.read())
+            dest.write_bytes(await read_limited_upload(upload.read))
             path = str(dest)
         else:
             data = await request.json()
@@ -733,15 +782,23 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             path = data.get("path")
             fmt = data.get("fmt")
             queue_requested = bool(data.get("queue", False))
-        if not subject or not path:
-            _log_error(config, "tutor-import", "subject and path required")
-            raise HTTPException(status_code=400, detail="subject and path required")
+        # Subject is optional — when empty/whitespace it is inferred from path
+        # inside register_import (auto-inference). Only path/file is required.
+        if not path:
+            _log_error(config, "tutor-import", "path required")
+            raise HTTPException(status_code=400, detail="path required")
+
+        # Normalise subject: None/"" stays None so service can infer; whitespace trimmed
+        if subject is not None:
+            subject = str(subject).strip()
+            if not subject:
+                subject = None
 
         # Pre-flight (Phase 6 UX): register the book row synchronously so
         # pre-flight failures (unreadable file, unsupported format) still
         # answer 4xx IMMEDIATELY.
         try:
-            subject_id, book = tutor_service.register_import(str(subject), path)
+            subject_id, book = tutor_service.register_import(subject, path)
         except FileNotFoundError as exc:
             _log_error(config, "tutor-import", f"Fichier introuvable: {exc}", traceback.format_exc())
             raise HTTPException(status_code=400, detail="Fichier introuvable") from exc
@@ -780,8 +837,10 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
 
                     existing_book = _Book.from_dict(dict(row))
                     # resolve subject again (register_import already created it)
+                    # subject may be None (auto-inferred) — infer again if needed
                     try:
-                        sid = tutor_service._resolve_subject(str(subject))
+                        _subj = str(subject).strip() if subject and str(subject).strip() else tutor_service._infer_subject_from_path(path)
+                        sid = tutor_service._resolve_subject(_subj)
                     except Exception:
                         sid = None
                     if sid is not None:
@@ -945,6 +1004,25 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
     @app.post("/api/tutor/index-queue/stop")
     async def tutor_index_queue_stop() -> dict[str, Any]:
         return await tutor_service.stop_index_queue()
+
+    # ------------------------------------------------------------------
+    # Feature 010 P1-A (US3) : polling des jobs d'ingestion (transport fin).
+    # La validation Origin/Host existante (middleware same-origin guard,
+    # principe IV) s'applique sans changement ; ces GET lecture seule
+    # délèguent à TutorService.
+    # ------------------------------------------------------------------
+
+    @app.get("/api/ingestion/jobs")
+    async def ingestion_jobs_list(limit: int = 50) -> dict[str, Any]:
+        jobs = tutor_service.list_ingestion_jobs(limit=max(1, min(200, limit)))
+        return {"jobs": jobs, "count": len(jobs)}
+
+    @app.get("/api/ingestion/jobs/{job_id}")
+    async def ingestion_job_detail(job_id: str) -> dict[str, Any]:
+        try:
+            return tutor_service.get_ingestion_job(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="job d'ingestion inconnu") from exc
 
     @app.get("/api/tutor/nightly")
     async def tutor_nightly_status() -> dict[str, Any]:
@@ -1163,10 +1241,27 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         return result
 
     @app.put("/api/tutor/subjects/{subject_id}/path")
-    async def tutor_reorder_path(subject_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """Reorder / exclude path steps (FR-014)."""
-        from ..tutor.path_builder import PathBuilder
-        return PathBuilder(tutor_store).reorder(subject_id, payload.get("steps", []))
+    @app.put("/api/tutor/path")
+    async def tutor_reorder_path(
+        subject_id: str = "", payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Reorder / exclude path steps (FR-014) — compat: steps vs order."""
+        _payload: dict[str, Any] = payload or {}
+        sid = _resolve_tutor_subject(subject_id)
+        if "steps" in _payload:
+            from ..tutor.path_builder import PathBuilder
+
+            return PathBuilder(tutor_store).reorder(sid, _payload.get("steps", []))
+        # legacy payload: {"order": [...]} via TutorPathRequest
+        order = _payload.get("order", [])
+        # also support TutorPathRequest-like object already parsed as dict — handled above
+        concepts = tutor_progress.reorder_path(sid, order if isinstance(order, list) else [])
+        return {
+            "concepts": [
+                {"id": c.id, "name": c.name, "path_rank": c.path_rank}
+                for c in concepts
+            ]
+        }
 
     # ------------------------------------------------------------------
     # Feature 008 — Adaptation locale (US4) — thin transport only
@@ -1395,18 +1490,6 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             sid, concept_name=concept_name or None, limit=limit
         )
         return {"errors": errors}
-
-    @app.put("/api/tutor/subjects/{subject_id}/path")
-    @app.put("/api/tutor/path")
-    async def tutor_path(subject_id: str = "", payload: TutorPathRequest = TutorPathRequest()) -> dict[str, Any]:
-        sid = _resolve_tutor_subject(subject_id)
-        concepts = tutor_progress.reorder_path(sid, payload.order)
-        return {
-            "concepts": [
-                {"id": c.id, "name": c.name, "path_rank": c.path_rank}
-                for c in concepts
-            ]
-        }
 
     @app.post("/api/tutor/subjects/{subject_id}/auto-path")
     async def tutor_auto_path(subject_id: str) -> dict[str, Any]:
@@ -2651,6 +2734,8 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
 
     @app.get("/api/tutor/settings")
     async def settings_get() -> dict[str, Any]:
+        _raw = config.llm_api_key or ""
+        _masked = _mask_api_key(_raw)
         return {
             "options": config.options.to_dict(),
             "tutor": {
@@ -2660,7 +2745,9 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                 "top_k": config.tutor_top_k,
                 "llm_provider": config.llm_provider,
                 "llm_base_url": config.llm_base_url,
-                "llm_api_key": config.llm_api_key,
+                "llm_api_key": _masked,
+                "llm_api_key_masked": _masked,
+                "has_llm_api_key": bool(_raw),
                 "embed_batch_size": config.tutor_embed_batch_size,
                 "max_parallel_embed": config.tutor_max_parallel_embed,
                 "nightly_enabled": config.tutor_nightly_enabled,
@@ -2670,6 +2757,93 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                 "nightly_max_runtime_minutes": config.tutor_nightly_max_runtime_minutes,
                 "nightly_prepare_enabled": config.tutor_nightly_prepare_enabled,
             },
+        }
+
+    @app.get("/api/tutor/config")
+    async def tutor_config_snapshot() -> dict[str, Any]:
+        """Snapshot complet de la config tutor (incl. Pleias) — thin transport."""
+        return config.get_tutor_config_snapshot()
+
+    # ------------------------------------------------------------------
+    # Pleias RAG — thin transport (Oracle blueprint)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/tutor/pleias/status")
+    async def pleias_status() -> dict[str, Any]:
+        """État Pleias: enabled/model/ctx + disponibilité Ollama (thin transport)."""
+        enabled = config.tutor_pleias_enabled
+        model = config.tutor_pleias_model
+        ctx = config.tutor_pleias_ctx
+        available = False
+        try:
+            models = await client.list_models()
+            names = {m.name for m in models}
+            if model in names:
+                available = True
+            else:
+                # hf.co/... variants may be listed with or without tag suffix
+                available = any(n == model or n.endswith(model) for n in names)
+        except Exception:
+            available = False
+        return {"enabled": enabled, "model": model, "ctx": ctx, "available": available}
+
+    @app.post("/api/tutor/pleias/ask")
+    async def pleias_ask(payload: PleiasAskRequest) -> dict[str, Any]:
+        """Endpoint REST Pleias — délègue à TutorService.ask_pleias et agrège les frames."""
+        subject = (payload.subject or "").strip()
+        question = (payload.question or "").strip()
+        k = payload.k if isinstance(payload.k, int) else 5
+        if not subject:
+            raise HTTPException(status_code=400, detail="subject requis")
+        if not question:
+            raise HTTPException(status_code=400, detail="question requise")
+        if k < 1 or k > 50:
+            raise HTTPException(status_code=400, detail="k doit être entre 1 et 50")
+        answer_parts: list[str] = []
+        sources: list[Any] = []
+        sections: dict[str, Any] = {}
+        citations: list[Any] = []
+        warnings: list[Any] = []
+        error_code: str | None = None
+        error_message: str | None = None
+        try:
+            async for frame in tutor_service.ask_pleias(subject, question, k):
+                ftype = frame.get("type")
+                if ftype == "sources":
+                    sources = frame.get("sources", [])
+                elif ftype == "pleias_sections":
+                    sections = frame.get("sections", {})
+                elif ftype == "delta":
+                    txt = frame.get("text") or ""
+                    if txt:
+                        answer_parts.append(str(txt))
+                elif ftype == "citation_warnings":
+                    warnings = frame.get("warnings", [])
+                    citations = frame.get("valid_citations", [])
+                elif ftype == "error":
+                    error_code = frame.get("code")
+                    error_message = frame.get("message", "")
+                    # pleias_unavailable → 503, subject_error → 404, sinon on conserve
+                    if error_code == "pleias_unavailable":
+                        raise HTTPException(status_code=503, detail=error_message or "Pleias non configuré")
+                    if error_code == "subject_error":
+                        raise HTTPException(status_code=404, detail=error_message or "sujet introuvable")
+                elif ftype == "end":
+                    break
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            _log_error(config, "pleias-ask", f"pleias ask error: {exc}", traceback.format_exc())
+            raise HTTPException(status_code=500, detail=f"Erreur Pleias : {exc}")
+        # Si aucune source et erreur no_passages, on retourne un payload cohérent (200)
+        # plutôt qu'une 404, pour rester compatible avec le streaming NDJSON/SSE.
+        answer = "".join(answer_parts)
+        return {
+            "answer": answer,
+            "citations": citations,
+            "sections": sections,
+            "sources": sources,
+            "warnings": warnings,
         }
 
     @app.put("/api/tutor/settings")
@@ -2697,7 +2871,13 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             if payload.llm_base_url is not None:
                 config.llm_base_url = payload.llm_base_url
             if payload.llm_api_key is not None:
-                config.llm_api_key = payload.llm_api_key
+                _incoming = payload.llm_api_key
+                _current_masked = _mask_api_key(config.llm_api_key or "")
+                # "" ou valeur masquée -> no-op (ne pas écraser)
+                if _incoming == "" or _incoming == _current_masked:
+                    pass
+                elif _incoming:
+                    config.llm_api_key = _incoming
             if payload.embed_batch_size is not None:
                 config.tutor_embed_batch_size = payload.embed_batch_size
             if payload.max_parallel_embed is not None:
@@ -2714,6 +2894,12 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                 config.tutor_nightly_max_runtime_minutes = payload.nightly_max_runtime_minutes
             if payload.nightly_prepare_enabled is not None:
                 config.tutor_nightly_prepare_enabled = payload.nightly_prepare_enabled
+            if payload.pleias_model is not None:
+                config.tutor_pleias_model = payload.pleias_model
+            if payload.pleias_enabled is not None:
+                config.tutor_pleias_enabled = payload.pleias_enabled
+            if payload.pleias_ctx is not None:
+                config.tutor_pleias_ctx = payload.pleias_ctx
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         config.save()  # persistance immédiate (préférence utilisateur)
@@ -2909,6 +3095,71 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                 })
                 await safe_send({"type": "end", "status": "error", "session_id": None})
 
+        async def _drive_pleias_ask(
+            subject_name: str,
+            data: dict[str, Any],
+            run_cancel: asyncio.Event,
+        ) -> None:
+            """Forward TutorService.ask_pleias frames to the socket (thin transport).
+
+            Maps pleias service frames (sources, pleias_sections, delta,
+            citation_warnings, error, end) onto wire frames. No prompt/parse
+            logic here — all delegated to the service.
+            """
+            try:
+                k_raw = data.get("k", data.get("top_k", 5))
+                try:
+                    k_val = int(k_raw)  # type: ignore[arg-type]
+                except Exception:
+                    k_val = 5
+                k_val = max(1, min(50, k_val))
+                await send({
+                    "type": "start",
+                    "run_id": uuid.uuid4().hex,
+                    "mode": "pleias_ask",
+                })
+                async for frame in tutor_service.ask_pleias(
+                    subject_name,
+                    data.get("question", ""),
+                    k=k_val,
+                    cancel=run_cancel,
+                ):
+                    ftype = frame.get("type")
+                    if ftype == "sources":
+                        await safe_send({"type": "sources", "sources": frame["sources"]})
+                    elif ftype == "pleias_sections":
+                        await safe_send({"type": "pleias_sections", "sections": frame.get("sections", {})})
+                    elif ftype == "delta":
+                        await safe_send({"type": "content_delta", "text": frame.get("text", "")})
+                    elif ftype == "citation_warnings":
+                        await safe_send({
+                            "type": "citation_warnings",
+                            "warnings": frame.get("warnings", []),
+                            "valid_citations": frame.get("valid_citations", []),
+                            "valid": frame.get("valid", False),
+                        })
+                    elif ftype == "error":
+                        await safe_send({
+                            "type": "error",
+                            "message": frame.get("message", ""),
+                            "code": frame.get("code"),
+                        })
+                    elif ftype == "end":
+                        await safe_send({"type": "end", "status": frame.get("status", "done")})
+                        return
+            except Exception as e:  # noqa: BLE001 — always close the run cleanly
+                _log_error(
+                    config,
+                    "ws-pleias",
+                    f"Pleias WS internal error: {e}",
+                    traceback.format_exc(),
+                )
+                await safe_send({
+                    "type": "error",
+                    "message": f"Erreur Pleias : {e}",
+                })
+                await safe_send({"type": "end", "status": "error"})
+
         try:
             while True:
                 data = await ws.receive_json()
@@ -2975,6 +3226,46 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                             os.remove(wav_path)
                         except OSError:
                             pass
+                    continue
+
+                if msg_type == "pleias_ask":
+                    if _run_active():
+                        await send({
+                            "type": "error",
+                            "code": "busy",
+                            "message": "Une opération est déjà en cours.",
+                        })
+                        continue
+                    subject = _resolve_subject(data)
+                    if subject is None:
+                        try:
+                            subjects = tutor_store.list_subjects()
+                            if subjects:
+                                subject = subjects[0]
+                            else:
+                                try:
+                                    subject = tutor_store.create_subject("Général")
+                                except ValueError:
+                                    subjects = tutor_store.list_subjects()
+                                    subject = subjects[0] if subjects else None
+                                if subject is not None:
+                                    try:
+                                        tutor_store.select_subject(subject.id)
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            subject = None
+                        if subject is None:
+                            await send({
+                                "type": "error",
+                                "code": "no_subject",
+                                "message": "Aucun sujet actif pour le tuteur.",
+                            })
+                            continue
+                    cancel_event.clear()
+                    run_task = asyncio.ensure_future(
+                        _drive_pleias_ask(subject.name, data, cancel_event)
+                    )
                     continue
 
                 if msg_type != "ask":

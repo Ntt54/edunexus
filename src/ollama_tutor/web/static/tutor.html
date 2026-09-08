@@ -380,6 +380,17 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent);outline:none;
 .msg-kind.k-hint{color:var(--gold)}
 .tutor-body{white-space:pre-wrap;overflow-wrap:anywhere}
 .tutor-think{color:var(--ink-dim);font-style:italic}
+/* ThinkBox (010 P2) : pensée du modèle pliable — <details> rempli au fil
+   du stream via ensureThinkBox, refermé à la fin. */
+.thinkbox{border:1px dashed var(--line-strong);border-radius:10px;padding:6px 10px;margin:6px 0;background:var(--surface2)}
+.thinkbox>summary{cursor:pointer;font-size:11.5px;font-weight:700;color:var(--ink-dim);list-style:none}
+.thinkbox>summary::-webkit-details-marker{display:none}
+.thinkbox>summary::before{content:"▸ ";color:var(--accent)}
+.thinkbox[open]>summary::before{content:"▾ "}
+/* KaTeX-lite offline (010 P2) : SANS CDN — pas de parse TeX complet, rendu
+   typographique (chasse + italique) ; dégrade proprement en texte brut. */
+.math-inline{font-family:Georgia,"Times New Roman",serif;font-style:italic;background:var(--surface2);border-radius:6px;padding:0 5px;overflow-wrap:anywhere}
+.math-block{font-family:Georgia,"Times New Roman",serif;font-size:15px;text-align:center;background:var(--surface2);border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin:10px 0;overflow-x:auto;white-space:pre-wrap}
 .tutor-text{display:block}
 .tutor-para{white-space:pre-wrap;overflow-wrap:anywhere}
 .md-h{font-weight:750;line-height:1.3;margin:12px 0 6px;letter-spacing:-.02em}
@@ -429,7 +440,81 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent);outline:none;
 .queue-row{display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap;background:var(--surface2);border:1px solid var(--line);border-radius:11px;padding:8px 10px}
 .queue-row .grow{flex:1;min-width:180px}
 .count-chip{font-family:var(--mono);font-size:11.5px;color:var(--ink-dim);border:1px solid var(--line);border-radius:999px;padding:4px 11px;background:var(--surface2);font-weight:700}
-.import-panel{border:1px dashed var(--line-strong);border-radius:14px;background:var(--surface2);padding:12px 14px;margin-top:10px;display:flex;flex-direction:column;gap:8px}
+.import-panel{border:1px solid var(--line);border-radius:16px;background:var(--surface);padding:16px 16px 14px;margin-top:12px;display:flex;flex-direction:column;gap:14px;box-shadow:var(--shadow-sm)}
+.import-panel.import-card{border-color:var(--line-strong);box-shadow:var(--shadow-md)}
+.import-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding-bottom:2px;border-bottom:1px solid var(--line);margin:-2px 0 2px;padding-bottom:10px}
+.import-title{margin:0;font-size:16px;font-weight:800;letter-spacing:-.02em;color:var(--ink);line-height:1.2}
+.import-subtitle{margin:4px 0 0;color:var(--ink-dim);font-size:12.5px;line-height:1.5;max-width:520px}
+.import-close{width:32px;height:32px;border-radius:10px}
+.field-group{display:flex;flex-direction:column;gap:6px}
+.field-hint{font-size:11.5px;color:var(--ink-dim);margin:2px 0 0;line-height:1.5}
+.field-req{color:var(--err);font-weight:800;margin-left:2px}
+.input-with-icon{position:relative;display:flex;align-items:center}
+.input-with-icon svg{position:absolute;left:11px;width:15px;height:15px;color:var(--ink-faint);pointer-events:none;opacity:.9}
+.input-with-icon input{padding-left:34px}
+.domain-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:4px;min-height:28px}
+.domain-badge{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;font-size:12px;font-weight:800;letter-spacing:.01em;border:1px solid;line-height:1}
+.domain-badge .db-dot{width:8px;height:8px;border-radius:50%;flex:none}
+.domain-badge .db-icon{width:12px;height:12px;flex:none;opacity:.9}
+.domain-badge.programmation{background:#eef2ff;color:#4338ca;border-color:#c7d2fe}
+.domain-badge.programmation .db-dot{background:#6366f1}
+.domain-badge.mathematiques{background:#fef3c7;color:#92400e;border-color:#fde68a}
+.domain-badge.mathematiques .db-dot{background:#d97706}
+.domain-badge.sciences{background:#ecfdf5;color:#065f46;border-color:#a7f3d0}
+.domain-badge.sciences .db-dot{background:#059669}
+.domain-badge.langues{background:#fdf2f8;color:#9d174d;border-color:#fbcfe8}
+.domain-badge.langues .db-dot{background:#ec4899}
+.domain-badge.generique{background:var(--surface2);color:var(--ink-dim);border-color:var(--line-strong)}
+.domain-badge.generique .db-dot{background:var(--ink-faint)}
+.domain-badge.detecting{background:var(--surface2);color:var(--ink-dim);border-color:var(--line-strong);font-weight:700}
+.link-btn{background:none;border:none;color:var(--accent);font-size:12px;font-weight:700;text-decoration:underline;text-underline-offset:2px;cursor:pointer;padding:2px 0}
+.link-btn:hover{color:var(--accent-deep)}
+.domain-correct{display:inline-flex;align-items:center}
+.domain-correct select{padding:5px 8px;font-size:12.5px;border-radius:8px;min-width:160px;width:auto}
+.drop-zone{border:1.9px dashed var(--line-strong);border-radius:14px;background:var(--surface2);padding:18px 14px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:7px;transition:border-color .18s, background .18s, transform .18s, box-shadow .18s;cursor:pointer;position:relative}
+.drop-zone:hover{border-color:var(--accent-line);background:var(--accent-soft)}
+.drop-zone.drag-over{border-color:var(--accent);background:var(--accent-soft);transform:scale(1.01);box-shadow:var(--shadow-sm)}
+.drop-zone:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.dz-icon{width:36px;height:36px;border-radius:10px;background:var(--surface);border:1px solid var(--line);display:inline-flex;align-items:center;justify-content:center;color:var(--accent)}
+.dz-icon svg{width:18px;height:18px}
+.dz-text{font-size:13px;color:var(--ink-soft);font-weight:600}
+.dz-text strong{color:var(--ink)}
+.dz-link{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
+.dz-hint{font-size:11.5px;color:var(--ink-dim)}
+.dz-preview{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:5px 8px 5px 10px;box-shadow:var(--shadow-sm);max-width:100%}
+.dz-fileicon{font-size:13px}
+.dz-filename{font-size:12.5px;font-weight:700;color:var(--ink);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dz-filesize{font-family:var(--mono);font-size:11px;color:var(--ink-dim);background:var(--surface2);border:1px solid var(--line);border-radius:999px;padding:1px 7px}
+.dz-remove{width:26px;height:26px;border-radius:999px;font-size:12px;line-height:1}
+.dz-browse{margin-top:2px}
+.import-sugg{border:1px solid var(--gold-line);background:var(--gold-soft);border-radius:12px;padding:10px 12px;font-size:12.5px;color:#92400e;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.import-sugg select{width:auto;max-width:220px;padding:4px 8px;font-size:12px}
+.import-sugg .sugg-chip{border:1px solid var(--gold-line);background:var(--surface);color:#92400e;border-radius:999px;padding:3px 10px;font-size:11.5px;font-weight:700}
+.import-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.import-actions .btn-primary{flex:1;min-width:200px;justify-content:center;padding:10px 16px;font-size:14px}
+.import-help{margin:0;font-size:11.5px;line-height:1.5;color:var(--ink-dim);border-top:1px dashed var(--line);padding-top:8px}
+/* ---- Import redesign: large drop-zone + auto-detect preview ---- */
+.drop-zone.large{padding:28px 18px;min-height:132px;gap:10px;border-width:2px;background:linear-gradient(180deg, var(--surface2), var(--surface))}
+.drop-zone.large .dz-icon{width:44px;height:44px;border-radius:12px}
+.drop-zone.large .dz-text{font-size:15px}
+.drop-zone.large .dz-hint{font-size:12.5px}
+.auto-detect-card{border:1px solid var(--accent-line);background:linear-gradient(135deg, var(--accent-soft), #fff);border-radius:14px;padding:14px;display:flex;flex-direction:column;gap:10px;box-shadow:var(--shadow-sm)}
+.auto-detect-card .ad-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.auto-detect-card .ad-preview{display:flex;flex-direction:column;gap:6px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.auto-detect-card .ad-label{font-size:10.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-faint)}
+.auto-detect-card .ad-title{font-weight:750;font-size:14px;color:var(--ink);line-height:1.35;overflow-wrap:anywhere}
+.auto-detect-card .ad-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.field-group.collapsible{transition:max-height .22s ease, opacity .22s ease;overflow:hidden}
+.field-group.collapsed{max-height:0;opacity:0;pointer-events:none;margin:0}
+.field-group.expanded{max-height:520px;opacity:1}
+/* ---- Library flat: category cards ---- */
+.cat-card{border:1px solid var(--line);border-radius:14px;background:var(--surface);margin-bottom:12px;overflow:hidden;box-shadow:var(--shadow-sm);transition:border-color .16s, box-shadow .16s}
+.cat-card:hover{border-color:var(--line-strong);box-shadow:var(--shadow-md)}
+.cat-head{display:flex;align-items:center;gap:8px;padding:11px 14px;background:linear-gradient(180deg, var(--surface), var(--surface2));border-bottom:1px solid var(--line);cursor:pointer;user-select:none}
+.cat-head:hover{background:var(--surface2)}
+.cat-title{font-weight:760;font-size:13.5px;letter-spacing:-.01em;color:var(--ink);flex:1;min-width:0;overflow-wrap:anywhere}
+.cat-body{padding:6px 6px 8px}
+.cat-empty{padding:14px;color:var(--ink-dim);font-size:13px;text-align:center}
 .sugg{border:1px dashed var(--gold-line);background:var(--gold-soft);border-radius:10px;padding:8px 11px;font-size:12.5px;color:#92400e;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .sugg select{width:auto;max-width:220px;padding:4px 8px;font-size:12px}
 .tree{font-size:13.5px;padding:4px 2px}
@@ -959,27 +1044,99 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent);outline:none;
           <button id="autoClassifyBtn" class="btn btn-ghost btn-sm" title="Classe les livres par catégorie (LLM local)">
             <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" style="vertical-align:-2px;margin-right:5px;"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z" fill="currentColor"/><circle cx="18.6" cy="17.6" r="1.7" fill="currentColor"/></svg>Classer automatiquement
           </button>
-          <span class="hint grow" style="margin:0;">Arborescence Domaine ▸ Catégorie ▸ Documents — cochez pour définir les documents actifs. Renommer / déplacer : survolez une ligne.</span>
+          <span class="hint grow" style="margin:0;">Classement par catégorie — cochez pour définir les documents actifs. Renommer / déplacer : survolez une catégorie ou un livre.</span>
         </div>
         <div class="queue-row" id="indexQueuePanel">
           <span class="hint grow" id="indexQueueText">File nocturne : chargement…</span>
           <button id="indexQueueStartBtn" class="btn btn-ghost btn-sm">Démarrer</button>
           <button id="indexQueueStopBtn" class="btn btn-ghost btn-sm" hidden>Pause</button>
         </div>
+        <div class="queue-row" id="ingestionJobsPanel" hidden>
+          <span class="hint grow" id="ingestionJobsText">Imports : chargement…</span>
+        </div>
 
-        <div class="import-panel" id="importPanel" hidden>
-          <label class="field-label" for="impSubject" style="margin-top:0;">Domaine (existant ou nouveau)</label>
-          <input type="text" id="impSubject" placeholder="ex. Programmation" required maxlength="80" pattern="[^<>]{2,80}" title="2-80 sans <>" aria-describedby="impSubjectErr subjectErr">
-          <span id="impSubjectErr" class="err" role="alert" style="color:var(--err)"></span><span id="subjectErr" class="err" role="alert" style="color:var(--err)"></span>
-          <label class="field-label" for="impFile" style="margin-top:0;">Fichier — TXT, MD, PDF, EPUB</label>
-          <input type="file" id="impFile" accept=".txt,.md,.pdf,.epub">
-          <div class="sugg" id="importSugg" hidden></div>
-          <button id="impBtn" class="btn btn-primary">Importer et indexer</button>
+        <div class="import-panel import-card" id="importPanel" hidden>
+          <div class="import-card-head">
+            <div>
+              <h3 class="import-title">Importer un document</h3>
+              <p class="import-subtitle">Glissez un fichier — titre et catégorie détectés automatiquement.</p>
+            </div>
+            <button type="button" class="icon-btn import-close" id="importCloseBtn" aria-label="Fermer le panneau d'import" title="Fermer"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>
+          </div>
+
+          <!-- Primary CTA: large drop-zone, no form friction -->
+          <div class="field-group">
+            <label class="field-label" for="impFile" style="margin-top:0;">Fichier <span style="color:var(--ink-faint);font-weight:600;text-transform:none;letter-spacing:0">· TXT, MD, PDF, EPUB</span></label>
+            <div class="drop-zone large" id="dropZone" tabindex="0" role="button" aria-label="Zone de dépôt — glisser-déposer ou cliquer pour parcourir">
+              <input type="file" id="impFile" accept=".txt,.md,.pdf,.epub" hidden>
+              <div class="dz-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/><path d="M12 11v7"/><path d="M9 14l3 3 3-3"/></svg></div>
+              <div class="dz-text"><strong>Glisser-déposer</strong> votre fichier ici ou <span class="dz-link">cliquer pour parcourir</span></div>
+              <div class="dz-hint">Aucun autre champ requis — le titre et la catégorie sont détectés depuis le nom du fichier.</div>
+              <div class="dz-preview" id="dzPreview" hidden>
+                <span class="dz-fileicon" aria-hidden="true">📄</span>
+                <span class="dz-filename" id="dzFileName"></span>
+                <span class="dz-filesize" id="dzFileSize"></span>
+                <button type="button" class="icon-btn dz-remove" id="dzRemove" aria-label="Retirer le fichier" title="Retirer">✕</button>
+              </div>
+              <button type="button" class="btn btn-ghost btn-sm dz-browse" id="dzBrowse">Parcourir…</button>
+            </div>
+          </div>
+
+          <!-- Auto-detection preview: appears AFTER file selected -->
+          <div id="autoDetectPreview" class="auto-detect-card" hidden>
+            <div class="ad-head">
+              <span class="badge indexing" id="autoDetectBadge"><span class="spin"></span> Détection automatique en cours…</span>
+              <span class="hint" style="margin:0;">Titre et catégorie pré-remplis depuis le nom du fichier</span>
+            </div>
+            <div class="ad-preview" id="adPreviewBox">
+              <div class="ad-label">Aperçu détecté</div>
+              <div class="ad-title" id="adPreviewTitle">—</div>
+              <div class="ad-meta">
+                <span class="fmt-chip" id="adPreviewFormat">?</span>
+                <span class="badge pending" id="adPreviewCat">Catégorie : détection…</span>
+                <span class="hint" id="adPreviewSubject" style="margin:0;font-size:11.5px;"></span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Optional suggestion field: appears AFTER file selected, not before -->
+          <div class="field-group collapsible collapsed" id="subjectSuggestWrap">
+            <label class="field-label" for="impSubject">Nom de la matière <span style="color:var(--ink-faint);font-weight:600;text-transform:none;letter-spacing:0">· optionnel — suggestion</span></label>
+            <div class="input-with-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5a2 2 0 0 1 2-2h9l3 3v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5z"/><path d="M8 9h8"/><path d="M8 13h5"/></svg>
+              <input type="text" id="impSubject" list="subjectList" placeholder="Laisser vide pour détection automatique" maxlength="80" pattern="[^<>]{0,80}" title="0-80 sans <>" autocomplete="off" aria-describedby="impSubjectErr subjectErr impHelpMatiere">
+              <datalist id="subjectList"></datalist>
+            </div>
+            <span id="impSubjectErr" class="err" role="alert" style="color:var(--err)"></span><span id="subjectErr" class="err" role="alert" style="color:var(--err)"></span>
+            <p id="impHelpMatiere" class="field-hint">Suggestions basées sur vos matières existantes — modifiez uniquement si la détection se trompe.</p>
+            <div class="domain-row" id="domainRow" hidden>
+              <span class="domain-badge detecting" id="domainDetecting" hidden><span class="spin spin-dark" style="width:11px;height:11px;border-width:2px"></span> Détection auto…</span>
+              <span class="domain-badge generique" id="domainBadge" hidden><span class="db-dot"></span><span class="db-label">Classement automatique</span></span>
+              <button type="button" class="link-btn" id="domainCorrectToggle" aria-expanded="false" aria-controls="domainCorrectWrap">Corriger le domaine</button>
+              <span id="domainCorrectWrap" hidden class="domain-correct">
+                <select id="domainOverride" aria-label="Corriger le domaine">
+                  <option value="">— automatique —</option>
+                  <option value="programmation">Programmation</option>
+                  <option value="mathematiques">Mathématiques</option>
+                  <option value="sciences">Sciences</option>
+                  <option value="langues">Langues</option>
+                  <option value="generique">Générique</option>
+                </select>
+              </span>
+            </div>
+          </div>
+
+          <div class="import-sugg sugg" id="importSugg" hidden></div>
+
+          <div class="import-actions">
+            <button id="impBtn" class="btn btn-primary"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v11"/><path d="M8 9l4-4 4 4"/><path d="M3 17v2a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-2"/></svg> Importer et indexer</button>
+            <span class="hint" id="impBtnHint" style="margin:0;">Sélectionnez un fichier pour activer l'import</span>
+          </div>
           <div id="importProgress" hidden>
             <div class="idx-track"><div class="idx-fill"></div></div>
             <p class="hint" style="margin:4px 0 0;">Envoi du fichier… l'indexation démarre dès la réponse du serveur.</p>
           </div>
-          <p class="hint" style="margin:0;">L'indexation tourne en arrière-plan ; le statut passe à « Prêt » automatiquement.</p>
+          <p class="hint import-help">Classement automatique par catégorie (détection depuis le titre). Aucun champ obligatoire — vous pourrez déplacer le livre après import.</p>
         </div>
       </div>
       <div class="pane-scroll"><div class="tree" id="treeBox" role="tree" aria-label="Arborescence de la bibliothèque"></div></div>
@@ -1952,6 +2109,7 @@ async function loadSubjects() {
     return;
   }
   S.subjects = data.subjects || [];
+  populateSubjectDatalist();
   const sel = $("spaceSelect");
   sel.innerHTML = "";
   for (const s of S.subjects) {
@@ -2296,6 +2454,7 @@ function applyTriToInput(input, state) {
 /* --- Rendu de l'arbre (partagé Bibliothèque / popover Sources) ----------- */
 function renderLibrary() { renderTree($("treeBox"), "lib"); }
 
+/* Flat hierarchy: Catégorie → Livre ONLY (no Domaine grouping) */
 function renderTree(box, mode) {
   if (!box) return;
   const isLib = mode === "lib";
@@ -2304,100 +2463,185 @@ function renderTree(box, mode) {
   const sel = isLib ? S.selection : S.popoverSel;
   box.innerHTML = "";
 
-  if (!S.subjects.length) {
-    box.innerHTML = '<div class="empty-note">Aucun domaine.<br>Importez un premier document depuis « <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg> Ajouter un document ».</div>';
+  // Empty library placeholder (flat, no domain grouping)
+  if (!S.books || !S.books.length) {
+    box.innerHTML = '<div class="empty-note"><div class="illus" aria-hidden="true" style="font-size:28px">📚</div>Aucun document dans cet espace.<br>Glissez un fichier dans « Ajouter un document » — le titre et la catégorie sont détectés automatiquement.<br><span style="font-size:12px;color:var(--ink-faint)">Aucun champ obligatoire</span></div>';
+    if (isLib) updateLibCount();
     return;
   }
 
-  for (const subj of S.subjects) {
-    const dnode = document.createElement("div");
-    dnode.className = "tnode" + (S.domainOpen[subj.id] ? " open" : "");
-    const books = S.domainBooks[subj.id];
-    const loaded = !!books;
+  // Background hydrate if some memberships missing (flat DB already, but ensure)
+  let needsHydrate = false;
+  for (const b of S.books) if (!(b.id in S.catByBook)) { needsHydrate = true; break; }
+  if (needsHydrate) {
+    hydrateMemberships(S.books).then(()=> { if (S.route==="bibliotheque" || mode==="pop") renderTree(box, mode); });
+  }
 
-    const drow = document.createElement("div");
-    drow.className = "trow";
+  // Build flat groups: Category → [books]
+  const groups = new Map();
+  const uncategorized = [];
+  for (const b of S.books) {
+    const cs = catsOf(b.id);
+    if (!cs.length) uncategorized.push(b);
+    else {
+      for (const cn of cs) {
+        if (!groups.has(cn)) groups.set(cn, []);
+        groups.get(cn).push(b);
+      }
+    }
+  }
+  // Ordered categories: respect S.categories order, then leftover groups
+  const ordered = [];
+  const seen = new Set();
+  for (const c of S.categories) {
+    if (groups.has(c.name) && !seen.has(c.name)) { ordered.push(c.name); seen.add(c.name); }
+  }
+  for (const k of groups.keys()) if (!seen.has(k)) { ordered.push(k); seen.add(k); }
+
+  let rendered = 0;
+
+  // Render each category as a card/section
+  for (const cname of ordered) {
+    const items = groups.get(cname) || [];
+    const filtered = q ? items.filter(b => norm(b.title).includes(q) || norm(cname).includes(q)) : items;
+    if (!filtered.length) continue;
+    const card = document.createElement("div");
+    card.className = "cat-card";
+    card.setAttribute("role","group");
+    card.setAttribute("aria-label","Catégorie "+cname);
+
+    const head = document.createElement("div");
+    head.className = "cat-head";
+    head.setAttribute("role","button");
+    head.setAttribute("tabindex","0");
+    head.setAttribute("aria-expanded","true");
+    head.setAttribute("aria-label","Catégorie "+cname+" — "+filtered.length+" documents — cliquer pour replier");
+
     const caret = document.createElement("span");
-    caret.className = "tcaret"; caret.textContent = "▸"; caret.setAttribute("aria-hidden", "true");
+    caret.className = "tcaret"; caret.textContent = "▸"; caret.setAttribute("aria-hidden","true");
+    caret.style.transform = "rotate(90deg)";
 
-    const dcheck = document.createElement("input");
-    dcheck.type = "checkbox"; dcheck.className = "tcheck";
-    dcheck.setAttribute("aria-label", "Sélectionner tout le domaine " + subj.name);
+    const check = document.createElement("input");
+    check.type = "checkbox"; check.className = "tcheck";
+    check.setAttribute("aria-label", "Sélectionner la catégorie " + cname);
 
-    const dlabel = document.createElement("span");
-    dlabel.className = "tlabel serif"; dlabel.textContent = subj.name;
-    const dcount = document.createElement("span");
-    dcount.className = "tcount";
-    dcount.textContent = loaded ? books.length + " doc" : "déplier…";
+    const title = document.createElement("span");
+    title.className = "cat-title"; title.textContent = cname;
 
-    drow.append(caret, dcheck, dlabel, dcount);
+    const count = document.createElement("span");
+    count.className = "tcount"; count.textContent = filtered.length + " doc";
 
-    const dkids = document.createElement("div");
-    dkids.className = "tkids";
+    const acts = document.createElement("span");
+    acts.className = "tacts";
+    if (isLib) {
+      const ren = document.createElement("button");
+      ren.className = "tact"; ren.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.1 2.1 0 0 1 3 3L11 16l-4 1 1-4z"/></svg>'; ren.title = "Renommer la catégorie";
+      ren.setAttribute("aria-label","Renommer la catégorie "+cname);
+      ren.addEventListener("click", (e)=>{ e.stopPropagation(); renameCategory(cname); });
+      const del = document.createElement("button");
+      del.className = "tact del"; del.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>'; del.title = "Supprimer la catégorie";
+      del.setAttribute("aria-label","Supprimer la catégorie "+cname);
+      del.addEventListener("click", (e)=>{ e.stopPropagation(); deleteCategoryByName(cname); });
+      acts.append(ren, del);
+    }
 
-    const toggleDomain = async () => {
-      S.domainOpen[subj.id] = !S.domainOpen[subj.id];
-      if (S.domainOpen[subj.id] && !loaded) {
-        dcount.textContent = "chargement…";
-        await loadDomainBooks(subj.id);
-      }
-      renderTree(box, mode);
-    };
-    caret.addEventListener("click", toggleDomain);
-    dlabel.addEventListener("click", toggleDomain);
+    head.append(caret, check, title, count, acts);
 
-    // Coche domaine : tout / rien parmi les documents chargés (dédupliqués).
-    // partiel -> coche-tout ; tout coché -> décoche-tout ; vide -> coche-tout.
-    dcheck.addEventListener("change", async () => {
-      if (!loaded) await loadDomainBooks(subj.id);
-      const ids = visibleBookIds(subj.id);
-      const wantChecked = dcheck.checked || triState(ids, sel) === "some";
-      for (const id of ids) {
-        if (wantChecked) sel.add(id); else sel.delete(id);
-      }
+    const body = document.createElement("div");
+    body.className = "cat-body";
+    for (const b of filtered) body.appendChild(docRow(b, box, mode, null, [cname]));
+
+    // triState at Category → Book level only
+    const ids = filtered.map(b=>b.id);
+    applyTriToInput(check, triState(ids, sel));
+    check.addEventListener("change", () => {
+      for (const id of ids) { if (check.checked) sel.add(id); else sel.delete(id); }
       afterSelectionChange(mode);
       renderTree(box, mode);
     });
+    const toggleBody = ()=>{
+      const hidden = body.hidden;
+      body.hidden = !hidden;
+      caret.style.transform = hidden ? "rotate(90deg)" : "";
+      head.setAttribute("aria-expanded", hidden ? "true":"false");
+    };
+    head.addEventListener("click", (e)=>{
+      if (e.target.closest("input") || e.target.closest("button")) return;
+      toggleBody();
+    });
+    head.addEventListener("keydown", (e)=>{
+      if (e.key==="Enter" || e.key===" ") { e.preventDefault(); toggleBody(); }
+    });
 
-    if (loaded) {
-      // Groupes : catégories présentes dans ce domaine + « Non classé ».
-      const groups = {};
-      const order = [];
-      for (const b of books) {
-        const cs = catsOf(b.id);
-        if (!cs.length) continue;
-        for (const cn of cs) {
-          if (!groups[cn]) { groups[cn] = []; order.push(cn); }
-          groups[cn].push(b);
-        }
-      }
-      const uncategorized = books.filter(b => !catsOf(b.id).length);
+    card.append(head, body);
+    box.appendChild(card);
+    rendered++;
+  }
 
-      for (const cname of order) {
-        const items = groups[cname];
-        if (q && !items.some(b => norm(b.title).includes(q))) continue;
-        dkids.appendChild(categoryNode(cname, items, box, mode, subj.name));
-      }
-      if (uncategorized.length && (!q || uncategorized.some(b => norm(b.title).includes(q)))) {
-        dkids.appendChild(categoryNode("Non classé", uncategorized, box, mode, subj.name, true));
-      }
-      if (q) {
-        // Résultats plats avec chemin hiérarchique (recherche FR-013).
-        const hits = books.filter(b => norm(b.title).includes(q));
-        if (hits.length) {
-          const flat = document.createElement("div");
-          flat.style.marginTop = "6px";
-          for (const b of hits) flat.appendChild(docRow(b, box, mode, subj.name, catsOf(b.id)));
-          dkids.appendChild(flat);
-        }
-      }
-      applyTriToInput(dcheck, triState(visibleBookIds(subj.id), sel));
-    } else {
-      applyTriToInput(dcheck, "none");
+  // Non classés section
+  if (uncategorized.length) {
+    const filteredUncat = q ? uncategorized.filter(b=> norm(b.title).includes(q) || norm("Non classés").includes(q) || norm("Non classes").includes(q)) : uncategorized;
+    if (filteredUncat.length) {
+      const cardU = document.createElement("div");
+      cardU.className = "cat-card";
+      cardU.setAttribute("role","group");
+      cardU.setAttribute("aria-label","Non classés");
+      const headU = document.createElement("div");
+      headU.className = "cat-head";
+      headU.setAttribute("role","button");
+      headU.setAttribute("tabindex","0");
+      headU.setAttribute("aria-expanded","true");
+      const caretU = document.createElement("span");
+      caretU.className = "tcaret"; caretU.textContent="▸"; caretU.style.transform="rotate(90deg)";
+      const checkU = document.createElement("input");
+      checkU.type="checkbox"; checkU.className="tcheck";
+      checkU.setAttribute("aria-label","Sélectionner Non classés");
+      const titleU = document.createElement("span");
+      titleU.className="cat-title"; titleU.textContent="Non classés";
+      const countU = document.createElement("span");
+      countU.className="tcount"; countU.textContent=filteredUncat.length + " doc";
+      headU.append(caretU, checkU, titleU, countU);
+      const bodyU = document.createElement("div");
+      bodyU.className="cat-body";
+      for (const b of filteredUncat) bodyU.appendChild(docRow(b, box, mode, null, ["Non classé"]));
+      const idsU = filteredUncat.map(b=>b.id);
+      applyTriToInput(checkU, triState(idsU, sel));
+      checkU.addEventListener("change", ()=>{
+        for (const id of idsU) if(checkU.checked) sel.add(id); else sel.delete(id);
+        afterSelectionChange(mode);
+        renderTree(box, mode);
+      });
+      const toggleU = ()=>{
+        const h = bodyU.hidden; bodyU.hidden=!h; caretU.style.transform=h?"rotate(90deg)":""; headU.setAttribute("aria-expanded", h?"true":"false");
+      };
+      headU.addEventListener("click",(e)=>{ if(e.target.closest("input")) return; toggleU(); });
+      headU.addEventListener("keydown",(e)=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); toggleU(); }});
+      cardU.append(headU, bodyU);
+      box.appendChild(cardU);
+      rendered++;
     }
+  }
 
-    dnode.append(drow, dkids);
-    box.appendChild(dnode);
+  if (rendered===0) {
+    if (q) {
+      const hits = S.books.filter(b=> norm(b.title).includes(q));
+      if (hits.length) {
+        const cardF = document.createElement("div");
+        cardF.className="cat-card";
+        const headF = document.createElement("div");
+        headF.className="cat-head";
+        headF.innerHTML='<span class="cat-title">Résultats</span><span class="tcount">'+hits.length+' doc</span>';
+        const bodyF = document.createElement("div");
+        bodyF.className="cat-body";
+        for (const b of hits) bodyF.appendChild(docRow(b, box, mode, null, []));
+        cardF.append(headF, bodyF);
+        box.appendChild(cardF);
+      } else {
+        box.innerHTML = '<div class="empty-note">Aucun résultat pour « '+esc(q)+' ».<br><span class="hint">Essayez un autre mot-clé ou videz la recherche pour voir toutes les catégories.</span></div>';
+      }
+    } else {
+      box.innerHTML = '<div class="empty-note">Aucun document classé.<br>Tous les livres apparaîtront ici par catégorie.</div>';
+    }
   }
 
   if (isLib) updateLibCount();
@@ -2407,62 +2651,12 @@ function visibleBookIds(sid) {
   return (S.domainBooks[sid] || []).map(b => b.id);
 }
 
-function categoryNode(cname, items, box, mode, domainName, isUncat) {
-  const node = document.createElement("div");
-  node.className = "tnode open";
-  const row = document.createElement("div");
-  row.className = "trow";
-  const caret = document.createElement("span");
-  caret.className = "tcaret"; caret.textContent = "▸"; caret.setAttribute("aria-hidden", "true");
-  const check = document.createElement("input");
-  check.type = "checkbox"; check.className = "tcheck";
-  check.setAttribute("aria-label", "Sélectionner la catégorie " + cname);
-  const label = document.createElement("span");
-  label.className = "tlabel" + (isUncat ? "" : "");
-  label.textContent = cname;
-  const count = document.createElement("span");
-  count.className = "tcount"; count.textContent = items.length + " doc";
-
-  row.append(caret, check, label, count);
-
-  if (mode === "lib" && !isUncat) {
-    const acts = document.createElement("span");
-    acts.className = "tacts";
-    const ren = document.createElement("button");
-    ren.className = "tact"; ren.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.1 2.1 0 0 1 3 3L11 16l-4 1 1-4z"/></svg>'; ren.title = "Renommer la catégorie";
-    ren.addEventListener("click", () => renameCategory(cname));
-    const del = document.createElement("button");
-    del.className = "tact del"; del.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>'; del.title = "Supprimer la catégorie";
-    del.addEventListener("click", () => deleteCategoryByName(cname));
-    acts.append(ren, del);
-    row.appendChild(acts);
-  }
-
-  const kids = document.createElement("div");
-  kids.className = "tkids";
-  for (const b of items) kids.appendChild(docRow(b, box, mode, domainName, [cname]));
-
-  const toggle = () => { node.classList.toggle("open"); };
-  caret.addEventListener("click", toggle);
-  label.addEventListener("click", toggle);
-
-  const ids = items.map(b => b.id);
-  const sel = mode === "lib" ? S.selection : S.popoverSel;
-  applyTriToInput(check, triState(ids, sel));
-  check.addEventListener("change", () => {
-    for (const id of ids) { if (check.checked) sel.add(id); else sel.delete(id); }
-    afterSelectionChange(mode);
-    renderTree(box, mode);
-  });
-
-  node.append(row, kids);
-  return node;
-}
-
 function docRow(b, box, mode, domainName, pathCats) {
   const sel = mode === "lib" ? S.selection : S.popoverSel;
   const el = document.createElement("div");
   el.className = "trow tdoc";
+  el.setAttribute("role","treeitem");
+  el.setAttribute("aria-selected", sel.has(b.id) ? "true":"false");
   const check = document.createElement("input");
   check.type = "checkbox"; check.className = "tcheck";
   check.checked = sel.has(b.id);
@@ -2470,22 +2664,27 @@ function docRow(b, box, mode, domainName, pathCats) {
   const main = document.createElement("div");
   main.style.cssText = "flex:1;min-width:0;";
   const title = document.createElement("div");
-  title.className = "src-title"; title.textContent = b.title;
+  title.className = "src-title"; title.textContent = cleanTitleFromFilename(b.title);
+  title.title = b.title;
   const meta = document.createElement("div");
   meta.className = "src-meta";
+  meta.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:4px;font-size:11.5px;";
   const [stLabel, stCls] = STATUS_LABELS[docStatus(b)] || [docStatus(b), "pending"];
-  const pages = (b.pages != null) ? b.pages + " pages"
+  const pages = (b.pages != null && b.pages !== "") ? esc(b.pages) + " pages"
     : (b.chunks_total > 0 ? b.chunks_total + " fragments" : "");
+  const fmt = esc((b.format||"?").toUpperCase());
+  // keep domain tag as small chip if available via book.subject? fallback subtle
+  const domainChip = (b.subject_name || domainName) ? '<span class="fmt-chip" style="background:var(--surface2);border-color:var(--line);font-size:10px;">'+esc(b.subject_name||domainName)+'</span>' : '';
   meta.innerHTML =
-    '<span class="fmt-chip">' + esc(b.format || "?") + "</span>" +
-    '<span class="badge ' + stCls + '">' +
+    '<span class="fmt-chip" title="Format du fichier">'+ fmt + "</span>" +
+    '<span class="badge ' + stCls + '" title="Statut d\'indexation">' +
       (docStatus(b) === "indexing" ? '<span class="spin"></span>' : "") + esc(stLabel) + "</span>" +
-    (pages ? "<span>" + esc(pages) + "</span>" : "") +
+    (pages ? '<span style="color:var(--ink-dim);font-family:var(--mono);font-size:11px;">' + pages + "</span>" : "") +
     (mode === "pop" && pathCats && pathCats.length && pathCats[0] !== "Non classé"
-      ? '<span class="path-crumb">' + esc(pathCats.join(" ▸ ")) + "</span>" : "");
+      ? '<span class="path-crumb">' + esc(pathCats.join(" ▸ ")) + "</span>" : "") +
+    domainChip;
   main.append(title, meta);
 
-  // Barre indéterminée pendant l'indexation (honnête : pas de % serveur).
   if (docStatus(b) === "indexing") {
     const prog = document.createElement("div");
     prog.className = "idx-track";
@@ -2500,7 +2699,7 @@ function docRow(b, box, mode, domainName, pathCats) {
     acts.className = "src-actions";
     const tag = document.createElement("button");
     tag.className = "src-tag" + (catsOf(b.id).length ? " has-cats" : "");
-    tag.title = "Déplacer / catégoriser ce document";
+    tag.title = catsOf(b.id).length ? "Catégories : "+catsOf(b.id).join(", ")+" — modifier" : "Déplacer / catégoriser ce document";
     tag.setAttribute("aria-label", "Modifier les catégories de " + b.title);
     tag.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M4 4h7l9 9-7 7-9-9z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><circle cx="8.5" cy="8.5" r="1.6" fill="currentColor"/></svg>';
     tag.addEventListener("click", () => openCatEditor(b.id));
@@ -2611,10 +2810,27 @@ function toggleImportPanel(force) {
   p.hidden = !show;
   $("addSourceBtn").setAttribute("aria-expanded", show ? "true" : "false");
   if (show) {
-    const subj = activeSubject();
-    if (!$("impSubject").value && subj) $("impSubject").value = subj.name;
-    $("impSubject").focus();
+    // Frictionless: no required field focused, drop-zone is primary CTA.
+    // Keep optional suggestion collapsed until a file is chosen.
+    const wrap = $("subjectSuggestWrap");
+    const preview = $("autoDetectPreview");
+    const hint = $("impBtnHint");
+    if (wrap) { wrap.classList.remove("expanded"); wrap.classList.add("collapsed"); wrap.hidden = true; }
+    if (preview) preview.hidden = true;
+    if (hint) hint.textContent = "Sélectionnez un fichier pour activer l'import";
+    $("impBtn").disabled = !($("impFile").files && $("impFile").files.length);
+    $("dropZone").focus();
   }
+}
+
+/* ---------- Helpers de nettoyage de titre / détection catégorie ---------- */
+function cleanTitleFromFilename(name){
+  const base = String(name||"").replace(/\.[^.]+$/, "");
+  // remplace _ - . par espaces, collapse, trim, title-case léger
+  let t = base.replace(/[_.\-]+/g, " ").replace(/\s+/g, " ").trim();
+  // limite et capitalise première lettre
+  if(t.length>80) t = t.slice(0,80);
+  return t || "Document sans titre";
 }
 
 /** Correspondance floue titre ↔ catégories existantes (sans appel LLM). */
@@ -2640,11 +2856,66 @@ function suggestCategory(title) {
   return bestScore >= 0.45 ? best : null;
 }
 
+function inferSubjectFromFilename(title){
+  // Heuristique: si catégorie suggérée, son nom est bon indice pour subject;
+  // sinon utilise le préfixe du titre ou "Général" comme fallback.
+  const sug = suggestCategory(title);
+  if(sug) return sug.name;
+  // fallback: premier mot significatif du titre
+  const w = title.split(/\s+/).filter(x=>x.length>2)[0];
+  return w || "Général";
+}
+
+function updateAutoDetectPreview(){
+  const f = $("impFile");
+  const preview = $("autoDetectPreview");
+  const badge = $("autoDetectBadge");
+  const titleEl = $("adPreviewTitle");
+  const fmtEl = $("adPreviewFormat");
+  const catEl = $("adPreviewCat");
+  const subjEl = $("adPreviewSubject");
+  const wrap = $("subjectSuggestWrap");
+  const hint = $("impBtnHint");
+  const btn = $("impBtn");
+  if (!f || !preview) return;
+  if (!f.files || !f.files.length){
+    preview.hidden = true;
+    if(wrap){ wrap.hidden = true; wrap.classList.remove("expanded"); wrap.classList.add("collapsed"); }
+    if(hint) hint.textContent = "Sélectionnez un fichier pour activer l'import";
+    if(btn) btn.disabled = true;
+    return;
+  }
+  const file = f.files[0];
+  const rawTitle = cleanTitleFromFilename(file.name);
+  const fmt = (file.name.split(".").pop()||"?").toLowerCase();
+  const sug = suggestCategory(rawTitle);
+  preview.hidden = false;
+  if(badge){ badge.innerHTML = '<span class="spin"></span> Détection automatique en cours…'; badge.className="badge indexing"; setTimeout(()=>{ if(badge) { badge.textContent="✓ Détection terminée"; badge.className="badge done"; } }, 700); }
+  if(titleEl) titleEl.textContent = rawTitle;
+  if(fmtEl) fmtEl.textContent = fmt.toUpperCase();
+  if(catEl){
+    if(sug){ catEl.textContent = "Catégorie : " + sug.name; catEl.className="badge done"; }
+    else { catEl.textContent = S.categories.length ? "Catégorie : nouvelle (à créer après import)" : "Catégorie : Non classé"; catEl.className="badge pending"; }
+  }
+  if(subjEl){
+    const inferred = inferSubjectFromFilename(rawTitle);
+    const impVal = $("impSubject") ? $("impSubject").value.trim() : "";
+    subjEl.textContent = impVal ? 'Matière : « ' + impVal + ' » (suggestion)' : 'Matière détectée : « ' + inferred + ' »';
+  }
+  if(wrap){
+    wrap.hidden = false;
+    // reveal suggestion field after file selected
+    requestAnimationFrame(()=>{ wrap.classList.remove("collapsed"); wrap.classList.add("expanded"); });
+  }
+  if(hint) hint.textContent = sug ? 'Prêt — rangement suggéré : « ' + sug.name + ' »' : 'Prêt — catégorie détectée automatiquement';
+  if(btn) btn.disabled = false;
+}
+
 function refreshImportSuggestion() {
   const box = $("importSugg");
   const f = $("impFile");
   if (!f.files.length) { box.hidden = true; return; }
-  const title = f.files[0].name.replace(/\.[^.]+$/, "");
+  const title = cleanTitleFromFilename(f.files[0].name);
   const sug = suggestCategory(title);
   box.innerHTML = "";
   if (!S.categories.length) {
@@ -2653,6 +2924,7 @@ function refreshImportSuggestion() {
     return;
   }
   const lab = document.createElement("span");
+  lab.className = "sugg-chip";
   const sel = document.createElement("select");
   sel.id = "impCatSel";
   sel.setAttribute("aria-label", "Catégorie de rangement après import");
@@ -2667,20 +2939,157 @@ function refreshImportSuggestion() {
     box.append(lab, sel);
   }
   box.hidden = false;
+  // keep auto-detect preview in sync
+  updateAutoDetectPreview();
+}
+
+/* ---------- Import redesign helpers: datalist, drag&drop, domain badge ---- */
+const DOMAIN_META = {
+  programmation: {label:"Programmation", cls:"programmation", icon:"💻"},
+  mathematiques: {label:"Mathématiques", cls:"mathematiques", icon:"∑"},
+  sciences: {label:"Sciences", cls:"sciences", icon:"🔬"},
+  langues: {label:"Langues", cls:"langues", icon:"🌐"},
+  generique: {label:"Générique", cls:"generique", icon:"📚"},
+};
+
+function populateSubjectDatalist() {
+  const dl = $("subjectList");
+  if (!dl) return;
+  dl.innerHTML = "";
+  for (const s of S.subjects || []) {
+    const o = document.createElement("option");
+    o.value = s.name;
+    dl.appendChild(o);
+  }
+}
+
+function formatFileSize(bytes) {
+  if (bytes == null || isNaN(bytes)) return "";
+  if (bytes < 1024) return bytes + " o";
+  if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + " Ko";
+  return (bytes/1024/1024).toFixed(1) + " Mo";
+}
+
+function updateDropPreview() {
+  const f = $("impFile");
+  const preview = $("dzPreview");
+  const nameEl = $("dzFileName");
+  const sizeEl = $("dzFileSize");
+  if (!preview || !f) return;
+  if (f.files && f.files.length) {
+    const file = f.files[0];
+    if (nameEl) nameEl.textContent = file.name;
+    if (sizeEl) sizeEl.textContent = formatFileSize(file.size);
+    preview.hidden = false;
+  } else {
+    preview.hidden = true;
+    if (nameEl) nameEl.textContent = "";
+    if (sizeEl) sizeEl.textContent = "";
+  }
+}
+
+function setDomainDetecting() {
+  const d = $("domainDetecting");
+  const b = $("domainBadge");
+  if (d) d.hidden = false;
+  if (b) b.hidden = true;
+}
+
+function showDomainBadge(domain) {
+  const d = $("domainDetecting");
+  const b = $("domainBadge");
+  if (d) d.hidden = true;
+  if (!b) return;
+  const key = (String(domain||"generique").toLowerCase());
+  const meta = DOMAIN_META[key] || DOMAIN_META.generique;
+  b.className = "domain-badge " + meta.cls;
+  b.innerHTML = '<span class="db-dot"></span><span class="db-icon" aria-hidden="true">' + esc(meta.icon) + '</span><span class="db-label">' + esc(meta.label) + '</span>';
+  b.hidden = false;
+  b.title = "Domaine détecté : " + meta.label;
+}
+
+function resetDomainBadge() {
+  const d = $("domainDetecting");
+  const b = $("domainBadge");
+  if (d) d.hidden = true;
+  if (b) { b.hidden = true; b.className = "domain-badge generique"; b.innerHTML = '<span class="db-dot"></span><span class="db-label">Classement automatique</span>'; }
+  const wrap = $("domainCorrectWrap");
+  const tog = $("domainCorrectToggle");
+  if (wrap) wrap.hidden = true;
+  if (tog) tog.setAttribute("aria-expanded","false");
+}
+
+function setupImportDragDrop() {
+  const zone = $("dropZone");
+  const input = $("impFile");
+  const browse = $("dzBrowse");
+  const remove = $("dzRemove");
+  if (!zone || !input) return;
+  if (zone._wired) return;
+  zone._wired = true;
+  const openPicker = () => input.click();
+  zone.addEventListener("click", (e) => {
+    if (e.target.closest("#dzRemove") || e.target.closest("#dzPreview")) return;
+    openPicker();
+  });
+  zone.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openPicker(); }
+  });
+  if (browse) browse.addEventListener("click", (e) => { e.stopPropagation(); openPicker(); });
+  if (remove) remove.addEventListener("click", (e) => {
+    e.stopPropagation();
+    input.value = "";
+    updateDropPreview();
+    refreshImportSuggestion();
+    resetDomainBadge();
+    const wrap = $("subjectSuggestWrap");
+    const preview = $("autoDetectPreview");
+    if(wrap){ wrap.hidden=true; wrap.classList.remove("expanded"); wrap.classList.add("collapsed"); }
+    if(preview) preview.hidden = true;
+    const btn = $("impBtn"); if(btn) btn.disabled = true;
+    const hint = $("impBtnHint"); if(hint) hint.textContent = "Sélectionnez un fichier pour activer l'import";
+  });
+  ["dragenter","dragover"].forEach(ev => zone.addEventListener(ev, (e) => {
+    e.preventDefault(); e.stopPropagation();
+    zone.classList.add("drag-over");
+  }));
+  ["dragleave","drop"].forEach(ev => zone.addEventListener(ev, (e) => {
+    e.preventDefault(); e.stopPropagation();
+  }));
+  zone.addEventListener("dragleave", () => zone.classList.remove("drag-over"));
+  zone.addEventListener("drop", (e) => {
+    zone.classList.remove("drag-over");
+    const files = e.dataTransfer && e.dataTransfer.files;
+    if (files && files.length) {
+      const dt = new DataTransfer();
+      dt.items.add(files[0]);
+      input.files = dt.files;
+      input.dispatchEvent(new Event("change", {bubbles:true}));
+    }
+  });
+  input.addEventListener("change", () => {
+    updateDropPreview();
+    refreshImportSuggestion();
+    updateAutoDetectPreview();
+  });
 }
 
 async function importSource() {
-  const impEl = $("impSubject");
-  if(impEl && !impEl.checkValidity()){
-    showFieldError("impSubject", impEl.validationMessage || "Domaine invalide (2-80 sans <>)");
-    return;
-  }
-  const subject = $("impSubject").value.trim();
   const fileInput = $("impFile");
-  if (!subject) { showFieldError("impSubject", "Indiquez le domaine de destination."); return; }
   if (!fileInput.files.length) { toast("Choisissez un fichier."); return; }
   const file = fileInput.files[0];
-  const title = file.name.replace(/\.[^.]+$/, "") || file.name;
+  // Subject is optional: infer from filename + category suggestion if empty.
+  const rawSubject = ($("impSubject") ? $("impSubject").value.trim() : "");
+  let subject = rawSubject;
+  if(!subject){
+    const inferredTitle = cleanTitleFromFilename(file.name);
+    subject = inferSubjectFromFilename(inferredTitle);
+    // ensure pattern compliance (no <>) and non-empty
+    subject = String(subject||"").replace(/[<>]/g,"").trim() || "Général";
+  }
+  // Optional soft validation (no hard block): clean <> and length
+  subject = String(subject).replace(/[<>]/g,"").trim().slice(0,80) || "Général";
+  const title = cleanTitleFromFilename(file.name) || file.name.replace(/\.[^.]+$/, "") || file.name;
   const fmt = (file.name.split(".").pop() || "?").toLowerCase();
   const fd = new FormData();
   fd.append("subject", subject);
@@ -2690,8 +3099,11 @@ async function importSource() {
   fd.append("queue", "true");
 
   const btn = $("impBtn");
+  const origBtnHtml = btn.innerHTML;
   btn.disabled = true;
+  btn.innerHTML = '<span class="spin spin-light" style="width:13px;height:13px;border-width:2px"></span> Importation…';
   $("importProgress").hidden = false;
+  setDomainDetecting();
   setStatus("envoi du document…");
   try {
     const r = await sf("/api/tutor/import", { method: "POST", body: fd });
@@ -2701,6 +3113,11 @@ async function importSource() {
       throw new Error(detail);
     }
     const rep = await r.json().catch(() => ({}));
+    // Duplicate fingerprint case — backend returns status "ready" immediately
+    if (rep.status === "ready" && rep.book_id) {
+      // already indexed, no queue; toast duplicate but still handle membership
+      toast("Document déjà présent — « " + title + " » est déjà indexé.");
+    }
 
     // Rangement suggéré / choisi (membership, jamais de ré-indexation).
     const catSel = $("impCatSel");
@@ -2718,12 +3135,51 @@ async function importSource() {
     // Bascule vers le domaine cible si l'import en crée/rejoint un autre.
     const wanted = subject.toLowerCase();
     const cur = activeSubject();
+    let targetSubjectId = cur ? cur.id : null;
     if (!cur || cur.name.toLowerCase() !== wanted) {
       await loadSubjects();
+      populateSubjectDatalist();
       const target = S.subjects.find(s => s.name.toLowerCase() === wanted);
-      if (target && target.id !== S.activeId) {
-        $("spaceSelect").value = target.id;
-        onSpaceChange();
+      if (target) {
+        targetSubjectId = target.id;
+        if (target.id !== S.activeId) {
+          $("spaceSelect").value = target.id;
+          onSpaceChange();
+        }
+      }
+    } else {
+      targetSubjectId = cur.id;
+    }
+    // Domaine: override manuel ou classement auto
+    const overrideEl = $("domainOverride");
+    const overrideVal = overrideEl ? String(overrideEl.value||"").trim().toLowerCase() : "";
+    if (targetSubjectId) {
+      if (overrideVal) {
+        try {
+          await sf("/api/tutor/subjects/"+encodeURIComponent(targetSubjectId)+"/domain", {
+            method:"PUT", headers:{"Content-Type":"application/json"},
+            body: JSON.stringify({domain: overrideVal})
+          });
+          showDomainBadge(overrideVal);
+        } catch(_) { showDomainBadge(overrideVal); }
+      } else {
+        // classement automatique
+        try {
+          setDomainDetecting();
+          const r2 = await sf("/api/tutor/subjects/"+encodeURIComponent(targetSubjectId)+"/classify", {method:"POST"});
+          if (r2.ok) {
+            const j2 = await r2.json().catch(()=>({}));
+            showDomainBadge(j2.domain || "generique");
+          } else {
+            const gj = await jf("/api/tutor/subjects/"+encodeURIComponent(targetSubjectId)+"/domain");
+            showDomainBadge(gj.domain || "generique");
+          }
+        } catch(_) {
+          try {
+            const gj = await jf("/api/tutor/subjects/"+encodeURIComponent(targetSubjectId)+"/domain");
+            showDomainBadge(gj.domain || "generique");
+          } catch(__) { showDomainBadge("generique"); }
+        }
       }
     }
 
@@ -2738,17 +3194,30 @@ async function importSource() {
     if (activeSubject()) S.domainBooks[activeSubject().id] = S.books;
     renderLibrary();
     ensureIndexPolling();
+    await refreshIndexQueue();
+    const domLabel = $("domainBadge") && !$("domainBadge").hidden ? $("domainBadge").textContent.trim() : "";
+    if (rep.status !== "ready") {
+      toast("« " + title + " » ajouté" + (domLabel ? " — " + domLabel : "") + " — placé dans la file d’indexation.");
+    } else {
+      // duplicate toast already shown; add subtle confirmation
+      if (!document.querySelector("#toast.show")) toast("« " + title + " » — aucun ré-import nécessaire.");
+    }
+    // Laisse le badge visible un instant avant de fermer le panneau
+    await new Promise(r => setTimeout(r, 900));
     toggleImportPanel(false);
     fileInput.value = "";
+    updateDropPreview();
     refreshImportSuggestion();
-    await refreshIndexQueue();
-    toast("« " + title + " » ajouté — placé dans la file d’indexation.");
+    // reset override select but keep badge for next open? reset now
+    setTimeout(resetDomainBadge, 400);
   } catch (e) {
     toast("Import impossible : " + (e.message || e));
     postLog("import refusé : " + (e.message || e));
     setStatus("prêt");
+    resetDomainBadge();
   } finally {
     btn.disabled = false;
+    btn.innerHTML = origBtnHtml;
     $("importProgress").hidden = true;
   }
 }
@@ -2801,6 +3270,38 @@ function ensureIndexPolling() {
     Object.values(S.domainBooks).some(list => (list || []).some(b => docStatus(b) === "indexing"));
   if (anyKnown && !_idxTimer && !_idxInFlight) pollIndexStatus();
   refreshIndexQueue();
+  refreshIngestionJobs();
+}
+
+/* ---- Suivi des jobs d'ingestion (010 P1-A) : phase_label + progression --- */
+let _jobsTimer = null;
+let _jobsInFlight = false;
+
+async function refreshIngestionJobs() {
+  const panel = $("ingestionJobsPanel");
+  const text = $("ingestionJobsText");
+  if (!panel || !text) return;
+  clearTimeout(_jobsTimer);
+  _jobsTimer = null;
+  if (_jobsInFlight) return;
+  _jobsInFlight = true;
+  let active = false;
+  try {
+    const data = await jf("/api/ingestion/jobs");
+    const running = (data.jobs || []).filter(
+      (j) => j.status !== "completed" && j.status !== "failed"
+    ).slice(0, 3);
+    active = running.length > 0;
+    panel.hidden = !active;
+    if (active) {
+      text.textContent = "Imports : " + running.map((j) =>
+        (j.original_filename || String(j.id).slice(0, 8)) + " — " +
+        (j.phase_label || j.status) + " " + ((j.progress_percent | 0)) + " %"
+      ).join(" · ");
+    }
+  } catch (_) { /* réseau ou 5xx : on retentera au prochain passage */ }
+  _jobsInFlight = false;
+  if (active) _jobsTimer = setTimeout(refreshIngestionJobs, 1500);
 }
 
 async function pollIndexStatus() {
@@ -3517,6 +4018,33 @@ function toggleCiteDetail(bubble, i) {
 /* Parse le texte brut accumulé (rawText) en segments texte / blocs de code
    délimités par ```lang ... ```, puis colore la syntaxe des blocs de code.
    Streaming-friendly : on reconstruit le conteneur à chaque delta. */
+/* ThinkBox (010 P2) : au premier thinking_delta, le span .tutor-think
+   devient un <details> pliable (ouvert pendant le stream, refermé à la
+   fin via closeThinkBox). L'accumulation .textContent continue. */
+function ensureThinkBox(bubble) {
+  if (!bubble || !bubble.think || bubble.think.dataset.box === "1") return;
+  const span = bubble.think;
+  const details = document.createElement("details");
+  details.className = "thinkbox";
+  details.open = true;
+  const summary = document.createElement("summary");
+  summary.textContent = "Réflexion du tuteur";
+  const inner = document.createElement("span");
+  inner.className = "tutor-think";
+  inner.dataset.box = "1";
+  inner.textContent = span.textContent || "";
+  details.appendChild(summary);
+  details.appendChild(inner);
+  span.replaceWith(details);
+  bubble.think = inner;
+}
+
+function closeThinkBox(bubble) {
+  if (!bubble || !bubble.think) return;
+  const box = bubble.think.closest ? bubble.think.closest("details.thinkbox") : null;
+  if (box) box.open = false;
+}
+
 function renderTutorText(bubble) {
   if (!bubble || !bubble.text) return;
   const raw = bubble.rawText || "";
@@ -3540,11 +4068,40 @@ function renderTutorText(bubble) {
       pre.appendChild(code);
       container.appendChild(pre);
     } else {
-      // Texte hors bloc : rendu markdown (titres, gras, italique, listes,
-      // séparateurs) tout en préservant les retours à la ligne.
-      renderMarkdownPara(container, p.content);
+      // Blocs display $$…$$ (KaTeX-lite) AVANT le markdown : le code est
+      // déjà extrait, aucun $ de code ne fuit ici.
+      for (const seg of splitMathBlocks(p.content)) {
+        if (seg.math) {
+          const div = document.createElement("div");
+          div.className = "math-block";
+          div.setAttribute("role", "math");
+          div.textContent = seg.content;
+          container.appendChild(div);
+        } else {
+          // Texte hors bloc : rendu markdown (titres, gras, italique, listes,
+          // séparateurs) tout en préservant les retours à la ligne.
+          renderMarkdownPara(container, seg.content);
+        }
+      }
     }
   }
+}
+
+/* Découpe les blocs display $$…$$ (multilignes). Un bloc non fermé
+   (streaming) reste du texte brut → dégradation propre. */
+function splitMathBlocks(text) {
+  const out = [];
+  const re = /\$\$([\s\S]+?)\$\$/g;
+  let last = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) out.push({ content: text.slice(last, m.index), math: false });
+    out.push({ content: m[1].trim(), math: true });
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push({ content: text.slice(last), math: false });
+  if (!out.length) out.push({ content: text, math: false });
+  return out;
 }
 
 /* Rendu markdown léger d'un paragraphe (hors blocs de code). Gère :
@@ -3609,8 +4166,10 @@ function renderMarkdownPara(container, text) {
 /* Rendu inline : gras **…**, italique *…*, code `…`. Retourne un fragment. */
 function renderInline(text) {
   const frag = document.createDocumentFragment();
-  // Tokenise en segments : code inline, gras, italique, texte brut.
-  const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*]+\*)/g;
+  // Tokenise en segments : code inline, gras, math inline $…$, italique,
+  // texte brut. Le math exige un contenu non vide sans bord espace et au
+  // moins une lettre/symbole TeX (anti faux positifs type prix "5$").
+  const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\$[^\s$][^$\n]*?[^\s$]\$)|(\*[^*]+\*)/g;
   let last = 0;
   let m;
   while ((m = re.exec(text)) !== null) {
@@ -3624,9 +4183,17 @@ function renderInline(text) {
       const b = document.createElement("strong");
       b.textContent = m[2].slice(2, -2);
       frag.appendChild(b);
+    } else if (m[3] !== undefined && /[a-zA-Z\\^_{}α-ωΑ-Ω]/.test(m[3])) {
+      const span = document.createElement("span");
+      span.className = "math-inline";
+      span.setAttribute("role", "math");
+      span.textContent = m[3].slice(1, -1);
+      frag.appendChild(span);
     } else if (m[3] !== undefined) {
+      frag.appendChild(document.createTextNode(m[3]));
+    } else if (m[4] !== undefined) {
       const i = document.createElement("em");
-      i.textContent = m[3].slice(1, -1);
+      i.textContent = m[4].slice(1, -1);
       frag.appendChild(i);
     }
     last = m.index + m[0].length;
@@ -3774,7 +4341,7 @@ function handleTutorFrame(f) {
 
     case "thinking_delta":
       if (S.capture) { S.capture.think += f.text || ""; break; }
-      if (currentBubble) currentBubble.think.textContent += f.text || "";
+      if (currentBubble) { ensureThinkBox(currentBubble); currentBubble.think.textContent += f.text || ""; }
       scrollThread();
       break;
 
@@ -3808,6 +4375,7 @@ function handleTutorFrame(f) {
       if (S.capture) { finishCapture(f); break; }
       if (_runStats) renderRunStats();
       _runStats = null;
+      if (currentBubble) closeThinkBox(currentBubble);
       if (f.session_id && S.activeId && !S.activeConversationId) {
         S.sessionIds[S.activeId] = f.session_id;   // continuité séance rapide
       }
@@ -4962,7 +5530,7 @@ function wireAll() {
   $("voiceSendBtn").addEventListener("click", sendVoiceTranscript);
   $("voiceCancelBtn").addEventListener("click", () => { $("voiceRow").hidden = true; });
 
-  // Bibliothèque
+  // Bibliothèque — panneau Import refondu
   $("addSourceBtn").addEventListener("click", () => toggleImportPanel());
   $("impBtn").addEventListener("click", importSource);
   $("impFile").addEventListener("change", refreshImportSuggestion);
@@ -4971,6 +5539,26 @@ function wireAll() {
   $("indexQueueStopBtn").addEventListener("click", stopIndexQueue);
   $("srcSearch").addEventListener("input", () => renderLibrary());
   $("openSearchBtn").addEventListener("click", openSearchModal);
+  // Import redesign wiring
+  setupImportDragDrop();
+  const _impClose = $("importCloseBtn");
+  if (_impClose) _impClose.addEventListener("click", () => toggleImportPanel(false));
+  const _corr = $("domainCorrectToggle");
+  if (_corr) _corr.addEventListener("click", () => {
+    const w = $("domainCorrectWrap");
+    if (!w) return;
+    const show = w.hidden;
+    w.hidden = !show;
+    _corr.setAttribute("aria-expanded", show ? "true" : "false");
+    if (show) $("domainOverride").focus();
+  });
+  const _impSub = $("impSubject");
+  if (_impSub) _impSub.addEventListener("input", () => {
+    // datalist filtering is native; ensure badge resets when subject changes
+    const v = _impSub.value.trim();
+    if (!v) resetDomainBadge();
+    updateAutoDetectPreview();
+  });
 
   // Apprentissage
   $("notionSelect").addEventListener("change", updateMastery);
@@ -5077,7 +5665,14 @@ async function loadReglages() {
     form.top_k_tutor.value    = t.top_k ?? "";
     form.llm_provider.value   = t.llm_provider || "ollama";
     form.llm_base_url.value   = t.llm_base_url || "";
-    form.llm_api_key.value    = t.llm_api_key || "";
+    // Ne jamais afficher la clé brute : placeholder masqué, champ vide
+    form.llm_api_key.value = "";
+    form.llm_api_key.placeholder = t.llm_api_key_masked || t.llm_api_key || (t.has_llm_api_key ? "****" : "sk-…");
+    if (t.has_llm_api_key && t.llm_api_key_masked) {
+      form.llm_api_key.placeholder = t.llm_api_key_masked;
+    } else if (!t.has_llm_api_key) {
+      form.llm_api_key.placeholder = "sk-…";
+    }
     form.embed_batch_size.value = t.embed_batch_size ?? 16;
     form.max_parallel_embed.value = t.max_parallel_embed ?? 1;
     form.nightly_enabled.checked = !!t.nightly_enabled;
@@ -5108,6 +5703,8 @@ function wireReglages() {
     const fd = new FormData(form);
     const num = (name) => { const v = fd.get(name); return v !== "" && v !== null ? Number(v) : null; };
     const str = (name) => { const v = fd.get(name); return v !== "" && v !== null ? v : null; };
+    const _rawApiKey = fd.get("llm_api_key");
+    const _apiKey = _rawApiKey && String(_rawApiKey).trim() ? String(_rawApiKey).trim() : null;
     const payload = {
       options: {
         temperature:    num("temperature"),
@@ -5125,7 +5722,7 @@ function wireReglages() {
       top_k:    num("top_k_tutor"),
       llm_provider: fd.get("llm_provider"),
       llm_base_url: fd.get("llm_base_url"),
-      llm_api_key:  fd.get("llm_api_key"),
+      llm_api_key:  _apiKey,
       embed_batch_size: num("embed_batch_size"),
       max_parallel_embed: num("max_parallel_embed"),
       nightly_enabled: form.nightly_enabled.checked,

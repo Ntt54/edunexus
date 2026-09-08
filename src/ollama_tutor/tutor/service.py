@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import threading
 from datetime import datetime
@@ -15,9 +16,90 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator
 
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Durcissement upload (010 P2-Robustesse, T041)
+#
+# Adapté de open-tutor-ai-CE (routers/files.py : 413 précoce via
+# content-length + lecture par chunks de 64 Ko avec plafond cumulé ;
+# files/service.py : require_owned). Ici : UploadFile duck-typé
+# (``read(n)``), erreurs AppError (mappées HTTP par web/server.py).
+# ---------------------------------------------------------------------------
+
+#: Plafond d'upload : 100 Mo (source CE : MAX_UPLOAD_SIZE_MB).
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+
+#: Taille des chunks de lecture (source CE : 64 Ko).
+UPLOAD_CHUNK_BYTES = 64 * 1024
+
+
+def validate_upload_length(
+    content_length: str | None, max_bytes: int = MAX_UPLOAD_BYTES
+) -> None:
+    """413 précoce via content-length (avant toute lecture du corps).
+
+    ``None``/non numérique : pas de pré-contrôle (la lecture plafonnée
+    prend le relais). Lève :exc:`PayloadTooLargeError` (413).
+    """
+    if content_length is None:
+        return
+    raw = str(content_length).strip()
+    if not raw.isdigit():
+        return
+    if int(raw) > max_bytes:
+        raise PayloadTooLargeError(
+            f"Fichier trop volumineux (>{max_bytes} octets)"
+        )
+
+
+async def read_limited_upload(
+    read_chunk: Any,
+    max_bytes: int = MAX_UPLOAD_BYTES,
+    chunk_size: int = UPLOAD_CHUNK_BYTES,
+) -> bytes:
+    """Lit un upload par chunks de 64 Ko avec plafond cumulé (source CE).
+
+    ``read_chunk`` : callable async ``(n: int) -> bytes`` (ex.
+    ``upload.read`` de Starlette). Dépassement ⇒ :exc:`PayloadTooLargeError`.
+    """
+    parts: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await read_chunk(int(chunk_size))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise PayloadTooLargeError(
+                f"Fichier trop volumineux (>{max_bytes} octets)"
+            )
+        parts.append(chunk)
+    return b"".join(parts)
+
+
+def _log_error(config: Any, source: str, message: str, detail: str = "") -> None:
+    """Append ``[ISO-8601] [source] message`` (+ detail) to errors.log.
+
+    Service-side mirror of ``web.server._log_error`` (principe VI, AC-004) —
+    stdlib only so ``tutor/`` never imports ``web`` (Constitution I).
+    Best-effort: logging must never break the pipeline itself.
+    """
+    try:
+        line = f"[{datetime.now().astimezone().isoformat()}] [{source}] {message}"
+        if detail:
+            line += f"\n{detail}"
+        log_file = Path(config.config_dir) / "errors.log"
+        with open(log_file, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except Exception:
+        pass
+
 from ..client import OllamaClient
 from ..models import Message, MessageRole, OllamaOptions
 from .assessment import (
+    _CATEGORY_TO_DIAGNOSIS,
     AttemptResult,
     ExamHelpError,
     QuizEngine,
@@ -27,12 +109,15 @@ from .assessment import (
     build_exercise_prompt,
     build_grade_prompt,
     build_prepare_prompt,
+    diagnose_error,
+    extract_next_step,
     next_hint,
     parse_exercise_response,
     parse_grade_response,
     parse_prepare_response,
 )
 from .embeddings import _hash_text, embed_texts
+from .errors import NotFoundError, PayloadTooLargeError
 from .extractors import chunk_text, chunk_text_structured, extract_text
 from .providers.docling_ocr import DoclingOCRError
 from .providers.gguf_embedding import GGUFEmbeddingError
@@ -46,6 +131,7 @@ from .models import (
     _now_iso,
     _uid,
 )
+from .sandbox import RunResult
 from .progress import ProgressTracker
 from .prompts import (
     build_compare_system_prompt,
@@ -112,6 +198,7 @@ class TutorService:
         *,
         embedding_provider=None,
         document_parser=None,
+        pleias_provider=None,
     ) -> None:
         self.store = store
         self.config = config
@@ -122,6 +209,9 @@ class TutorService:
         # None keeps the legacy Ollama/pypdf path byte-identical.
         self.embedding_provider = embedding_provider
         self.document_parser = document_parser
+        # Pleias RAG provider (keyword-only, optional): injected for tests or
+        # lazily instantiated from config when enabled (Oracle blueprint).
+        self.pleias_provider = pleias_provider
         # B1 multi-fournisseur : le client LLM (génération) peut être
         # un fournisseur externe compatible OpenAI, distinct du client
         # Ollama utilisé pour les embeddings.
@@ -143,6 +233,28 @@ class TutorService:
         else:
             self._llm_client = client
             self.client = client
+        # Pleias RAG lazy init (Oracle blueprint): when no provider was
+        # injected and the feature is enabled, build one from the Ollama
+        # client (raw /api/generate). OpenAI path falls back to self.client
+        # which is always an OllamaClient.
+        if self.pleias_provider is None and getattr(config, "tutor_pleias_enabled", False) and getattr(
+            config, "tutor_pleias_model", ""
+        ):
+            try:
+                from .providers.pleias import PleiasRAGProvider
+
+                pleias_client = (
+                    self._llm_client
+                    if isinstance(self._llm_client, OllamaClient)
+                    else self.client
+                )
+                if not hasattr(pleias_client, "_get_client"):
+                    pleias_client = self.client
+                self.pleias_provider = PleiasRAGProvider(
+                    pleias_client, model=config.tutor_pleias_model
+                )
+            except Exception:
+                self.pleias_provider = None
         self.retriever = Retriever(
             store, self.client, self.model,
             reranker=SimpleReranker() if getattr(config, "tutor_reranking_enabled", False) else None,
@@ -153,6 +265,10 @@ class TutorService:
         self.quiz_engine = QuizEngine(store, self._llm_client, config)
         self._cancel_flags: dict[str, threading.Event] = {}
         self._threads: dict[str, threading.Thread] = {}
+        # Feature 010 P1-A (US3): strong refs to in-flight ingestion tasks.
+        # asyncio only holds weak refs — without this the pipeline could be
+        # GC'd mid-flight. Keyed by job_id, popped by the done-callback.
+        self._ingestion_tasks: dict[str, asyncio.Task] = {}
         # One app-loop worker owns the persistent pending queue. Books are
         # deliberately processed one at a time on modest CPU/RAM machines.
         self._index_queue_task: asyncio.Task | None = None
@@ -994,6 +1110,199 @@ class TutorService:
             yield frame
 
     # ------------------------------------------------------------------
+    # Pleias RAG (Oracle blueprint): grounded answer via Pleias model
+    # ------------------------------------------------------------------
+
+    async def ask_pleias(
+        self,
+        subject_name: str,
+        question: str,
+        k: int = 5,
+        **kwargs: Any,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream a grounded answer via the Pleias RAG model (Oracle blueprint).
+
+        Frame order: ``sources`` first, then ``pleias_sections`` (language /
+        query_report / source_analysis / draft), then ``delta`` (clean answer),
+        then optional ``citation_warnings`` and a final ``end``. When no passage
+        clears the retrieval floor a ``no_passages`` error is emitted before
+        ``end``. Cancel-aware (via ``cancel`` event in ``kwargs``).
+        """
+        cancel: asyncio.Event | None = kwargs.get("cancel")  # type: ignore[assignment]
+
+        # 1) Resolve subject
+        try:
+            subject_id = self._resolve_subject(subject_name)
+        except Exception as exc:  # pragma: no cover - defensive
+            yield {"type": "error", "code": "subject_error", "message": str(exc)}
+            yield {"type": "end", "status": "error"}
+            return
+
+        if cancel is not None and cancel.is_set():
+            yield {"type": "end", "status": "stopped"}
+            return
+
+        # 2) Retrieve subject-scoped passages
+        try:
+            chunks: list[ScoredChunk] = await self.retriever.retrieve(subject_id, question, k)
+        except Exception as exc:
+            yield {"type": "error", "code": "retrieval_error", "message": str(exc)}
+            yield {"type": "end", "status": "error"}
+            return
+
+        if cancel is not None and cancel.is_set():
+            yield {"type": "end", "status": "stopped"}
+            return
+
+        # 3) No chunk -> error + end
+        if not chunks:
+            yield {
+                "type": "error",
+                "code": "no_passages",
+                "message": "Aucun passage pertinent trouvé dans vos livres pour cette question.",
+            }
+            yield {"type": "end", "status": "done"}
+            return
+
+        sources_frame = [
+            {
+                "book": c.book_title,
+                "chapter": c.chapter,
+                "page": c.page,
+                "score": round(float(c.score), 4),
+            }
+            for c in chunks
+        ]
+        yield {"type": "sources", "sources": sources_frame}
+
+        if cancel is not None and cancel.is_set():
+            yield {"type": "end", "status": "stopped"}
+            return
+
+        if self.pleias_provider is None:
+            yield {
+                "type": "error",
+                "code": "pleias_unavailable",
+                "message": "Pleias RAG non configuré (tutor_pleias_enabled / pleias_model).",
+            }
+            yield {"type": "end", "status": "error"}
+            return
+
+        # 4) Build Pleias prompt
+        try:
+            from .prompts import build_pleias_prompt
+            from .providers.pleias import parse_pleias_response
+            from .retrieval import validate_pleias_citations
+        except Exception as exc:  # pragma: no cover
+            yield {"type": "error", "code": "import_error", "message": str(exc)}
+            yield {"type": "end", "status": "error"}
+            return
+
+        prompt = build_pleias_prompt(question, chunks)  # type: ignore[arg-type]
+
+        if cancel is not None and cancel.is_set():
+            yield {"type": "end", "status": "stopped"}
+            return
+
+        # 5) Stream raw Pleias output (cancel-aware, same pattern as _stream_llm)
+        raw_parts: list[str] = []
+        try:
+            agen = self.pleias_provider.stream(prompt).__aiter__()  # type: ignore[attr-defined]
+            next_task: asyncio.Task | None = None
+            while True:
+                if cancel is not None and cancel.is_set():
+                    if next_task is not None:
+                        next_task.cancel()
+                    yield {"type": "end", "status": "stopped"}
+                    return
+                if next_task is None:
+                    next_task = asyncio.ensure_future(agen.__anext__())
+                if cancel is not None:
+                    cancel_task = asyncio.ensure_future(cancel.wait())
+                    await asyncio.wait(
+                        {next_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if cancel_task.done() and not next_task.done():
+                        next_task.cancel()
+                        try:
+                            await next_task
+                        except asyncio.CancelledError:
+                            pass
+                        cancel_task.cancel()
+                        yield {"type": "end", "status": "stopped"}
+                        return
+                    if not cancel_task.done():
+                        cancel_task.cancel()
+                else:
+                    await asyncio.wait({next_task})  # type: ignore[arg-type]
+                try:
+                    ev = next_task.result()
+                except StopAsyncIteration:
+                    break
+                next_task = None
+                if isinstance(ev, dict):
+                    if ev.get("type") == "delta":
+                        txt = ev.get("text") or ""
+                        if txt:
+                            raw_parts.append(str(txt))
+                    elif ev.get("type") == "end":
+                        break
+                    elif ev.get("text"):
+                        raw_parts.append(str(ev.get("text")))
+                elif isinstance(ev, str):
+                    raw_parts.append(ev)
+        except asyncio.CancelledError:
+            yield {"type": "end", "status": "stopped"}
+            return
+        except Exception as exc:
+            yield {"type": "error", "code": "stream_error", "message": f"Erreur Pleias : {exc}"}
+            yield {"type": "end", "status": "error"}
+            return
+
+        if cancel is not None and cancel.is_set():
+            yield {"type": "end", "status": "stopped"}
+            return
+
+        raw = "".join(raw_parts)
+
+        # 6) Parse + validate
+        try:
+            parsed = parse_pleias_response(raw)
+        except Exception as exc:  # pragma: no cover
+            yield {"type": "error", "code": "parse_error", "message": str(exc)}
+            yield {"type": "end", "status": "error"}
+            return
+
+        sections = {
+            "language": parsed.get("language", ""),
+            "query_report": parsed.get("query_report", ""),
+            "source_analysis": parsed.get("source_analysis", ""),
+            "draft": parsed.get("draft", ""),
+        }
+        yield {"type": "pleias_sections", "sections": sections}
+
+        clean_answer = parsed.get("clean_answer") or parsed.get("answer") or raw
+        clean_answer = str(clean_answer).strip() if clean_answer is not None else ""
+        if clean_answer:
+            yield {"type": "delta", "text": clean_answer}
+
+        # 7) Citation validation (warnings)
+        try:
+            validation = validate_pleias_citations(parsed.get("answer") or raw, chunks)
+        except Exception:  # pragma: no cover
+            validation = {"valid": True, "warnings": [], "valid_citations": []}
+        warnings = validation.get("warnings", []) if isinstance(validation, dict) else []
+        if warnings:
+            yield {
+                "type": "citation_warnings",
+                "warnings": warnings,
+                "valid_citations": validation.get("valid_citations", []),
+                "valid": validation.get("valid", False),
+            }
+
+        yield {"type": "end", "status": "done"}
+
+    # ------------------------------------------------------------------
     # Revision sheet (US2 / T016): auto-generated fiche de révision
     # ------------------------------------------------------------------
 
@@ -1139,6 +1448,7 @@ class TutorService:
         exercise_id: str,
         answer: str,
         reveal_hint: bool = False,
+        execution: RunResult | None = None,
     ) -> AttemptResult:
         """Grade a learner's answer and update mastery (T033).
 
@@ -1149,6 +1459,10 @@ class TutorService:
           explicitly requests a hint). The revealed hint is returned but the
           solution is NEVER returned here (INVARIANT 3).
         - Marks the exercise ``solved`` on a correct answer.
+        - ``execution`` (FR-001/FR-020, opt-in, default ``None``): when a
+          sandboxed :class:`RunResult` is provided it is injected into the
+          grading prompt so the feedback can cite the real output. ``None``
+          keeps the legacy behavior strictly unchanged.
         """
         exercise = self.store.get_exercise(exercise_id)
         if exercise is None:
@@ -1158,7 +1472,7 @@ class TutorService:
         verdict: str | None = None
         feedback = ""
         if answer:
-            messages = build_grade_prompt(exercise, answer)
+            messages = build_grade_prompt(exercise, answer, execution=execution)
             options = self._generation_options()
             text = await self._llm_collect(messages, options)
             verdict, feedback = parse_grade_response(text)
@@ -1218,6 +1532,8 @@ class TutorService:
             hint_level=new_hint_level,
             hint=revealed_hint,
             solution=None,
+            # 010 P2 (T047) : feedback standard — next_step extrait.
+            next_step=extract_next_step(feedback),
         )
 
     # ------------------------------------------------------------------
@@ -1232,6 +1548,113 @@ class TutorService:
     ) -> list[dict[str, Any]]:
         """Return recent errors for a subject, optionally filtered by concept."""
         return self.store.get_error_history(subject_id, concept_name, limit)
+
+    # ------------------------------------------------------------------
+    # Feedback HITL (010 P2-Pédagogie, US7 — T049)
+    #
+    # Adapté de self_regulation.py (CE) : FeedbackForm {rating, comment} +
+    # garde owner-ou-admin. rating 1-5 + commentaire requis (ValueError),
+    # cible existante requise (NotFoundError), mutation refusée aux tiers
+    # non-admin (PermissionError stdlib — aucun nouveau module).
+    # ------------------------------------------------------------------
+
+    _FEEDBACK_TARGETS = ("book", "exercise", "session", "quiz")
+
+    def submit_feedback(
+        self,
+        target_type: str,
+        target_id: str,
+        rating: int,
+        comment: str,
+        owner_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Crée un feedback (rating 1-5 + commentaire + owner requis)."""
+        if target_type not in self._FEEDBACK_TARGETS:
+            raise ValueError(f"target_type {target_type!r} invalide.")
+        if not isinstance(rating, int) or not 1 <= rating <= 5:
+            raise ValueError("rating 1-5 requis.")
+        if not str(comment or "").strip():
+            raise ValueError("commentaire requis.")
+        if not owner_id:
+            raise ValueError("owner_id requis.")
+        self._require_feedback_target(target_type, target_id)
+        return self.store.submit_feedback(
+            target_type, target_id, owner_id, rating, str(comment).strip()
+        )
+
+    def get_feedback(self, feedback_id: str) -> dict[str, Any] | None:
+        """Retourne un feedback ou None."""
+        return self.store.get_feedback(feedback_id)
+
+    def list_feedback(
+        self, target_type: str, target_id: str, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Feedbacks d'une cible (plus récents d'abord)."""
+        return self.store.list_feedback(target_type, target_id, limit=limit)
+
+    def update_feedback(
+        self,
+        feedback_id: str,
+        rating: int | None = None,
+        comment: str | None = None,
+        owner_id: str | None = None,
+        is_admin: bool = False,
+    ) -> dict[str, Any]:
+        """Modifie un feedback (owner ou admin ; rating/comment partiels)."""
+        current = self.store.get_feedback(feedback_id)
+        if current is None:
+            raise NotFoundError("Feedback", feedback_id)
+        self._require_feedback_owner(current, owner_id, is_admin)
+        if rating is not None and (not isinstance(rating, int) or not 1 <= rating <= 5):
+            raise ValueError("rating 1-5 requis.")
+        if comment is not None and not str(comment).strip():
+            raise ValueError("commentaire requis.")
+        updated = self.store.update_feedback(
+            feedback_id,
+            rating=rating,
+            comment=str(comment).strip() if comment is not None else None,
+        )
+        assert updated is not None
+        return updated
+
+    def delete_feedback(
+        self, feedback_id: str, owner_id: str | None = None, is_admin: bool = False
+    ) -> bool:
+        """Supprime un feedback (owner ou admin)."""
+        current = self.store.get_feedback(feedback_id)
+        if current is None:
+            raise NotFoundError("Feedback", feedback_id)
+        self._require_feedback_owner(current, owner_id, is_admin)
+        return self.store.delete_feedback(feedback_id)
+
+    def _require_feedback_target(self, target_type: str, target_id: str) -> None:
+        """Vérifie l'existence de la cible (sinon NotFoundError)."""
+        exists: Any = None
+        try:
+            if target_type == "book":
+                exists = self.store.get_book(target_id)
+            elif target_type == "exercise":
+                exists = self.store.get_exercise(target_id)
+            elif target_type == "session":
+                exists = self.store.get_tutoring_session(target_id)
+            elif target_type == "quiz":
+                get_quiz = getattr(self.store, "get_quiz", None)
+                exists = get_quiz(target_id) if get_quiz else None
+        except Exception:
+            exists = None
+        if exists is None:
+            raise NotFoundError("Cible", f"{target_type}:{target_id}")
+
+    @staticmethod
+    def _require_feedback_owner(
+        record: dict[str, Any], owner_id: str | None, is_admin: bool
+    ) -> None:
+        """Garde owner-ou-admin (source CE) : tiers refusé (PermissionError)."""
+        if is_admin:
+            return
+        if owner_id and owner_id == record.get("owner_id"):
+            return
+        raise PermissionError("owner ou admin requis.")
 
     async def request_solution(self, exercise_id: str) -> str:
         """Return the withheld solution — ONLY when explicitly requested.
@@ -1816,8 +2239,26 @@ class TutorService:
     # Subject resolution
     # ------------------------------------------------------------------
 
+    def _infer_subject_from_path(self, path: Any) -> str:
+        """Infer a subject name from a file path stem.
+
+        Normalises separators ``_ . -`` to spaces, collapses whitespace,
+        trims, falls back to ``Général`` when empty, and caps at 80 chars.
+        """
+        base = Path(str(path)).stem if path is not None else ""
+        clean = re.sub(r"[_.\-]+", " ", base)
+        clean = re.sub(r"\s+", " ", clean).strip()
+        if not clean:
+            return "Général"
+        return clean[:80] if clean else "Général"
+
     def _resolve_subject(self, subject_name: str) -> str:
         name = subject_name.strip()
+        # Defensive: empty after strip → infer fallback (should already be handled by caller)
+        if not name:
+            name = "Général"
+        # Cap length to 80 (consistent with _infer_subject_from_path)
+        name = name[:80]
         for s in self.store.list_subjects():
             if s.name.lower() == name.lower():
                 return s.id
@@ -1863,8 +2304,27 @@ class TutorService:
             # client so the next run builds a fresh one.
             self._close_client()
 
+    def require_subject_book(self, subject_id: str, book_id: str) -> Any:
+        """Retourne le livre s'il appartient à la matière (ownership, T041).
+
+        Adapté de ``require_owned`` (CE) : existence + rattachement vérifiés
+        ensemble pour ne pas fuiter l'existence (404 dans les deux cas).
+
+        Lève :exc:`NotFoundError` (404) si livre inconnu ou hors matière.
+        """
+        book = self.store.get_book(book_id)
+        if book is None:
+            raise NotFoundError("Livre", book_id)
+        try:
+            owner = self.store.get_book_subject_id(book_id)
+        except Exception:
+            owner = None
+        if owner != subject_id:
+            raise NotFoundError("Livre", book_id)
+        return book
+
     def register_import(
-        self, subject_name: str, path: Any
+        self, subject_name: str | None = None, path: Any = None
     ) -> tuple[str, Book]:
         """Register a book row WITHOUT starting indexing (Phase 6 UX).
 
@@ -1873,8 +2333,25 @@ class TutorService:
         caller can schedule :meth:`_run_index` itself — typically via
         :meth:`schedule_index` on a long-lived event loop. Pre-flight
         problems (unknown format, missing file) raise before any row exists.
+
+        ``subject_name`` may be empty/whitespace/None — in that case it is
+        inferred from ``path`` via :meth:`_infer_subject_from_path`.
         """
-        subject_id = self._resolve_subject(subject_name)
+        # Support positional calling convention register_import(path) if ever used
+        # (path as first arg when subject omitted). Detect and shift.
+        if path is None and subject_name is not None:
+            # If subject_name looks like a file path (has suffix or exists), treat as path
+            maybe_path = Path(str(subject_name))
+            if maybe_path.suffix.lower() in (".txt", ".md", ".pdf", ".epub", ".docx", ".pptx") or maybe_path.exists():
+                path = subject_name
+                subject_name = None  # type: ignore[assignment]
+        if path is None:
+            raise FileNotFoundError("missing file path for import")
+        if not subject_name or not str(subject_name).strip():
+            subject_name = self._infer_subject_from_path(path)
+        else:
+            subject_name = str(subject_name).strip()[:80] or self._infer_subject_from_path(path)
+        subject_id = self._resolve_subject(str(subject_name))
         return subject_id, self.store.import_document(subject_id, path)
 
     async def reindex_book(self, book_id: str) -> dict[str, Any]:
@@ -1915,41 +2392,392 @@ class TutorService:
         self._cancel_flags[book.id] = threading.Event()
         return asyncio.ensure_future(self._run_index(subject_id, book, path, fmt))
 
+    def import_job(
+        self,
+        subject_name: str | None = None,
+        path: Any = None,
+        fmt: str | None = None,
+    ) -> str:
+        """Import a document as a tracked ingestion job (Feature 010 P1-A, US3).
+
+        Synchronous for the caller: creates the ``ingestion_jobs`` row and
+        returns its ``job_id`` immediately; the pipeline
+        (uploaded → extracting → classifying → dispatching → embedding →
+        completed, ``failed`` from any state) runs in the background as an
+        ``asyncio.Task`` on the running loop, or in a daemon thread running
+        its own loop when called from sync code (≤ 8 Go: no new thread when
+        a loop is already running). Poll via :meth:`get_ingestion_job`.
+
+        Pre-flight problems (unknown format, missing file) raise before any
+        job row exists. An exact sha256 duplicate of a completed job returns
+        a new job already ``completed`` with ``nodes_created=0``.
+        """
+        _subject_id, book, job, _duplicate = self._prepare_ingestion_job(
+            subject_name, path, fmt
+        )
+        if job["status"] not in ("completed", "failed"):
+            self._launch_ingestion(
+                job["id"], _subject_id, book.id, path, fmt
+            )
+        return job["id"]
+
+    def get_ingestion_job(self, job_id: str) -> dict[str, Any]:
+        """Return a serialisable ingestion job snapshot (polling).
+
+        Raises:
+            KeyError: unknown job id (routes map this to 404).
+        """
+        job = self.store.get_ingestion_job(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        return job
+
+    def list_ingestion_jobs(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Newest-first ingestion job snapshots (bounded for polling)."""
+        return self.store.list_ingestion_jobs(limit=limit)
+
+    def _prepare_ingestion_job(
+        self,
+        subject_name: str | None,
+        path: Any,
+        fmt: str | None,
+    ) -> tuple[str, Book, dict[str, Any], dict[str, Any] | None]:
+        """Resolve subject + book row + job row for an import.
+
+        Returns ``(subject_id, book, job, duplicate)`` where ``duplicate`` is
+        the completed job being deduplicated against (``None`` for a fresh
+        import). Pre-flight errors propagate before any job row exists.
+        """
+        if path is None:
+            raise FileNotFoundError("missing file path for import")
+        if not subject_name or not str(subject_name).strip():
+            subject_name = self._infer_subject_from_path(path)
+        else:
+            subject_name = str(subject_name).strip()[:80] or self._infer_subject_from_path(path)
+        subject_id = self._resolve_subject(str(subject_name))
+        book = self.store.import_document(subject_id, path)
+        content_hash: str | None = None
+        try:
+            content_hash = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        except OSError:
+            content_hash = None
+        duplicate = self.store.find_completed_job_by_hash(content_hash)
+        if duplicate is None and self.store.get_book_status(book.id) == "indexed":
+            # Legacy fingerprint no-op (indexed before jobs existed): mirror
+            # it as an immediate completed job with zero new nodes.
+            job = self.store.create_ingestion_job(
+                source_type="file",
+                original_filename=Path(path).name,
+                content_hash=content_hash,
+                book_id=book.id,
+                status="completed",
+                progress_percent=100,
+                embedding_status="done",
+                nodes_created=0,
+            )
+            return subject_id, book, job, {"id": job["id"], "book_id": book.id}
+        if duplicate is not None:
+            existing_book = self.store.get_book(duplicate.get("book_id") or "") or book
+            job = self.store.create_ingestion_job(
+                source_type="file",
+                original_filename=Path(path).name,
+                content_hash=content_hash,
+                book_id=existing_book.id,
+                status="completed",
+                progress_percent=100,
+                embedding_status=duplicate.get("embedding_status") or "done",
+                nodes_created=0,
+            )
+            return subject_id, existing_book, job, duplicate
+        job = self.store.create_ingestion_job(
+            source_type="file",
+            original_filename=Path(path).name,
+            content_hash=content_hash,
+            book_id=book.id,
+        )
+        return subject_id, book, job, None
+
+    def _launch_ingestion(
+        self, job_id: str, subject_id: str, book_id: str, path: Any, fmt: str | None
+    ) -> None:
+        """Run the job pipeline in background (task on loop, else thread)."""
+        self._cancel_flags[book_id] = threading.Event()
+        coro = self._run_ingestion_job(job_id, subject_id, book_id, path, fmt)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            task = loop.create_task(coro)
+            self._ingestion_tasks[job_id] = task
+            task.add_done_callback(lambda t: self._ingestion_tasks.pop(job_id, None))
+            return
+        t = threading.Thread(
+            target=self._run_ingestion_job_thread,
+            args=(job_id, subject_id, book_id, path, fmt),
+            daemon=True,
+        )
+        t.start()
+        self._threads[job_id] = t
+
+    def _run_ingestion_job_thread(
+        self, job_id: str, subject_id: str, book_id: str, path: Any, fmt: str | None
+    ) -> None:
+        try:
+            asyncio.run(self._run_ingestion_job(job_id, subject_id, book_id, path, fmt))
+        except Exception:
+            # Errors are recorded on the job row inside _run_ingestion_job;
+            # never let a stray exception kill the daemon thread silently.
+            pass
+        finally:
+            # The thread's event loop is gone: release the loop-bound httpx
+            # client so the next run builds a fresh one.
+            self._close_client()
+
+    def _ingestion_skip_mode(self) -> bool:
+        """True when embeddings are disabled (P0-B ``skip`` mode)."""
+        try:
+            from .providers import resolve_embedding_mode
+
+            return resolve_embedding_mode(self.config) == "skip"
+        except Exception:
+            return False
+
+    async def _ingest_extract(self, path: Any, fmt: str | None) -> list[tuple[str, dict[str, Any]]]:
+        """Extract (text, meta) segments (test seam: monkeypatchable)."""
+        if self.document_parser is not None:
+            parsed = await self.document_parser.parse(Path(path))
+            pages = (
+                parsed.get("pages", [])
+                if isinstance(parsed, dict)
+                else list(parsed)
+            )
+            return [
+                (str(p.get("text", "")), {})
+                for p in pages
+                if str(p.get("text", "")).strip()
+            ]
+        return list(extract_text(path, fmt))
+
+    async def _ingest_classify(
+        self, subject_id: str, segments: list[tuple[str, dict[str, Any]]]
+    ) -> None:
+        """Classifying phase marker (0-LLM classification is a P2 item).
+
+        Kept as an explicit step so the phase exists in the polled history;
+        real domain classification still runs best-effort after indexing
+        (preserved behaviour).
+        """
+        return None
+
+    @staticmethod
+    def _ingest_chunk(segments: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
+        """Combine annotated segments then structure-chunk them."""
+        combined_parts: list[str] = []
+        for text, meta in segments:
+            if not text.strip():
+                continue
+            if meta.get("page") is not None:
+                combined_parts.append(f"--- Page {meta['page']} ---\n{text}")
+            elif meta.get("section"):
+                combined_parts.append(f"# {meta['section']}\n{text}")
+            else:
+                combined_parts.append(text)
+        return chunk_text_structured("\n\n".join(combined_parts))
+
+    def _fail_ingestion_job(self, job_id: str, book_id: str, message: str) -> None:
+        """Terminal failure from any state: job row + book row + errors.log."""
+        msg = (message or type(RuntimeError).__name__)[:500]
+        self.store.update_ingestion_job(
+            job_id, status="failed", embedding_status="failed", error_message=msg
+        )
+        try:
+            self.store.set_book_error(book_id, msg)
+        except Exception:
+            pass
+        _log_error(self.config, "ingestion", f"job {job_id}: {msg}")
+        logger.exception("Ingestion job %s failed: %s", job_id, msg)
+
+    def _cancel_ingestion_job(self, job_id: str, book_id: str) -> None:
+        """User cancellation: book back to pending, job failed (no errors.log)."""
+        try:
+            self.store.cancel_indexing(book_id)
+        except Exception:
+            pass
+        self.store.update_ingestion_job(
+            job_id, status="failed", error_message="Import annulé par l'utilisateur."
+        )
+
+    async def _run_ingestion_job(
+        self, job_id: str, subject_id: str, book_id: str, path: Any, fmt: str | None
+    ) -> None:
+        """Background ingestion pipeline with monotone job tracking (US3).
+
+        Adapted from ``autreprojet/OpenTutor-main``
+        (``services/ingestion/pipeline.py`` phase order + catch-all terminal
+        failure, ``routers/upload_processing.py`` persistent background
+        embed) onto the existing extract → chunk → embed → store flow, so
+        book rows, chunk counts and embeddings stay byte-identical to the
+        synchronous pipeline. Embedding failure degrades to BM25 (job still
+        ``completed``); any other exception fails the job from any state.
+        """
+        try:
+            self.store.mark_indexing(book_id)
+            if self._is_cancelled(book_id):
+                self._cancel_ingestion_job(job_id, book_id)
+                return
+            self.store.update_ingestion_job(
+                job_id, status="extracting", progress_percent=20, book_id=book_id
+            )
+            segments = await self._ingest_extract(path, fmt)
+            if self._is_cancelled(book_id):
+                self._cancel_ingestion_job(job_id, book_id)
+                return
+            self.store.update_ingestion_job(job_id, status="classifying", progress_percent=45)
+            await self._ingest_classify(subject_id, segments)
+            if self._is_cancelled(book_id):
+                self._cancel_ingestion_job(job_id, book_id)
+                return
+            self.store.update_ingestion_job(job_id, status="dispatching", progress_percent=70)
+            chunk_dicts = self._ingest_chunk(segments)
+            if not chunk_dicts:
+                self.store.mark_indexed(book_id, 0)
+                self.store.update_ingestion_job(
+                    job_id,
+                    status="completed",
+                    progress_percent=100,
+                    nodes_created=0,
+                    embedding_status="skipped",
+                )
+                return
+            chunk_texts = [c["text"] for c in chunk_dicts]
+            batch_size = getattr(self.config, "tutor_embed_batch_size", 16)
+            max_concurrency = getattr(self.config, "tutor_max_parallel_embed", 1)
+            self.store.update_index_progress(book_id, 0, len(chunk_texts))
+            if self._ingestion_skip_mode():
+                vectors: list[list[float]] = [[] for _ in chunk_texts]
+                emb_status = "skipped"
+            else:
+                self.store.update_ingestion_job(
+                    job_id, status="embedding", progress_percent=90,
+                    embedding_status="running",
+                )
+                emb_status = "running"
+                try:
+                    if self.embedding_provider is not None:
+                        # Explicitly configured backend (e.g. GGUF): failure
+                        # propagates — surfaced as [gguf-provider] on the job
+                        # + book rows, NO silent fallback (Phase 5a contract).
+                        vectors = await self._embed_with_provider(
+                            chunk_texts,
+                            batch_size=batch_size,
+                            max_concurrency=max_concurrency,
+                        )
+                    else:
+                        try:
+                            vectors = await embed_texts(
+                                self.client,
+                                self.model,
+                                chunk_texts,
+                                self.store,
+                                batch_size=batch_size,
+                                max_concurrency=max_concurrency,
+                            )
+                        except Exception as exc:  # noqa: BLE001 — BM25 fallback, job continues
+                            logger.warning(
+                                "ingestion embedding failed for job %s (BM25 fallback): %s",
+                                job_id,
+                                exc,
+                            )
+                            vectors = [[] for _ in chunk_texts]
+                            emb_status = "failed"
+                except (GGUFEmbeddingError, DoclingOCRError, LlamaServerError):
+                    raise
+                except Exception as exc:  # noqa: BLE001 — explicit provider, non-GGUF error
+                    raise RuntimeError(str(exc) or type(exc).__name__) from exc
+                if emb_status != "failed":
+                    emb_status = "done" if any(v for v in vectors) else "skipped"
+            if self._is_cancelled(book_id):
+                self._cancel_ingestion_job(job_id, book_id)
+                return
+            self.store.add_chunks(subject_id, book_id, chunk_dicts, vectors, self.model)
+            self.store.update_ingestion_job(
+                job_id,
+                embedding_status=emb_status,
+                nodes_created=len(chunk_dicts),
+                book_id=book_id,
+            )
+            self.store.mark_indexed(book_id, len(chunk_dicts))
+            # A subject index is cached after the first question. Invalidate it
+            # so newly indexed books/chunks become searchable immediately.
+            self.retriever.invalidate(subject_id)
+            # Auto-classify domain best-effort after successful indexing.
+            # Only when the subject is still 'generique' and has chunks; never
+            # makes indexing fail (log warning on error).
+            try:
+                if self.store.get_subject_domain(subject_id) == "generique":
+                    if self.store.get_subject_chunks(subject_id):
+                        await self.classify_subject(subject_id)
+            except Exception as exc:  # noqa: BLE001 — best-effort, never fail indexing
+                logger.warning(
+                    "auto-classify domain failed for subject %s: %s",
+                    subject_id,
+                    exc,
+                )
+            self.store.update_ingestion_job(job_id, status="completed", progress_percent=100)
+        except (
+            GGUFEmbeddingError,
+            DoclingOCRError,
+            LlamaServerError,
+        ) as e:
+            # Explicitly configured GGUF backend failed: surface the cause on
+            # the job + book rows. NO silent fallback to Ollama (Phase 5a contract).
+            self._fail_ingestion_job(
+                job_id, book_id, f"[gguf-provider] {type(e).__name__}: {e}"
+            )
+        except Exception as e:  # fail-closed: failed from any state + errors.log
+            self._fail_ingestion_job(job_id, book_id, str(e))
+        finally:
+            self._cancel_flags.pop(book_id, None)
+
     def import_and_index(
         self,
-        subject_name: str,
-        path: Any,
+        subject_name: str | None = None,
+        path: Any = None,
         fmt: str | None = None,
         background: bool = True,
     ) -> Book:
         """Import a document into ``subject_name`` and index it.
 
+        Compatibility contract preserved (existing callers): returns the
+        ``Book`` (indexed when ``background=False``). Since Feature 010 P1-A
+        every import is ALSO tracked as an ingestion job — poll it via
+        :meth:`get_ingestion_job` / :meth:`list_ingestion_jobs`, or use
+        :meth:`import_job` to get the ``job_id`` directly.
+
         Resolves/creates the subject, registers the book (fingerprint no-op
-        when already indexed), then extracts → chunks → embeds → stores →
+        when already indexed: mirrored as an immediate ``completed`` job with
+        ``nodes_created=0``), then extracts → chunks → embeds → stores →
         marks indexed. On error the book row is set to ``error`` with the
-        message. When ``background`` is True the pipeline runs in a daemon
-        thread and returns immediately; otherwise it runs synchronously.
+        message and the job to ``failed`` (+ ``errors.log``). When
+        ``background`` is True the pipeline runs in the background and
+        returns immediately; otherwise it runs synchronously.
+
+        ``subject_name`` may be empty/whitespace/None — inferred from ``path``.
         """
-        subject_id = self._resolve_subject(subject_name)
-        book = self.store.import_document(subject_id, path)
-        # dedup: an already-indexed book is a no-op (zero new embeddings)
-        if self.store.get_book_status(book.id) == "indexed":
+        subject_id, book, job, duplicate = self._prepare_ingestion_job(
+            subject_name, path, fmt
+        )
+        if duplicate is not None:
+            # dedup: an already-indexed book is a no-op (zero new embeddings)
             return book
 
         if background:
-            ev = threading.Event()
-            self._cancel_flags[book.id] = ev
-            t = threading.Thread(
-                target=self._run_index_thread,
-                args=(subject_id, book, path, fmt),
-                daemon=True,
-            )
-            t.start()
-            self._threads[book.id] = t
+            self._launch_ingestion(job["id"], subject_id, book.id, path, fmt)
             return book
 
         try:
-            asyncio.run(self._run_index(subject_id, book, path, fmt))
+            asyncio.run(self._run_ingestion_job(job["id"], subject_id, book.id, path, fmt))
         finally:
             # asyncio.run's loop is gone: release the loop-bound client so a
             # later run (different loop) rebuilds a fresh httpx client.
@@ -2041,6 +2869,19 @@ class TutorService:
             # A subject index is cached after the first question. Invalidate it
             # so newly indexed books/chunks become searchable immediately.
             self.retriever.invalidate(subject_id)
+            # Auto-classify domain best-effort after successful indexing.
+            # Only when the subject is still 'generique' and has chunks; never
+            # makes indexing fail (log warning on error).
+            try:
+                if self.store.get_subject_domain(subject_id) == "generique":
+                    if self.store.get_subject_chunks(subject_id):
+                        await self.classify_subject(subject_id)
+            except Exception as exc:  # noqa: BLE001 — best-effort, never fail indexing
+                logger.warning(
+                    "auto-classify domain failed for subject %s: %s",
+                    subject_id,
+                    exc,
+                )
         except (
             GGUFEmbeddingError,
             DoclingOCRError,
@@ -3024,6 +3865,219 @@ class TutorService:
             "strengths": strengths,
             "weaknesses": weaknesses,
             "suggested_path": suggested,
+        }
+
+    # ------------------------------------------------------------------
+    # 010 P2-Adaptatif (T037) : mini-diagnostic 5Q → profil
+    #
+    # Version resserrée du diagnostic 10Q ci-dessus (inspirée de
+    # onboarding.py + cat_pretest.py source : 5 questions mini, estimation
+    # de niveau, concepts faibles). Chaque mauvaise réponse est
+    # diagnostiquée (5 catégories offline, tranche B) et enregistrée en
+    # error_history avec knowledge_points + diagnosis. Banque injectable
+    # (tests offline) sinon génération LLM existante. Appelants du
+    # diagnostic 10Q inchangés.
+    # ------------------------------------------------------------------
+
+    _MINI_DIAG_TOTAL_QUESTIONS = 5
+
+    @staticmethod
+    def _mini_diag_level(score: int, total: int) -> str:
+        if total > 0 and score >= total:
+            return "expert"
+        if score >= 4:
+            return "advanced"
+        if score >= 2:
+            return "intermediate"
+        return "beginner"
+
+    def start_mini_diagnostic(
+        self, subject_id: str, questions: list[dict[str, Any]] | None = None
+    ) -> dict[str, Any]:
+        """Ouvre une session mini-diagnostic (5 questions max).
+
+        ``questions`` (banque injectée, tests offline) : ``[{concept,
+        question, options, correct}]``. Sinon les questions sont générées
+        via le pipeline LLM existant (un concept = une question).
+        """
+        subject = self.store.require_subject(subject_id)
+        concepts = self.store.list_concepts(subject_id)
+        if not concepts and questions is None:
+            raise KeyError(f"Aucun concept pour la matière : {subject_id}")
+
+        bank: list[dict[str, Any]] = []
+        if questions is not None:
+            for q in questions[: self._MINI_DIAG_TOTAL_QUESTIONS]:
+                bank.append(
+                    {
+                        "concept": str(q.get("concept", "")),
+                        "question": str(q.get("question", "")),
+                        "options": dict(q.get("options", {}) or {}),
+                        "correct": str(q.get("correct", "A")).strip().upper(),
+                    }
+                )
+        else:
+            level = self.config.tutor_level or "intermediate"
+            for concept in concepts[: self._MINI_DIAG_TOTAL_QUESTIONS]:
+                generated = self._generate_diagnostic_question(
+                    concept.name, level
+                )
+                bank.append(
+                    {
+                        "concept": concept.name,
+                        "question": str(generated.get("question", "")),
+                        "options": dict(generated.get("options", {}) or {}),
+                        "correct": str(generated.get("correct", "A")).strip().upper(),
+                    }
+                )
+        if not bank:
+            raise KeyError(f"Aucune question pour la matière : {subject_id}")
+
+        session = self.store.create_tutoring_session(
+            subject_id, title="mini_diagnostic"
+        )
+        first = bank[0]
+        state: dict[str, Any] = {
+            "mode": "mini_diagnostic",
+            "subject_id": subject_id,
+            "questions": bank,
+            "total_questions": len(bank),
+            "current_index": 0,
+            "correct_count": 0,
+            "answers_sent": [],
+        }
+        self.store._conn.execute(
+            "UPDATE tutoring_sessions SET transcript_path = ? WHERE id = ?",
+            (json.dumps(state, ensure_ascii=False), session.id),
+        )
+        self.store._conn.commit()
+        return {
+            "session_id": session.id,
+            "question": first["question"],
+            "options": first["options"],
+            "question_num": 1,
+            "total_questions": len(bank),
+        }
+
+    def answer_mini_diagnostic(self, session_id: str, answer: str) -> dict[str, Any]:
+        """Répond à la question courante ; question suivante ou profil final.
+
+        Le profil final contient ``score``/``total``, ``level``
+        (beginner/intermediate/advanced/expert), ``weak_concepts`` et
+        ``per_category`` (comptage par catégorie d'erreur).
+        """
+        session = self.store.get_tutoring_session(session_id)
+        if session is None:
+            raise KeyError(f"Session introuvable : {session_id}")
+        state_json = session.transcript_path or "{}"
+        state: dict[str, Any] = (
+            _extract_json(state_json) if isinstance(state_json, str) else {}
+        )
+        if not state or state.get("mode") != "mini_diagnostic":
+            raise ValueError("La session n'est pas un mini-diagnostic.")
+
+        idx = int(state.get("current_index", 0))
+        bank = state.get("questions", [])
+        total = int(state.get("total_questions", len(bank)))
+        if idx >= len(bank):
+            raise ValueError("Mini-diagnostic déjà terminé.")
+        current = bank[idx]
+        is_correct = str(answer or "").strip().upper() == str(
+            current.get("correct", "A")
+        ).strip().upper()
+        if is_correct:
+            state["correct_count"] = int(state.get("correct_count", 0)) + 1
+        else:
+            # Diagnostic offline + enregistrement (tranche B).
+            concept = str(current.get("concept", ""))
+            diag = diagnose_error(
+                str(current.get("question", "")),
+                str(current.get("correct", "")),
+                str(answer or ""),
+                concept or "unknown",
+            )
+            try:
+                self.store.record_error(
+                    subject_id=state.get("subject_id", session.subject_id),
+                    concept_name=concept or "unknown",
+                    question_text=str(current.get("question", "")),
+                    given_answer=str(answer or ""),
+                    correct_answer=str(current.get("correct", "")),
+                    error_type="incorrect",
+                    error_category=diag["category"],
+                    knowledge_points=[concept] if concept else [],
+                    diagnosis=_CATEGORY_TO_DIAGNOSIS[diag["category"]],
+                )
+            except Exception:  # noqa: BLE001 - le diagnostic prime sur l'historique
+                logger.warning("record_error mini-diag ignoré", exc_info=True)
+        state.setdefault("answers_sent", []).append(
+            {
+                "concept": current.get("concept", ""),
+                "answer": answer,
+                "correct": current.get("correct", "A"),
+                "is_correct": is_correct,
+            }
+        )
+        state["current_index"] = idx + 1
+        self.store._conn.execute(
+            "UPDATE tutoring_sessions SET transcript_path = ?, last_active_at = ?"
+            " WHERE id = ?",
+            (json.dumps(state, ensure_ascii=False), _now_iso(), session_id),
+        )
+        self.store._conn.commit()
+
+        if idx + 1 < total:
+            nxt = bank[idx + 1]
+            return {
+                "session_id": session_id,
+                "done": False,
+                "correct": is_correct,
+                "question": nxt["question"],
+                "options": nxt["options"],
+                "question_num": idx + 2,
+                "total_questions": total,
+            }
+        return self.get_mini_diagnostic_result(session_id)
+
+    def get_mini_diagnostic_result(self, session_id: str) -> dict[str, Any]:
+        """Profil final du mini-diagnostic (score, niveau, faiblesses)."""
+        session = self.store.get_tutoring_session(session_id)
+        if session is None:
+            raise KeyError(f"Session introuvable : {session_id}")
+        state_json = session.transcript_path or "{}"
+        state: dict[str, Any] = (
+            _extract_json(state_json) if isinstance(state_json, str) else {}
+        )
+        if not state or state.get("mode") != "mini_diagnostic":
+            raise ValueError("La session n'est pas un mini-diagnostic.")
+        total = int(state.get("total_questions", 0))
+        score = int(state.get("correct_count", 0))
+        answers_sent = state.get("answers_sent", []) or []
+        weak_concepts = [
+            str(a.get("concept", ""))
+            for a in answers_sent
+            if not a.get("is_correct") and a.get("concept")
+        ]
+        per_category: dict[str, int] = {}
+        try:
+            rows = self.store._conn.execute(
+                "SELECT error_category, COUNT(*) AS c FROM error_history"
+                " WHERE subject_id = ? GROUP BY error_category",
+                (state.get("subject_id", session.subject_id),),
+            ).fetchall()
+            per_category = {str(r["error_category"]): int(r["c"]) for r in rows}
+        except Exception:  # noqa: BLE001 - profil calculable sans l'historique
+            per_category = {}
+        if not per_category and weak_concepts:
+            per_category = {"conceptual": len(weak_concepts)}
+        return {
+            "session_id": session_id,
+            "done": True,
+            "score": score,
+            "total": total,
+            "level": self._mini_diag_level(score, total),
+            "weak_concepts": weak_concepts,
+            "per_category": per_category,
         }
 
     # ------------------------------------------------------------------

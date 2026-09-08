@@ -745,3 +745,213 @@ def validate_citations(
 
     return valid, invalid
 
+
+# ------------------------------------------------------------------
+# Pleias citation validation — pure stdlib, offline
+# ------------------------------------------------------------------
+
+# Pleias RAG uses structured citations:
+#   <ref name="<|source_id|>N">cited_text</ref>
+#   <ref name="<|source_id_start|>N<|source_id_end|>">cited_text</ref>
+# plus bare token variant: <|source_id|>N
+_PLEIAS_REF_RE = re.compile(
+    r'<ref name="(?:<\|source_id\|>|<\|source_id_start\|>)(\d+)(?:<\|source_id_end\|>)?">([^<]+)</ref>'
+)
+_PLEIAS_BARE_RE = re.compile(r'<\|source_id\|>(\d+)')
+
+
+def _pleias_source_text(source: Any) -> str:
+    """Extract raw text from a source entry (str | dict | object with .text)."""
+    if isinstance(source, str):
+        return source
+    if isinstance(source, dict):
+        # Common keys: text, content
+        for key in ("text", "content", "value"):
+            val = source.get(key)
+            if isinstance(val, str):
+                return val
+            if val is not None:
+                # non-string value, coerce
+                try:
+                    s = str(val)
+                    if s:
+                        return s
+                except Exception:
+                    pass
+        # fallback: stringify dict
+        try:
+            return str(source)
+        except Exception:
+            return ""
+    if hasattr(source, "text"):
+        val = getattr(source, "text")
+        if isinstance(val, str):
+            return val
+        if val is not None:
+            try:
+                return str(val)
+            except Exception:
+                return ""
+        return ""
+    try:
+        return str(source)
+    except Exception:
+        return ""
+
+
+def validate_pleias_citations(text: str, sources: list) -> dict:  # type: ignore[type-arg]
+    """Validate Pleias RAG citations in *text* against *sources*.
+
+    Supports two citation forms emitted by Pleias models:
+
+    * ``<ref name="<|source_id|>N">cited_text</ref>``
+    * ``<ref name="<|source_id_start|>N<|source_id_end|>">cited_text</ref>``
+    * bare token ``<|source_id|>N`` (no cited text, only id check)
+
+    Checks:
+
+    * ``source_id`` is between 1 and ``len(sources)`` (1-indexed).
+    * when ``cited_text`` is present: length >= 8 chars, otherwise a warning.
+    * when length >= 8: ``cited_text`` must appear as a case-insensitive
+      substring of ``sources[source_id - 1]`` (extracted via
+      ``_pleias_source_text``), otherwise a warning.
+
+    Returns ``{"valid": bool, "warnings": list[str], "valid_citations": list[dict]}``
+    where each ``valid_citations`` entry is
+    ``{"citation_number": int, "source_id": int, "cited_text": str}``.
+
+    Pure stdlib, no I/O, no Retriever class mutation (research D11).
+    """
+    if not text or not isinstance(text, str):
+        return {"valid": True, "warnings": [], "valid_citations": []}
+    if sources is None:
+        sources = []
+    n = len(sources)
+    warnings: list[str] = []
+    valid_citations: list[dict[str, Any]] = []
+
+    # Collect <ref> matches with positions for ordering / span dedup
+    ref_spans: list[tuple[int, int]] = []
+    ref_entries: list[tuple[int, int, str]] = []  # (pos, sid, cited_text)
+    for m in _PLEIAS_REF_RE.finditer(text):
+        try:
+            sid = int(m.group(1))
+        except (ValueError, IndexError):
+            continue
+        cited = m.group(2) if m.lastindex and m.lastindex >= 2 else ""
+        # Keep raw cited text (without surrounding whitespace trimming for storage,
+        # but warnings use stripped version)
+        ref_entries.append((m.start(), sid, cited))
+        ref_spans.append((m.start(), m.end()))
+
+    # Collect bare token matches that are NOT inside a <ref> span
+    bare_entries: list[tuple[int, int, str]] = []
+    for m in _PLEIAS_BARE_RE.finditer(text):
+        pos = m.start()
+        inside = any(s <= pos < e for s, e in ref_spans)
+        if inside:
+            continue
+        try:
+            sid = int(m.group(1))
+        except (ValueError, IndexError):
+            continue
+        bare_entries.append((pos, sid, ""))
+
+    # Merge in textual order
+    all_entries = sorted(ref_entries + bare_entries, key=lambda x: x[0])
+
+    citation_number = 0
+    for _, sid, cited_text in all_entries:
+        citation_number += 1
+        # 1. source_id range
+        if sid < 1 or sid > n:
+            warnings.append(
+                f"citation {citation_number}: source_id {sid} out of range (1-{n})"
+            )
+            continue
+        # 2. bare token without cited_text: only range check, considered valid
+        if not cited_text:
+            valid_citations.append(
+                {"citation_number": citation_number, "source_id": sid, "cited_text": cited_text}
+            )
+            continue
+        # Normalise cited_text for length / substring checks
+        stripped = cited_text.strip()
+        # 3. length check (<8 chars -> warning)
+        if len(stripped) < 8:
+            warnings.append(
+                f"citation {citation_number}: cited_text too short (<8 chars): '{stripped}'"
+            )
+            continue
+        # 4. substring check (case-insensitive)
+        src_text = _pleias_source_text(sources[sid - 1])
+        if stripped.lower() not in src_text.lower():
+            warnings.append(
+                f"citation {citation_number}: cited_text not found in source {sid}"
+            )
+            continue
+        # Passed all checks
+        valid_citations.append(
+            {"citation_number": citation_number, "source_id": sid, "cited_text": cited_text}
+        )
+
+    valid = len(warnings) == 0
+    # Edge: no citations found -> valid True (nothing to invalidate)
+    return {"valid": valid, "warnings": warnings, "valid_citations": valid_citations}
+
+
+# ---------------------------------------------------------------------------
+# Garde-fou citations docs (010 P2-Pédagogie, T046)
+#
+# Adapté de docs_refs.lookup (python-tutor) : le Retriever ne laisse passer
+# que des liens curés/allowlistés — le LLM ne doit jamais inventer d'URL.
+# Pur stdlib, offline (lookup sans vérification réseau).
+# ---------------------------------------------------------------------------
+
+_URL_RE = re.compile(r"https?://[^\s) '\"<>]+")
+
+
+def validate_response_links(
+    response_text: str, allowed: list[str] | None = None
+) -> tuple[list[str], list[str]]:
+    """Trie les URLs d'une réponse en ``(autorisées, bloquées)``.
+
+    Garde-fou anti-hallucination de liens : toute URL hors allowlist est
+    signalée bloquée (trailing ``. , ; :`` nettoyé).
+    """
+    from .docs_refs import is_allowlisted
+
+    if not response_text:
+        return [], []
+    found: list[str] = []
+    for raw in _URL_RE.findall(response_text):
+        url = raw.rstrip(".,;:!?")
+        if url and url not in found:
+            found.append(url)
+    return (
+        [u for u in found if is_allowlisted(u, allowed)],
+        [u for u in found if not is_allowlisted(u, allowed)],
+    )
+
+
+def lookup_docs_for_text(
+    text: str, concepts: list[str] | None = None, max_refs: int = 4
+) -> dict[str, Any]:
+    """Références curées pour un texte + concepts (offline, ≤ max_refs).
+
+    Retourne ``{"refs": [{"label", "url", "source"}], "online": False,
+    "online_ok": False, "note": None}`` — sérialisable pour les frames.
+    """
+    from .docs_refs import lookup
+
+    result = lookup(question=text, concepts=concepts, max_refs=max_refs)
+    return {
+        "refs": [
+            {"label": r.label, "url": r.url, "source": r.source}
+            for r in result.refs
+        ],
+        "online": result.online,
+        "online_ok": result.online_ok,
+        "note": result.note,
+    }
+

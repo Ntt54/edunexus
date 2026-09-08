@@ -834,6 +834,15 @@ class LibraryStore:
         )
         cur.commit()
 
+        # Feature 010 P1-A (US3) : table ingestion_jobs + backfill idempotent.
+        self._migrate_ingestion_jobs()
+
+        # Feature 010 P2-Adaptatif (US5 tranche B) : colonnes WrongAnswer.
+        self._migrate_p2_adaptive()
+
+        # Feature 010 P2-Pédagogie (US7) : table feedback HITL.
+        self._migrate_p2_pedagogy()
+
         # Feature 009 — leçon discussion centrée
         # lesson_* tables for existing DBs ( _create_schema already handles fresh DBs )
         cur.executescript(
@@ -968,15 +977,33 @@ class LibraryStore:
         correct_answer: str,
         source_refs: list[str] | None = None,
         error_type: str = "unknown",
+        error_category: str = "conceptual",
+        knowledge_points: list[str] | None = None,
+        diagnosis: str = "unknown",
     ) -> None:
-        """Persist a detailed error record for later analysis."""
+        """Persist a detailed error record for later analysis.
+
+        P2 extensions (backwards-compatible kwargs) : ``error_category``
+        (5 catégories), ``knowledge_points`` (concepts liés, JSON) et
+        ``diagnosis`` (pair OpenTutor). ``diagnosis`` inconnu ⇒ ValueError.
+        """
         from .models import _now_iso, _uid
+
+        if diagnosis not in (
+            "unknown",
+            "fundamental_gap",
+            "trap_vulnerability",
+            "carelessness",
+            "mastered",
+        ):
+            raise ValueError(f"Invalid diagnosis {diagnosis!r}")
 
         self._conn.execute(
             """INSERT INTO error_history
                (id, subject_id, concept_name, question_text, given_answer,
-                correct_answer, source_refs, error_type, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                correct_answer, source_refs, error_type, error_category,
+                knowledge_points, diagnosis, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 _uid(),
                 subject_id,
@@ -986,6 +1013,9 @@ class LibraryStore:
                 correct_answer,
                 json.dumps(source_refs or [], ensure_ascii=False),
                 error_type,
+                error_category,
+                json.dumps(knowledge_points or [], ensure_ascii=False),
+                diagnosis,
                 _now_iso(),
             ),
         )
@@ -1308,7 +1338,102 @@ class LibraryStore:
             )
             params: list[Any] = [subject_id, *ids]
             rows = self._conn.execute(sql, params).fetchall()
-            return [dict(r) for r in rows]
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Feedback HITL (Feature 010 P2-Pédagogie, US7 — T048)
+    #
+    # Adapté de open-tutor-ai-CE (self_regulation.py : FeedbackForm
+    # {rating, comment} + garde owner-ou-admin) : table ``feedback``
+    # (rating 1-5 + commentaire requis, owner_id), migration idempotente.
+    # ------------------------------------------------------------------
+
+    def _migrate_p2_pedagogy(self) -> None:
+        """Crée ``feedback`` si absente (idempotent, double-appel sûr)."""
+        cur = self._conn
+        cur.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS feedback (
+                id TEXT PRIMARY KEY,
+                target_type TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                owner_id TEXT NOT NULL DEFAULT '',
+                rating INTEGER NOT NULL DEFAULT 0,
+                comment TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_feedback_target
+                ON feedback(target_type, target_id);
+            """
+        )
+        cur.commit()
+
+    def submit_feedback(
+        self,
+        target_type: str,
+        target_id: str,
+        owner_id: str,
+        rating: int,
+        comment: str,
+    ) -> dict[str, Any]:
+        """Insère un feedback et retourne son snapshot."""
+        from .models import _now_iso, _uid
+
+        now = _now_iso()
+        fid = _uid()
+        self._conn.execute(
+            "INSERT INTO feedback (id, target_type, target_id, owner_id,"
+            " rating, comment, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (fid, target_type, target_id, owner_id, rating, comment, now, now),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT * FROM feedback WHERE id = ?", (fid,)
+        ).fetchone()
+        return dict(row)
+
+    def get_feedback(self, feedback_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM feedback WHERE id = ?", (feedback_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_feedback(
+        self, target_type: str, target_id: str, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM feedback WHERE target_type = ? AND target_id = ?"
+            " ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            (target_type, target_id, max(1, min(500, int(limit)))),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_feedback(
+        self, feedback_id: str, rating: int | None = None, comment: str | None = None
+    ) -> dict[str, Any] | None:
+        from .models import _now_iso
+
+        row = self.get_feedback(feedback_id)
+        if row is None:
+            return None
+        new_rating = row["rating"] if rating is None else rating
+        new_comment = row["comment"] if comment is None else comment
+        self._conn.execute(
+            "UPDATE feedback SET rating = ?, comment = ?, updated_at = ?"
+            " WHERE id = ?",
+            (new_rating, new_comment, _now_iso(), feedback_id),
+        )
+        self._conn.commit()
+        return self.get_feedback(feedback_id)
+
+    def delete_feedback(self, feedback_id: str) -> bool:
+        cur = self._conn.execute(
+            "DELETE FROM feedback WHERE id = ?", (feedback_id,)
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
         rows = self._conn.execute(
             "SELECT id, text, chapter, section, page, book_id "
             "FROM chunks WHERE subject_id = ? ORDER BY ordinal",
@@ -1335,7 +1460,7 @@ class LibraryStore:
         if not p.exists():
             raise FileNotFoundError(f"No such file: {p}")
         suffix = p.suffix.lower()
-        if suffix not in (".txt", ".md", ".pdf", ".epub"):
+        if suffix not in (".txt", ".md", ".pdf", ".epub", ".docx", ".pptx"):
             raise ValueError(f"Unsupported format: {suffix}")
         fmt = suffix.lstrip(".")
         import hashlib
@@ -1442,6 +1567,283 @@ class LibraryStore:
             (book_id,),
         )
         self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Ingestion jobs (Feature 010 P1-A, US3 — E-006)
+    #
+    # Adapted from ``autreprojet/OpenTutor-main`` (``models/ingestion.py``
+    # table jobs, ``services/ingestion/pipeline.py`` ``_PHASE_LABELS`` +
+    # forward-only transitions, ``routers/upload_processing.py`` persistent
+    # running → completed|skipped|failed) onto SQLite + stdlib sha256.
+    # ------------------------------------------------------------------
+
+    # Forward-only pipeline order; ``failed`` is reachable from any state.
+    INGESTION_STATUS_ORDER = (
+        "uploaded",
+        "extracting",
+        "classifying",
+        "dispatching",
+        "embedding",
+        "completed",
+    )
+    INGESTION_TERMINAL = ("completed", "failed")
+
+    # French display labels (phase_label is UI-facing).
+    INGESTION_PHASE_LABELS = {
+        "uploaded": "Import reçu",
+        "extracting": "Extraction du contenu",
+        "classifying": "Classification du document",
+        "dispatching": "Construction des chunks",
+        "embedding": "Construction de l'index sémantique",
+        "completed": "Prêt",
+        "failed": "Échec",
+    }
+
+    INGESTION_JOB_COLUMNS = (
+        ("id", "TEXT PRIMARY KEY"),
+        ("source_type", "TEXT NOT NULL"),
+        ("original_filename", "TEXT"),
+        ("url", "TEXT"),
+        ("content_hash", "TEXT"),
+        ("status", "TEXT NOT NULL DEFAULT 'uploaded'"),
+        ("progress_percent", "INTEGER NOT NULL DEFAULT 0"),
+        ("phase_label", "TEXT"),
+        ("embedding_status", "TEXT NOT NULL DEFAULT 'pending'"),
+        ("nodes_created", "INTEGER NOT NULL DEFAULT 0"),
+        ("error_message", "TEXT"),
+        ("book_id", "TEXT"),
+        ("created_at", "TEXT NOT NULL"),
+        ("updated_at", "TEXT NOT NULL"),
+    )
+
+    _INGESTION_SOURCE_TYPES = ("file", "url", "canvas")
+    _INGESTION_EMBEDDING_STATUSES = ("pending", "running", "done", "skipped", "failed")
+
+    def _migrate_ingestion_jobs(self) -> None:
+        """Create ``ingestion_jobs`` (or backfill missing columns), idempotent.
+
+        Safe to call on every startup and twice in a row: existing tables
+        keep their rows, only absent columns are added.
+        """
+        cur = self._conn
+        existing = {r["name"] for r in cur.execute("PRAGMA table_info(ingestion_jobs)")}
+        if not existing:
+            cols_ddl = ",\n".join(f"{name} {ddl}" for name, ddl in self.INGESTION_JOB_COLUMNS)
+            cur.executescript(
+                f"""
+                CREATE TABLE IF NOT EXISTS ingestion_jobs (
+                    {cols_ddl}
+                );
+                CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_hash ON ingestion_jobs(content_hash);
+                CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_status ON ingestion_jobs(status);
+                """
+            )
+            cur.commit()
+            return
+        wanted = {name: ddl for name, ddl in self.INGESTION_JOB_COLUMNS}
+        for name in wanted:
+            if name not in existing:
+                cur.execute(f"ALTER TABLE ingestion_jobs ADD COLUMN {name} {wanted[name]}")
+                cur.commit()
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_hash ON ingestion_jobs(content_hash)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_status ON ingestion_jobs(status)"
+        )
+        cur.commit()
+
+    # Feature 010 P2-Adaptatif (US5 tranche B) : colonnes WrongAnswer sur
+    # error_history (error_category 5 cats, knowledge_points JSON, diagnosis
+    # enum fundamental_gap|trap_vulnerability|carelessness|mastered).
+    P2_ERROR_HISTORY_COLUMNS = (
+        ("error_category", "TEXT NOT NULL DEFAULT 'conceptual'"),
+        ("knowledge_points", "TEXT NOT NULL DEFAULT '[]'"),
+        ("diagnosis", "TEXT NOT NULL DEFAULT 'unknown'"),
+    )
+
+    def _migrate_p2_adaptive(self) -> None:
+        """Backfill P2 (idempotent, PRAGMA table_info, double-appel sûr)."""
+        cur = self._conn
+        existing = {r["name"] for r in cur.execute("PRAGMA table_info(error_history)")}
+        if existing:
+            wanted = dict(self.P2_ERROR_HISTORY_COLUMNS)
+            for name in wanted:
+                if name not in existing:
+                    cur.execute(
+                        f"ALTER TABLE error_history ADD COLUMN {name} {wanted[name]}"
+                    )
+                    cur.commit()
+
+    @staticmethod
+    def _job_dict(row: Any) -> dict[str, Any]:
+        return dict(row)
+
+    def create_ingestion_job(
+        self,
+        *,
+        source_type: str,
+        original_filename: str | None = None,
+        url: str | None = None,
+        content_hash: str | None = None,
+        book_id: str | None = None,
+        status: str = "uploaded",
+        progress_percent: int = 0,
+        embedding_status: str = "pending",
+        nodes_created: int = 0,
+        error_message: str | None = None,
+    ) -> dict[str, Any]:
+        """Insert a job row (status ``uploaded``) and return its snapshot."""
+        from .models import _now_iso, _uid
+
+        if source_type not in self._INGESTION_SOURCE_TYPES:
+            raise ValueError(f"Invalid source_type {source_type!r}")
+        if status not in (*self.INGESTION_STATUS_ORDER, "failed"):
+            raise ValueError(f"Invalid status {status!r}")
+        if embedding_status not in self._INGESTION_EMBEDDING_STATUSES:
+            raise ValueError(f"Invalid embedding_status {embedding_status!r}")
+        now = _now_iso()
+        job_id = _uid()
+        phase_label = self.INGESTION_PHASE_LABELS.get(status, status)
+        self._conn.execute(
+            "INSERT INTO ingestion_jobs (id, source_type, original_filename, url, "
+            "content_hash, status, progress_percent, phase_label, embedding_status, "
+            "nodes_created, error_message, book_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                job_id,
+                source_type,
+                original_filename,
+                url,
+                content_hash,
+                status,
+                max(0, min(100, int(progress_percent))),
+                phase_label,
+                embedding_status,
+                max(0, int(nodes_created)),
+                error_message,
+                book_id,
+                now,
+                now,
+            ),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT * FROM ingestion_jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        return self._job_dict(row)
+
+    def update_ingestion_job(
+        self,
+        job_id: str,
+        *,
+        status: str | None = None,
+        progress_percent: int | None = None,
+        phase_label: str | None = None,
+        embedding_status: str | None = None,
+        nodes_created: int | None = None,
+        error_message: str | None = None,
+        book_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Update a job row, enforcing forward-only transitions (E-006).
+
+        Status may only move forward in ``INGESTION_STATUS_ORDER`` (or to
+        ``failed`` from any state); terminal jobs (``completed``/``failed``)
+        only accept ``failed`` updates. Progress never decreases. Returns the
+        fresh snapshot, or ``None`` for an unknown id.
+        """
+        from .models import _now_iso
+
+        row = self._conn.execute(
+            "SELECT * FROM ingestion_jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        current = self._job_dict(row)
+        new_status = current["status"]
+        if status is not None and status != current["status"]:
+            if status not in (*self.INGESTION_STATUS_ORDER, "failed"):
+                raise ValueError(f"Invalid status {status!r}")
+            if current["status"] in self.INGESTION_TERMINAL and status != "failed":
+                # Terminal: refuse de réouvrir un job terminé.
+                status = None
+            elif status == "failed" or (
+                self.INGESTION_STATUS_ORDER.index(status)
+                > self.INGESTION_STATUS_ORDER.index(current["status"])
+            ):
+                new_status = status
+            # Backward transition: silently keep the current status.
+        new_progress = current["progress_percent"]
+        if progress_percent is not None:
+            new_progress = max(
+                int(current["progress_percent"]),
+                max(0, min(100, int(progress_percent))),
+            )
+        new_label = phase_label
+        if new_label is None and new_status != current["status"]:
+            new_label = self.INGESTION_PHASE_LABELS.get(new_status, new_status)
+        if new_label is None:
+            new_label = current["phase_label"]
+        new_embedding = current["embedding_status"]
+        if embedding_status is not None:
+            if embedding_status not in self._INGESTION_EMBEDDING_STATUSES:
+                raise ValueError(f"Invalid embedding_status {embedding_status!r}")
+            new_embedding = embedding_status
+        new_nodes = current["nodes_created"]
+        if nodes_created is not None:
+            new_nodes = max(0, int(nodes_created))
+        new_error = current["error_message"] if error_message is None else error_message
+        if new_status != "failed" and new_status != current["status"]:
+            # Forward move out of a failure clears the stale message.
+            new_error = None
+        new_book = book_id if book_id is not None else current["book_id"]
+        self._conn.execute(
+            "UPDATE ingestion_jobs SET status = ?, progress_percent = ?, "
+            "phase_label = ?, embedding_status = ?, nodes_created = ?, "
+            "error_message = ?, book_id = ?, updated_at = ? WHERE id = ?",
+            (
+                new_status,
+                new_progress,
+                new_label,
+                new_embedding,
+                new_nodes,
+                new_error,
+                new_book,
+                _now_iso(),
+                job_id,
+            ),
+        )
+        self._conn.commit()
+        fresh = self._conn.execute(
+            "SELECT * FROM ingestion_jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        return self._job_dict(fresh)
+
+    def get_ingestion_job(self, job_id: str) -> dict[str, Any] | None:
+        """Return a serialisable job snapshot, or ``None`` when unknown."""
+        row = self._conn.execute(
+            "SELECT * FROM ingestion_jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        return self._job_dict(row) if row is not None else None
+
+    def list_ingestion_jobs(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Newest-first job snapshots (bounded for polling)."""
+        rows = self._conn.execute(
+            "SELECT * FROM ingestion_jobs ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            (max(1, min(500, int(limit))),),
+        ).fetchall()
+        return [self._job_dict(r) for r in rows]
+
+    def find_completed_job_by_hash(self, content_hash: str | None) -> dict[str, Any] | None:
+        """Newest completed job for an exact sha256 (dedup, Papra pattern)."""
+        if not content_hash:
+            return None
+        row = self._conn.execute(
+            "SELECT * FROM ingestion_jobs WHERE content_hash = ? AND status = 'completed' "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (content_hash,),
+        ).fetchone()
+        return self._job_dict(row) if row is not None else None
 
     # ------------------------------------------------------------------
     # Indexing (T014): chunks, embeddings cache, status transitions
@@ -1643,14 +2045,17 @@ class LibraryStore:
                     model,
                 ),
             )
-            # shared hash-keyed cache (idempotent across re-imports)
-            self._conn.execute(
-                "INSERT INTO embeddings (text_hash, model, dim, vector) "
-                "VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(text_hash, model) DO UPDATE SET "
-                "dim = excluded.dim, vector = excluded.vector",
-                (text_hash, model, len(vec), blob),
-            )
+            # shared hash-keyed cache (idempotent across re-imports).
+            # Empty vectors (P1-A skip/degraded embedding) leave no cache row:
+            # the chunk row keeps a NULL embedding (BM25 still works).
+            if blob is not None:
+                self._conn.execute(
+                    "INSERT INTO embeddings (text_hash, model, dim, vector) "
+                    "VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(text_hash, model) DO UPDATE SET "
+                    "dim = excluded.dim, vector = excluded.vector",
+                    (text_hash, model, len(vec), blob),
+                )
         self._conn.commit()
 
     def get_indexed_chunks(

@@ -391,3 +391,111 @@ async def classify_subject_chunks(
 
     store.set_subject_domain(subject_id, winner)
     return winner
+
+
+# ── Classification documentaire 0-LLM (010 P2-Adaptatif, T032) ──────────
+#
+# Adapté de ``autreprojet/OpenTutor-main``
+# (``services/ingestion/classification.py`` : FILENAME_PATTERNS 6 regex,
+# CONTENT_HEURISTICS sur 3000 car, MIME filetype→magic→mimetypes).
+# Ici : motifs FR+EN, MIME via stdlib ``mimetypes`` + magic-bytes maison
+# (``filetype``/``python-magic`` remplacés — zéro dépendance, NFR-003).
+# Tourne AVANT tout appel LLM : coût nul, 100 % offline.
+
+import mimetypes as _mimetypes
+
+# Catégories documentaires (source : classification.py OpenTutor).
+DOC_LECTURE_SLIDES = "lecture_slides"
+DOC_TEXTBOOK = "textbook"
+DOC_ASSIGNMENT = "assignment"
+DOC_EXAM = "exam_schedule"
+DOC_SYLLABUS = "syllabus"
+DOC_NOTES = "notes"
+DOC_OTHER = "other"
+
+DOC_FILENAME_PATTERNS: dict[str, str] = {
+    # diapos / cours magistraux (FR+EN)
+    r"(?i)lecture|slides?|ppt|lec\d|class.?note|presentation|cours.?magistral|diapo": DOC_LECTURE_SLIDES,
+    # manuels / lectures (FR+EN)
+    r"(?i)chapitre|chapter|textbook|reading|book|reference|manual|manuel|guide|cours": DOC_TEXTBOOK,
+    # devoirs / exercices (FR+EN)
+    r"(?i)devoir|hw|homework|assignment|problem.?set|ps\d|worksheet|exercices?|lab\b|project\b|tp\b|td\b": DOC_ASSIGNMENT,
+    # examens (FR+EN)
+    r"(?i)examen|exam|midterm|final|test|quiz|assessment|interro|contrôle|controle|epreuve|épreuve": DOC_EXAM,
+    # syllabus / programme (FR+EN)
+    r"(?i)syllabus|schedule|outline|grading|course.?info|catalog|programme|plan.?cours": DOC_SYLLABUS,
+    # notes / fiches (FR+EN)
+    r"(?i)fiches?|notes?|summary|review|cheat.?sheet|study.?guide|recap|révision|revision|mémento|memento": DOC_NOTES,
+}
+
+DOC_CONTENT_HEURISTICS: list[tuple[str, str]] = [
+    (r"(?i)(due\s+date|submit\s+by|deadline|turn\s+in|submission|date\s+limite|rendre\s+avant|à\s+rendre)", DOC_ASSIGNMENT),
+    (r"(?i)(grading\s+policy|office\s+hours|prerequisites|course\s+description|learning\s+objectives|modalités\s+d.évaluation|heures\s+de\s+permanence)", DOC_SYLLABUS),
+    (r"(?i)(slide\s+\d+|next\s+slide|previous\s+slide|diapo\s+\d+|diapositive\s+\d+)", DOC_LECTURE_SLIDES),
+    (r"(?i)(exam\s+\d|midterm\s+exam|final\s+exam|quiz\s+\d|examen\s+\d).*\d{1,2}[/\-]\d{1,2}", DOC_EXAM),
+    (r"(?i)(chapter\s+\d+|section\s+\d+\.\d+|theorem\s+\d+|definition\s+\d+|chapitre\s+\d+|théorème\s+\d+|définition\s+\d+)", DOC_TEXTBOOK),
+]
+
+DOC_CLASSIFY_METHODS = ("filename_regex", "content_heuristics", "default")
+
+# Magic-bytes maison (remplace filetype/magic — signatures minimales).
+_MAGIC_BYTES: tuple[tuple[bytes, str], ...] = (
+    (b"%PDF", "application/pdf"),
+    (b"PK\x03\x04", "application/zip"),
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+
+
+def classify_by_filename(filename: str) -> str | None:
+    """Classifie par regex sur le nom de fichier (coût nul)."""
+    name = str(filename or "")
+    for pattern, category in DOC_FILENAME_PATTERNS.items():
+        if re.search(pattern, name):
+            return category
+    return None
+
+
+def classify_by_content_heuristics(content: str) -> str | None:
+    """Classifie par motifs sur les 3000 premiers caractères (coût nul)."""
+    sample = str(content or "")[:3000]
+    scores: dict[str, int] = {}
+    for pattern, category in DOC_CONTENT_HEURISTICS:
+        matches = re.findall(pattern, sample)
+        if matches:
+            scores[category] = scores.get(category, 0) + len(matches)
+    if scores:
+        return max(scores, key=scores.get)  # type: ignore[arg-type]
+    return None
+
+
+def detect_mime_type(filename: str, content_bytes: bytes | None = None) -> str:
+    """Détecte le MIME : magic-bytes maison → extension (stdlib) → défaut.
+
+    Remplace la chaîne filetype→python-magic→mimetypes de la source :
+    les deux premiers étages propriétaires sont fusionnés en signatures
+    minimales ci-dessus, le repli extension utilise ``mimetypes`` stdlib.
+    """
+    if content_bytes:
+        head = bytes(content_bytes[:16])
+        for magic, mime in _MAGIC_BYTES:
+            if head.startswith(magic):
+                return mime
+    mime, _ = _mimetypes.guess_type(str(filename or ""))
+    return mime or "application/octet-stream"
+
+
+def classify_document(filename: str, content: str) -> tuple[str, str]:
+    """Pipeline 0-LLM : nom → contenu → défaut ``("other", "default")``.
+
+    Retourne ``(catégorie, méthode)`` où méthode ∈ ``DOC_CLASSIFY_METHODS``.
+    """
+    by_name = classify_by_filename(filename)
+    if by_name is not None:
+        return by_name, "filename_regex"
+    by_content = classify_by_content_heuristics(content)
+    if by_content is not None:
+        return by_content, "content_heuristics"
+    return DOC_OTHER, "default"
