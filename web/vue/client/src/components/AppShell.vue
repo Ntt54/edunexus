@@ -4,7 +4,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { RouterLink, RouterView } from "vue-router";
 import {
   BarChart3, BookOpen, Bot, BrainCircuit, Camera, CheckSquare, Compass,
-  FolderOpen, GraduationCap, House, LibraryBig, LineChart, NotebookPen,
+  FolderOpen, GraduationCap, House, LibraryBig, LineChart, Menu, NotebookPen,
   Plus, Settings2, Sparkles, Star, Users,
 } from "lucide-vue-next";
 import { useLearningStore } from "@/stores/learning";
@@ -155,6 +155,24 @@ const groups = [
   ] },
 ];
 
+// ── Sidebar collapse (persisted, viewport-aware default) ──────────
+const SIDEBAR_KEY = "edunexus:sidebar";
+function initialSidebarCollapsed(): boolean {
+  try {
+    const stored = localStorage.getItem(SIDEBAR_KEY);
+    if (stored === "collapsed") return true;
+    if (stored === "expanded") return false;
+  } catch { /* storage unavailable: fall through to viewport default */ }
+  return typeof window !== "undefined" ? window.innerWidth < 1200 : false;
+}
+const sidebarCollapsed = ref(initialSidebarCollapsed());
+function toggleSidebar() {
+  sidebarCollapsed.value = !sidebarCollapsed.value;
+  try {
+    localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed.value ? "collapsed" : "expanded");
+  } catch { /* not persistent */ }
+}
+
 // ── API calls ─────────────────────────────────────────────────────
 async function loadEngine() {
   try {
@@ -297,13 +315,25 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="app-shell">
-    <aside class="sidebar" aria-label="Navigation principale">
-      <RouterLink class="brand" to="/" aria-label="EduNexus">
-        <img v-if="!markUnavailable" :src="brandMark" alt="" aria-hidden="true" @error="markUnavailable = true" />
-        <span v-else class="brand-mark-fallback" aria-hidden="true"><i></i><i></i><i></i></span>
-        <span>Edu<span>Nexus</span></span>
-      </RouterLink>
+  <div class="app-shell" :class="{ 'is-collapsed': sidebarCollapsed }">
+    <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }" aria-label="Navigation principale">
+      <div class="brand-row">
+        <button
+          type="button"
+          class="sidebar-toggle"
+          :aria-expanded="!sidebarCollapsed"
+          :aria-label="sidebarCollapsed ? t('nav.expand') : t('nav.collapse')"
+          :title="sidebarCollapsed ? t('nav.expand') : t('nav.collapse')"
+          @click="toggleSidebar"
+        >
+          <Menu :size="18" aria-hidden="true" />
+        </button>
+        <RouterLink class="brand" to="/" aria-label="EduNexus">
+          <img v-if="!markUnavailable" :src="brandMark" alt="" aria-hidden="true" @error="markUnavailable = true" />
+          <span v-else class="brand-mark-fallback" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="brand-word">Edu<span>Nexus</span></span>
+        </RouterLink>
+      </div>
 
       <div class="matter-switcher" aria-label="Matière active">
         <span class="eyebrow">{{ t('app.workshop') }}</span>
@@ -314,7 +344,7 @@ onMounted(() => {
       <nav class="main-nav">
         <section v-for="group in groups" :key="group.label" class="nav-group" :aria-label="t(`nav.${group.label === 'Commencer' ? 'start' : group.label === 'S'+'entraîner' ? 'train' : group.label === 'Explorer' ? 'explore' : 'space'}`)">
           <p>{{ t(`nav.${group.label === 'Commencer' ? 'start' : group.label === 'S'+'entraîner' ? 'train' : group.label === 'Explorer' ? 'explore' : 'space'}`) }}</p>
-          <RouterLink v-for="item in group.items" :key="item.to" :to="item.to" class="nav-item">
+          <RouterLink v-for="item in group.items" :key="item.to" :to="item.to" class="nav-item" :title="sidebarCollapsed ? t(item.labelKey) : undefined">
             <component :is="item.icon" :size="18" stroke-width="2" aria-hidden="true" />
             <span>{{ t(item.labelKey) }}</span>
           </RouterLink>
@@ -680,6 +710,77 @@ onMounted(() => {
   border-radius: 99px;
   background: var(--green, #137a52);
   box-shadow: 0 0 0 3px rgba(19, 122, 82, 0.12);
+}
+
+/* ── Collapsible sidebar (rail collapsed / full expanded) ─────── */
+.brand-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px;
+}
+.sidebar-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  border-radius: 10px;
+  color: var(--indigo-deep, #3730a3);
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.sidebar-toggle:hover {
+  background: var(--indigo-soft, #eef0ff);
+  color: var(--indigo, #4f46e5);
+}
+.app-shell.is-collapsed {
+  grid-template-columns: 76px minmax(0, 1fr);
+}
+.app-shell.is-collapsed .sidebar {
+  padding: 20px 10px 14px;
+  align-items: stretch;
+}
+.app-shell.is-collapsed .brand-row {
+  justify-content: center;
+  padding: 0;
+}
+.app-shell.is-collapsed .brand img,
+.app-shell.is-collapsed .brand .brand-mark-fallback {
+  width: 30px;
+  height: 30px;
+}
+.app-shell.is-collapsed .brand-word,
+.app-shell.is-collapsed .matter-switcher,
+.app-shell.is-collapsed .nav-group > p,
+.app-shell.is-collapsed .nav-item span,
+.app-shell.is-collapsed .sidebar-foot span {
+  display: none;
+}
+.app-shell.is-collapsed .nav-item {
+  justify-content: center;
+  padding: 9px 6px;
+}
+.app-shell.is-collapsed .sidebar-foot {
+  justify-content: center;
+}
+:root[data-theme="dark"] .sidebar-toggle {
+  color: #dfe3ff;
+}
+:root[data-theme="dark"] .sidebar-toggle:hover {
+  background: #24294b;
+  color: #ffffff;
+}
+
+@media (max-width: 800px) {
+  .app-shell.is-collapsed {
+    grid-template-columns: 1fr;
+  }
+  .brand-row {
+    padding: 0;
+  }
 }
 
 /* ── Responsive ────────────────────────────────────────────────── */

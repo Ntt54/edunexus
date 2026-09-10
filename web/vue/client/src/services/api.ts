@@ -139,6 +139,12 @@ export const tutorApi = {
   async deleteSubject(id: string): Promise<{ deleted: boolean }> {
     return request<{ deleted: boolean }>(`/subjects/${encodeURIComponent(id)}`, { method: "DELETE" });
   },
+  async linkBookToSubject(subjectId: string, bookId: string): Promise<{ linked: boolean }> {
+    return request<{ linked: boolean }>(`/subjects/${encodeURIComponent(subjectId)}/books`, {
+      method: "POST",
+      body: JSON.stringify({ book_id: bookId }),
+    });
+  },
 
   // ── Dashboard existant ─────────────────────────────────────────
   async dashboard(): Promise<DashboardData> {
@@ -616,6 +622,12 @@ export const tutorApi = {
     const qs = learnerId ? `?learner_id=${encodeURIComponent(learnerId)}` : "";
     return request(`/lesson-discussions/${encodeURIComponent(discussionId)}/generate-course${qs}`, { method: "POST", headers });
   },
+  /** Future SSE contract (backend à venir) — progressive course text.
+   *  `GET …/course/stream?learner_id=…` (`text/event-stream`). */
+  courseStreamUrl(discussionId: string, learnerId?: string): string {
+    const qs = learnerId ? `?learner_id=${encodeURIComponent(learnerId)}` : "";
+    return `${apiBase}/lesson-discussions/${encodeURIComponent(discussionId)}/course/stream${qs}`;
+  },
   async generateSummary(discussionId: string, learnerId?: string): Promise<{ content: unknown }> {
     const headers: Record<string, string> = {};
     if (learnerId) headers["X-Learner-Id"] = learnerId;
@@ -639,6 +651,18 @@ export const tutorApi = {
     if (learnerId) headers["X-Learner-Id"] = learnerId;
     const qs = learnerId ? `?learner_id=${encodeURIComponent(learnerId)}` : "";
     return request(`/lesson-discussions/${encodeURIComponent(discussionId)}/complete-manual${qs}`, { method: "POST", headers });
+  },
+  async askLessonQuestion(discussionId: string, question: string, learnerId: string): Promise<{ answer: unknown; sources: unknown[] }> {
+    return request(`/lesson-discussions/${encodeURIComponent(discussionId)}/ask?learner_id=${encodeURIComponent(learnerId)}`, {
+      method: "POST",
+      headers: { "X-Learner-Id": learnerId },
+      body: JSON.stringify({ question }),
+    });
+  },
+  async deleteLessonContent(discussionId: string, contentId: string): Promise<{ deleted: boolean }> {
+    return request(`/lesson-discussions/${encodeURIComponent(discussionId)}/contents/${encodeURIComponent(contentId)}`, {
+      method: "DELETE",
+    });
   },
 
   // ── Socle — pgvector / pleias / config / profile / stale (lane 3) ──

@@ -1,6 +1,7 @@
 <!-- EduNexus UI direction: Atelier de progression — éditeur de parcours avec sidebar, création, drag-and-drop et gestion des étapes. -->
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
+import { useRouter } from "vue-router";
 import {
   ArrowRight,
   Check,
@@ -27,6 +28,7 @@ import { usePreferences } from "@/stores/preferences";
 
 const { state, hydrate } = useLearningStore();
 const { t } = usePreferences();
+const router = useRouter();
 
 /* ── Local types ──────────────────────────────────────────────── */
 interface PathSummary {
@@ -41,7 +43,7 @@ interface PathStep {
   id: string;
   title: string;
   activityType: ActivityType;
-  duration: number;
+  duration?: number;
   status: "pending" | "completed";
   source: string;
 }
@@ -77,7 +79,7 @@ const addingStep = ref(false);
 /* Generate from books modal */
 const showBookModal = ref(false);
 const loadingBooks = ref(false);
-const availableBooks = ref<Array<{ id: string; title: string; status: string }>>([]);
+const availableBooks = ref<Array<{ id: string; title: string; name: string; status: string; format: string; sourceType: string; pages: number | null; chunks_total: number | null }>>([]);
 const selectedBookIds = ref<string[]>([]);
 const generatingBooks = ref(false);
 
@@ -102,7 +104,49 @@ const iconFor: Record<ActivityType, typeof FileText> = {
   quiz: HelpCircle,
   flashcard_review: RotateCcw,
 };
-const labelFor = (activityType: ActivityType) => t(`activity.${activityType}`);
+
+/* ── Defensive normalisation (API snake_case, no duration) ───────
+   L'API renvoie `activity_type` (snake_case), aucun `duration` et des
+   statuts `not_started|in_progress|completed`. Sans normalisation, le
+   template affichait des clés brutes (`activity.undefined`) et
+   « environ undefined min ». Tout inconnu retombe sur `concept`,
+   jamais sur une clé brute. */
+const KNOWN_ACTIVITIES: ReadonlySet<string> = new Set([
+  "concept",
+  "reading",
+  "exercise",
+  "quiz",
+  "flashcard_review",
+]);
+function normalizeActivity(raw: unknown): ActivityType {
+  const text = String(raw ?? "").trim();
+  const base = text.includes(".") ? text.slice(text.lastIndexOf(".") + 1) : text;
+  const low = base.replace(/-/g, "_").toLowerCase();
+  return (KNOWN_ACTIVITIES.has(low) ? low : "concept") as ActivityType;
+}
+function normalizeStatus(raw: unknown): "pending" | "completed" {
+  return String(raw ?? "").trim().toLowerCase() === "completed" ? "completed" : "pending";
+}
+function normalizeDuration(raw: unknown): number | undefined {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+}
+function normalizeStep(raw: Record<string, unknown>): PathStep {
+  const r = raw as Record<string, unknown>;
+  return {
+    id: String(r.id ?? ""),
+    title: String(r.title ?? r.name ?? ""),
+    activityType: normalizeActivity(r.activityType ?? r.activity_type ?? r.type),
+    duration: normalizeDuration(r.duration ?? r.estimated_minutes ?? r.minutes),
+    status: normalizeStatus(r.status),
+    source: String(r.source ?? r.activity_id ?? ""),
+  };
+}
+const iconForStep = (activityType: unknown): typeof FileText =>
+  iconFor[normalizeActivity(activityType)] ?? FileText;
+const labelFor = (activityType: unknown) => t(`activity.${normalizeActivity(activityType)}`);
+const hasDuration = (duration: unknown): duration is number =>
+  typeof duration === "number" && Number.isFinite(duration);
 
 /* Computed */
 const completedCount = computed(
@@ -129,7 +173,12 @@ async function selectPath(pathId: string) {
   loadingPath.value = true;
   error.value = null;
   try {
-    selectedPath.value = await tutorApi.getPath(pathId);
+    const data = (await tutorApi.getPath(pathId)) as unknown as Record<string, unknown>;
+    const rawSteps = (data.steps ?? []) as unknown as Array<Record<string, unknown>>;
+    selectedPath.value = {
+      ...(data as unknown as PathDetail),
+      steps: rawSteps.map(normalizeStep),
+    };
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Erreur de chargement";
   } finally {
@@ -179,13 +228,13 @@ async function addStep() {
   if (!selectedPath.value) return;
   addingStep.value = true;
   try {
-    const step = await tutorApi.addPathStep(
+    const step = (await tutorApi.addPathStep(
       selectedPath.value.id,
       newStepType.value,
       `manual-${Date.now()}`,
       newStepTitle.value.trim(),
-    );
-    selectedPath.value.steps.push(step);
+    )) as unknown as Record<string, unknown>;
+    selectedPath.value.steps.push(normalizeStep(step));
     newStepTitle.value = "";
     showAddStep.value = false;
   } catch (e) {
@@ -254,6 +303,37 @@ async function onDrop(targetIndex: number) {
   }
 }
 
+/* ── Open personal lesson discussion ──────────────────────────── */
+const openingStepId = ref<string | null>(null);
+function activeLearnerId(): string {
+  try {
+    const v =
+      localStorage.getItem("edunexus.learner") ||
+      localStorage.getItem("edunexus:learner") ||
+      "";
+    if (v) return v;
+  } catch { /* storage unavailable */ }
+  return "default";
+}
+async function openLesson(stepId: string) {
+  if (!stepId || openingStepId.value) return;
+  openingStepId.value = stepId;
+  error.value = null;
+  try {
+    const created = (await tutorApi.createLessonDiscussion(
+      stepId,
+      activeLearnerId(),
+    )) as unknown as { discussion: { id: string } };
+    const discussionId = created?.discussion?.id;
+    if (!discussionId) throw new Error(t("path.lessonError"));
+    await router.push({ name: "lecon", params: { id: discussionId } });
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : t("path.lessonError");
+  } finally {
+    openingStepId.value = null;
+  }
+}
+
 /* ── Init ─────────────────────────────────────────────────────── */
 onMounted(async () => {
   await hydrate();
@@ -262,13 +342,51 @@ onMounted(async () => {
 });
 
 /* ── Generate from books ─────────────────────────────────────── */
+// Libellés carte-livre repris de LibraryView (mêmes règles, mêmes i18n) :
+// le dialogue utilise les classes globales lib-* aux couleurs explicites,
+// lisibles dans les deux thèmes.
+type ModalBook = { id: string; title: string; name: string; status: string; format: string; sourceType: string; pages: number | null; chunks_total: number | null };
+
+function modalStatusLabel(status: string): string {
+  return ({ indexed: t("status.ready"), indexing: t("status.indexing"), pending: t("status.queued"), error: t("status.review") }[status] ?? status) as string;
+}
+
+function modalFormatChip(book: ModalBook): string {
+  if (book.format) return book.format.toUpperCase();
+  if (book.sourceType) return book.sourceType;
+  return "Note";
+}
+
 async function openBookModal() {
   showBookModal.value = true;
   loadingBooks.value = true;
   selectedBookIds.value = [];
   try {
     const data = await tutorApi.getBooks();
-    availableBooks.value = data.books.map((b) => ({ id: b.id, title: b.title, status: b.status }));
+    // Normalisation défensive : forme inattendue (vieux bundle, payload
+    // partiel) ⇒ champs garantis, entrées sans id écartées, titre manquant
+    // signalé en console (diagnostic futur, pas d'alert). Les champs
+    // d'affichage (format, pages, fragments) sont conservés pour la carte.
+    const norm: Array<{ id: string; title: string; name: string; status: string; format: string; sourceType: string; pages: number | null; chunks_total: number | null }> = [];
+    for (const raw of data.books as unknown as Array<Record<string, unknown>>) {
+      const id = String(raw.id ?? raw.book_id ?? "");
+      if (!id) continue;
+      const title = String(raw.title ?? "");
+      const name = String(raw.name ?? "");
+      if (!title && !name) console.warn("[PathView] livre sans titre (payload brut) :", raw);
+      const numOrNull = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+      norm.push({
+        id,
+        title,
+        name,
+        status: String(raw.status ?? ""),
+        format: String(raw.format ?? ""),
+        sourceType: String(raw.sourceType ?? ""),
+        pages: numOrNull(raw.pages),
+        chunks_total: numOrNull(raw.chunks_total),
+      });
+    }
+    availableBooks.value = norm;
   } catch {
     availableBooks.value = [];
   } finally {
@@ -444,52 +562,60 @@ async function generateFromBooks() {
                 <Circle v-else :size="14" aria-hidden="true" />
               </div>
 
-              <div class="step-icon">
-                <component :is="iconFor[step.activityType]" :size="16" aria-hidden="true" />
-              </div>
+              <button
+                type="button"
+                class="step-icon-btn"
+                :aria-label="t('path.openLesson')"
+                :title="t('path.openLesson')"
+                :disabled="openingStepId === step.id"
+                @click="openLesson(step.id)"
+              >
+                <component :is="iconForStep(step.activityType)" :size="16" aria-hidden="true" />
+              </button>
 
               <div class="step-info">
-                <input
-                  :value="step.title"
-                  class="step-title-input"
-                  @blur="
-                    ($event.target as HTMLInputElement).value
-                  "
-                />
-                <span class="step-type-label">{{ labelFor(step.activityType) }}</span>
+                <button
+                  type="button"
+                  class="step-title-btn"
+                  :title="`${step.title} — ${t('path.openLesson')}`"
+                  :disabled="openingStepId === step.id"
+                  @click="openLesson(step.id)"
+                >
+                  <span class="step-title">{{ step.title }}</span>
+                  <Loader2 v-if="openingStepId === step.id" :size="13" class="spin" aria-hidden="true" />
+                </button>
+                <div class="step-sub">
+                  <span class="step-type-label">{{ labelFor(step.activityType) }}</span>
+                  <span v-if="hasDuration(step.duration)" class="step-meta">
+                    <Clock3 :size="13" aria-hidden="true" />
+                    <span>{{ t("dashboard.approx", { minutes: step.duration }) }}</span>
+                  </span>
+                  <StatusPill
+                    :tone="step.status === 'completed' ? 'green' : 'orange'"
+                  >
+                    {{
+                      step.status === "completed"
+                        ? t("status.completed")
+                        : t("status.toDo")
+                    }}
+                  </StatusPill>
+                  <button
+                    v-if="step.status !== 'completed'"
+                    class="text-button step-complete-btn"
+                    @click="markComplete(step.id)"
+                  >
+                    <CheckCircle2 :size="14" aria-hidden="true" />
+                    {{ t("path.markComplete") }}
+                  </button>
+                  <button
+                    class="step-delete-btn"
+                    :aria-label="t('path.deleteStep')"
+                    @click="removeStep(step.id)"
+                  >
+                    <X :size="14" aria-hidden="true" />
+                  </button>
+                </div>
               </div>
-
-              <div class="step-meta">
-                <Clock3 :size="13" aria-hidden="true" />
-                <span>{{ t("dashboard.approx", { minutes: step.duration }) }}</span>
-              </div>
-
-              <StatusPill
-                :tone="step.status === 'completed' ? 'green' : 'orange'"
-              >
-                {{
-                  step.status === "completed"
-                    ? t("status.completed")
-                    : t("status.toDo")
-                }}
-              </StatusPill>
-
-              <button
-                v-if="step.status !== 'completed'"
-                class="text-button step-complete-btn"
-                @click="markComplete(step.id)"
-              >
-                <CheckCircle2 :size="14" aria-hidden="true" />
-                {{ t("path.markComplete") }}
-              </button>
-
-              <button
-                class="step-delete-btn"
-                :aria-label="t('path.deleteStep')"
-                @click="removeStep(step.id)"
-              >
-                <X :size="14" aria-hidden="true" />
-              </button>
             </div>
 
             <p v-if="selectedPath.steps.length === 0" class="lib-empty">
@@ -520,11 +646,18 @@ async function generateFromBooks() {
                 <button class="text-button" @click="showBookModal = false"><X :size="16" /></button>
               </div>
               <div v-if="loadingBooks" class="loading-state"><p>{{ t("app.loadingWorkshop") }}</p></div>
-              <div v-else class="book-select-list">
-                <label v-for="book in availableBooks" :key="book.id" class="book-select-item">
-                  <input type="checkbox" :value="book.id" v-model="selectedBookIds" />
-                  <span class="book-select-title">{{ book.title }}</span>
-                  <StatusPill :tone="book.status === 'indexed' ? 'green' : 'orange'">{{ book.status }}</StatusPill>
+              <div v-else style="display: grid; gap: 6px; max-height: 320px; overflow-y: auto;">
+                <label v-for="book in availableBooks" :key="book.id" class="lib-trow lib-tdoc" style="cursor: pointer;">
+                  <input type="checkbox" class="lib-tcheck" :value="book.id" v-model="selectedBookIds" />
+                  <div style="flex: 1; min-width: 0;">
+                    <div class="lib-src-title" :title="book.id">{{ book.title || book.name || 'Sans titre' }}</div>
+                    <div class="lib-src-meta">
+                      <span class="lib-fmt-chip">{{ modalFormatChip(book) }}</span>
+                      <span class="lib-badge" :class="'lib-badge-' + (book.status || 'pending')">{{ book.status ? modalStatusLabel(book.status) : '…' }}</span>
+                      <span v-if="book.pages">{{ book.pages }} pages</span>
+                      <span v-else-if="book.chunks_total">{{ book.chunks_total }} fragments</span>
+                    </div>
+                  </div>
                 </label>
                 <p v-if="availableBooks.length === 0" class="lib-empty">{{ t("path.noBooks") }}</p>
               </div>
@@ -658,12 +791,15 @@ async function generateFromBooks() {
   min-width: 0;
 }
 .path-item-title {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
+  overflow-wrap: anywhere;
   color: var(--ink);
   font-size: 13px;
   font-weight: 700;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.35;
 }
 
 /* ── Path header ─────────────────────────────────────────────── */
@@ -746,7 +882,7 @@ async function generateFromBooks() {
 }
 .step-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
   min-height: 54px;
   padding: 10px 12px;
@@ -796,35 +932,77 @@ async function generateFromBooks() {
   color: var(--indigo-deep);
   background: var(--indigo-soft);
 }
+.step-icon-btn {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  color: var(--indigo-deep);
+  background: var(--indigo-soft);
+  cursor: pointer;
+  transition: background 0.12s, transform 0.12s;
+}
+.step-icon-btn:hover:not(:disabled) {
+  background: #d8d6ff;
+  transform: scale(1.05);
+}
+.step-title-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+.step-title-btn:hover:not(:disabled) .step-title {
+  color: var(--indigo-deep);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.step-title-btn:disabled {
+  cursor: wait;
+}
+.spin {
+  flex: 0 0 auto;
+  animation: path-spin 1s linear infinite;
+}
+@keyframes path-spin {
+  from { transform: rotate(0); }
+  to { transform: rotate(360deg); }
+}
 .step-info {
   display: grid;
-  gap: 2px;
-  min-width: 0;
+  gap: 4px;
+  min-width: 220px;
   flex: 1;
 }
-.step-title-input {
-  min-width: 0;
-  padding: 4px 8px;
-  border: 1px solid transparent;
-  border-radius: 6px;
+.step-title {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  margin: 0;
+  padding-top: 2px;
   color: var(--ink);
   font-size: 14px;
   font-weight: 700;
-  background: transparent;
-  transition: border-color 0.12s, background 0.12s;
+  line-height: 1.4;
+  white-space: normal;
 }
-.step-title-input:hover {
-  border-color: var(--line);
-  background: rgba(255, 255, 255, 0.8);
-}
-.step-title-input:focus {
-  border-color: var(--indigo);
-  background: #fff;
-  outline: 0;
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.08);
+.step-sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
 }
 .step-type-label {
-  padding-left: 8px;
   color: var(--muted);
   font-size: 11px;
   font-weight: 650;
@@ -926,37 +1104,6 @@ async function generateFromBooks() {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 18px;
-}
-.book-select-list {
-  display: grid;
-  gap: 6px;
-  max-height: 320px;
-  overflow-y: auto;
-}
-.book-select-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--line-soft);
-  border-radius: 10px;
-  cursor: pointer;
-  transition: background 0.12s;
-}
-.book-select-item:hover {
-  background: #f6f7ff;
-}
-.book-select-item input[type="checkbox"] {
-  accent-color: var(--indigo);
-}
-.book-select-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  font-size: 13px;
-  font-weight: 700;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .modal-actions {
   display: flex;

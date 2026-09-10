@@ -13,7 +13,7 @@ import {
   Upload,
 } from "lucide-vue-next";
 import { tutorApi } from "@/services/api";
-import type { IngestionJob } from "@/services/api";
+import type { IngestionJob, SubjectInfo } from "@/services/api";
 import type { LibraryCategory, QueueStatus, SearchResult, SourceBook } from "@/types";
 import { useLearningStore } from "@/stores/learning";
 import { usePreferences } from "@/stores/preferences";
@@ -23,7 +23,10 @@ const { t } = usePreferences();
 
 // ── State ──────────────────────────────────────────────────────
 const categories = ref<LibraryCategory[]>([]);
+const subjects = ref<SubjectInfo[]>([]);
 const booksBySubject = ref<Map<string, SourceBook[]>>(new Map());
+const unfilteredBooks = ref<SourceBook[]>([]);
+const orphanTargets = ref<Map<string, string>>(new Map());
 const allBooks = ref<SourceBook[]>([]);
 const queue = ref<QueueStatus>({ running: false, pending_count: 0, completed_count: 0 });
 const activeJobs = ref<IngestionJob[]>([]);
@@ -85,13 +88,22 @@ function catsOf(bookId: string): number[] {
 }
 
 // ── Data loading ───────────────────────────────────────────────
+// Swap atomique anti-clignotement : on construit une Map LOCALE puis on
+// l'assigne d'un bloc. Un compteur de génération ignore les réponses
+// périmées quand deux rafraîchissements se chevauchent (polling + action
+// manuelle). On ne touche JAMAIS à booksBySubject/unfilteredBooks/subjects
+// avant que tout soit complet — aucun état intermédiaire vide rendu.
+let booksGeneration = 0;
+
 async function loadAll() {
+  const gen = ++booksGeneration;
   loading.value = true;
   try {
     const [catRes, queueRes] = await Promise.all([
       tutorApi.getCategories().catch(() => ({ categories: [] as LibraryCategory[] })),
       tutorApi.getQueueStatus().catch(() => ({ running: false, pending_count: 0, completed_count: 0 })),
     ]);
+    if (gen !== booksGeneration) return;
     categories.value = catRes.categories ?? [];
     queue.value = queueRes;
     await refreshJobs();
@@ -99,10 +111,20 @@ async function loadAll() {
     // Load subjects and books
     try {
       const subjectsRes = await tutorApi.getSubjects();
-      for (const sub of subjectsRes.subjects) {
+      if (gen !== booksGeneration) return;
+      const nextSubjects = subjectsRes.subjects ?? [];
+      const next = new Map<string, SourceBook[]>();
+      for (const sub of nextSubjects) {
         const booksRes = await tutorApi.getBooks(sub.name).catch(() => ({ books: [] as SourceBook[] }));
-        booksBySubject.value.set(sub.id, booksRes.books ?? []);
+        if (gen !== booksGeneration) return;
+        next.set(sub.id, booksRes.books ?? []);
       }
+      // Tous les livres sans filtre : base du calcul des orphelins.
+      const unfiltered = (await tutorApi.getBooks().catch(() => ({ books: [] as SourceBook[] }))).books ?? [];
+      if (gen !== booksGeneration) return;
+      subjects.value = nextSubjects;
+      booksBySubject.value = next;
+      unfilteredBooks.value = unfiltered;
     } catch { /* no subjects */ }
 
     // Load book-category memberships
@@ -206,16 +228,72 @@ async function refreshJobs() {
 }
 
 async function refreshBooks() {
+  const gen = ++booksGeneration;
   try {
     const subjectsRes = await tutorApi.getSubjects();
-    // Reconstruction complète : un domaine supprimé disparaît de la liste.
-    booksBySubject.value = new Map();
-    for (const sub of subjectsRes.subjects) {
+    if (gen !== booksGeneration) return;
+    const nextSubjects = subjectsRes.subjects ?? [];
+    // Reconstruction complète dans une Map LOCALE : un domaine supprimé
+    // disparaît de la liste, sans jamais exposer un état vide intermédiaire.
+    const next = new Map<string, SourceBook[]>();
+    for (const sub of nextSubjects) {
       const booksRes = await tutorApi.getBooks(sub.name).catch(() => ({ books: [] as SourceBook[] }));
-      booksBySubject.value.set(sub.id, booksRes.books ?? []);
+      if (gen !== booksGeneration) return;
+      next.set(sub.id, booksRes.books ?? []);
     }
+    const unfiltered = (await tutorApi.getBooks().catch(() => ({ books: [] as SourceBook[] }))).books ?? [];
+    if (gen !== booksGeneration) return;
+    subjects.value = nextSubjects;
+    booksBySubject.value = next;
+    unfilteredBooks.value = unfiltered;
     await hydrateAllMemberships();
   } catch { /* best-effort */ }
+}
+
+// ── Livres orphelins (« Sans domaine ») ─────────────────────────
+// Calculé côté client, sans route supplémentaire : présents dans
+// GET /books sans filtre mais absents de tous les domaines chargés
+// (ex. après suppression d'un domaine — les documents sont conservés).
+const orphans = computed(() => {
+  const linked = new Set<string>();
+  for (const list of booksBySubject.value.values()) for (const b of list) linked.add(b.id);
+  const seen = new Set<string>();
+  return unfilteredBooks.value.filter((b) => {
+    if (linked.has(b.id) || seen.has(b.id)) return false;
+    seen.add(b.id);
+    return true;
+  });
+});
+
+function orphanTarget(bookId: string): string {
+  return orphanTargets.value.get(bookId) ?? "";
+}
+
+function setOrphanTarget(bookId: string, subjectId: string) {
+  if (subjectId) orphanTargets.value.set(bookId, subjectId);
+  else orphanTargets.value.delete(bookId);
+}
+
+const linkingBook = ref<string | null>(null);
+
+async function attachOrphan(book: SourceBook) {
+  const target = orphanTarget(book.id);
+  if (!target) {
+    state.notice = t("library.attachNoTarget") as string;
+    return;
+  }
+  if (linkingBook.value) return;
+  linkingBook.value = book.id;
+  try {
+    await tutorApi.linkBookToSubject(target, book.id);
+    orphanTargets.value.delete(book.id);
+    state.notice = t("library.attached") as string;
+    await refreshBooks();
+  } catch {
+    // 404 (livre/domaine inconnu) ou réseau : toast propre, pas de crash.
+    state.notice = t("library.attachFailed") as string;
+  }
+  linkingBook.value = null;
 }
 
 // ── Domain operations ──────────────────────────────────────────
@@ -466,6 +544,15 @@ interface TreeNode {
   open: boolean;
   books: SourceBook[];
   categories: CategoryNode[];
+  // Affichage plat (sans niveau catégorie) quand le domaine ne contient
+  // aucune vraie catégorie non vide : tous ses livres tiennent dans le
+  // pseudo-groupe « Non classé » (id null), le nœud intermédiaire serait
+  // un niveau fantôme. Dès qu'≥1 vraie catégorie non vide existe,
+  // l'imbrication est conservée (« Non classé » reste alors informatif).
+  flat: boolean;
+  // Vrai si le nom du domaine est introuvable (course rare entre deux
+  // appels) : l'en-tête est alors masqué plutôt que d'afficher un id brut.
+  headless: boolean;
 }
 
 interface CategoryNode {
@@ -486,8 +573,12 @@ const tree = computed<TreeNode[]>(() => {
   }
 
   for (const [subId, books] of subjectBooks.entries()) {
-    // Find subject name from state
-    const subName = state.data?.subject?.id === subId ? state.data.subject.name : subId;
+    // Nom résolu depuis les domaines chargés (jamais l'id brut) ; repli
+    // sur le domaine actif de l'atelier, sinon en-tête masqué (headless).
+    const activeSubject = state.data?.subject;
+    const subName =
+      subjects.value.find((s) => s.id === subId)?.name ??
+      (activeSubject?.id === subId ? activeSubject.name : null);
 
     // Group books by category
     const catMap = new Map<number | null, SourceBook[]>();
@@ -527,11 +618,13 @@ const tree = computed<TreeNode[]>(() => {
 
     result.push({
       id: subId,
-      name: subName,
+      name: subName ?? "",
       type: "domain",
       open: openDomains.value.has(subId),
       books,
       categories: catNodes,
+      flat: !catNodes.some((c) => c.id != null),
+      headless: subName == null,
     });
   }
 
@@ -691,7 +784,7 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
       <div v-else class="lib-tree lib-tree-scroll">
         <!-- Domain nodes -->
         <div v-for="domain in tree" :key="domain.id" class="lib-tnode" :class="{ open: domain.open }">
-          <div class="lib-trow">
+          <div v-if="!domain.headless" class="lib-trow">
             <span class="lib-tcaret" @click="toggleDomain(domain.id)">
               <ChevronRight :size="14" aria-hidden="true" />
             </span>
@@ -703,7 +796,30 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
           </div>
           <div class="lib-tkids">
             <div v-if="domain.open">
+              <!-- Domaine sans vraie catégorie : livres à plat (même carte
+                que les orphelins), sans nœud « Non classé » fantôme. -->
+              <template v-if="domain.flat">
+                <div v-for="book in domain.books" :key="book.id" class="lib-trow lib-tdoc">
+                  <div style="flex: 1; min-width: 0;">
+                    <div class="lib-src-title">{{ book.title }}</div>
+                    <div class="lib-src-meta">
+                      <span class="lib-fmt-chip">{{ formatChip(book) }}</span>
+                      <span class="lib-badge" :class="`lib-badge-${book.status}`">{{ statusLabel(book.status) }}</span>
+                      <span v-if="book.pages">{{ book.pages }} pages</span>
+                      <span v-else-if="book.chunks_total">{{ book.chunks_total }} fragments</span>
+                    </div>
+                    <div v-if="book.status === 'indexing'" style="height: 4px; border-radius: 99px; background: #e7e8f7; overflow: hidden; margin-top: 6px;">
+                      <div style="width: 40%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--orange), #f5ad4e); animation: indeterminate 1.4s ease infinite;" />
+                    </div>
+                  </div>
+                  <span class="lib-src-actions">
+                    <button type="button" class="lib-tact" :title="t('library.reindex')" @click.stop="reindexBook(book)">↻</button>
+                    <button type="button" class="lib-src-del" :title="t('library.deleteBook')" @click.stop="deleteBook(book)">×</button>
+                  </span>
+                </div>
+              </template>
               <!-- Category nodes -->
+              <template v-else>
               <div v-for="cat in domain.categories" :key="cat.id ?? 'uncat'" class="lib-tnode" :class="{ open: openCategories.has(cat.id ?? -1) }">
                 <div class="lib-trow">
                   <span class="lib-tcaret" @click="toggleCategory(cat.id ?? -1)">
@@ -751,9 +867,58 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
                   </div>
                 </div>
               </div>
+              </template>
             </div>
           </div>
         </div>
+      </div>
+    </section>
+
+    <!-- Orphan books (no domain) -->
+    <section v-if="orphans.length > 0" class="content-panel" style="padding: 23px;" aria-label="Sans domaine">
+      <div class="panel-heading" style="margin-bottom: 6px;">
+        <div>
+          <p class="eyebrow">{{ t('library.orphans') }}</p>
+          <h2>{{ t('library.documents', { count: orphans.length }) }}</h2>
+        </div>
+      </div>
+      <p style="margin: 0 0 10px; color: var(--muted); font-size: 12px;">{{ t('library.orphansHint') }}</p>
+      <div v-for="book in orphans" :key="book.id" class="lib-trow lib-tdoc">
+        <div style="flex: 1; min-width: 0;">
+          <div class="lib-src-title">{{ book.title }}</div>
+          <div class="lib-src-meta">
+            <span class="lib-fmt-chip">{{ formatChip(book) }}</span>
+            <span class="lib-badge" :class="`lib-badge-${book.status}`">{{ statusLabel(book.status) }}</span>
+            <span v-if="book.pages">{{ book.pages }} pages</span>
+            <span v-else-if="book.chunks_total">{{ book.chunks_total }} fragments</span>
+          </div>
+          <div v-if="book.status === 'indexing'" style="height: 4px; border-radius: 99px; background: #e7e8f7; overflow: hidden; margin-top: 6px;">
+            <div style="width: 40%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--orange), #f5ad4e); animation: indeterminate 1.4s ease infinite;" />
+          </div>
+        </div>
+        <span class="lib-src-actions" style="display: flex; align-items: center; gap: 6px;">
+          <select
+            :value="orphanTarget(book.id)"
+            :aria-label="t('library.attachTo')"
+            style="min-height: 30px; font-size: 12px; max-width: 170px;"
+            @change="setOrphanTarget(book.id, ($event.target as HTMLSelectElement).value)"
+          >
+            <option value="">{{ t('library.attachTo') }}</option>
+            <option v-for="sub in subjects" :key="sub.id" :value="sub.id">{{ sub.name }}</option>
+          </select>
+          <button
+            type="button"
+            class="ghost-btn"
+            style="min-height: 30px; padding: 4px 10px; font-size: 12px;"
+            :disabled="!orphanTarget(book.id) || linkingBook !== null"
+            :title="t('library.attach')"
+            @click="attachOrphan(book)"
+          >
+            <LoaderCircle v-if="linkingBook === book.id" :size="13" class="spin" aria-hidden="true" />
+            {{ t('library.attach') }}
+          </button>
+          <button type="button" class="lib-src-del" :title="t('library.deleteBook')" @click.stop="deleteBook(book)">×</button>
+        </span>
       </div>
     </section>
 
