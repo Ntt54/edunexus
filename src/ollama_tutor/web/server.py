@@ -233,7 +233,8 @@ class TutorLabelRename(BaseModel):
 
 
 class TutorCategoryMembership(BaseModel):
-    category_id: int
+    category_id: int | None = None
+    category_ids: list[int] | None = None
 
 
 class TutorSubjectBookLink(BaseModel):
@@ -2345,6 +2346,21 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
     async def tutor_book_add_category(
         book_id: str, payload: TutorCategoryMembership
     ) -> dict[str, Any]:
+        # `category_ids` present ⇒ REPLACE all memberships in one
+        # transaction (empty ⇒ detach everything); otherwise legacy
+        # single-add (tutor.html historique). One response shape each.
+        if payload.category_ids is not None:
+            try:
+                replaced = tutor_store.replace_book_categories(
+                    book_id, payload.category_ids
+                )
+            except KeyError:
+                raise HTTPException(status_code=404, detail="livre ou catégorie inconnu")
+            return {"replaced": replaced}
+        if payload.category_id is None:
+            raise HTTPException(
+                status_code=400, detail="category_id ou category_ids requis"
+            )
         try:
             added = tutor_store.add_book_to_category(book_id, payload.category_id)
         except KeyError:

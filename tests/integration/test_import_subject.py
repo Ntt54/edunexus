@@ -15,11 +15,29 @@ Contrat de `resolve_import_subject` :
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import httpx
 
 from src.ollama_tutor.config import Config
 from src.ollama_tutor.tutor.service import TutorService
 from src.ollama_tutor.tutor.store import LibraryStore
+
+
+def _mock_subject_llm(svc: TutorService, payload=None, exc=None, calls=None):
+    """Mocke le choix LLM du domaine (transport injectable, 100 % offline)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if calls is not None:
+            calls.append(json.loads(request.content))
+        if exc is not None:
+            raise exc
+        return httpx.Response(
+            200, json={"message": {"content": payload}}, request=request
+        )
+
+    svc.lesson_http_transport = httpx.MockTransport(handler)
 
 
 def _service(tmp_path: Path) -> TutorService:
@@ -81,6 +99,8 @@ def test_lexical_overlap_case_insensitive(tmp_path: Path) -> None:
 def test_short_tokens_do_not_match(tmp_path: Path) -> None:
     svc = _service(tmp_path)
     svc.store.create_subject("Art")
+    # Mock null : le LLM ne tranche rien, reste 100 % offline.
+    _mock_subject_llm(svc, payload='{"subject": null}')
     sid, _ = svc.register_import(None, _doc(tmp_path, "art_modeme.txt"))
     # « art » (< 4 lettres) ne suffit pas ⇒ bac « Non classé ».
     subj = svc.store.get_subject(sid)
@@ -116,3 +136,105 @@ def test_resolve_import_subject_direct(tmp_path: Path) -> None:
     # Explicite ⇒ création/match classique.
     third = svc.resolve_import_subject("Biologie", None)
     assert svc.store.get_subject(third).name == "Biologie"
+
+
+# ---------------------------------------------------------------------------
+# Choix LLM parmi les matières existantes (dernier recours, jamais de création)
+# ---------------------------------------------------------------------------
+
+
+def test_llm_picks_python_among_existing(tmp_path: Path) -> None:
+    svc = _service(tmp_path)
+    python = svc.store.create_subject("Python")
+    svc.store.create_subject("Réseaux")
+    _mock_subject_llm(svc, payload='{"subject": "Python"}')
+    # Aucun token commun : ni "notes" ni "cours" ne recoupe python/réseaux.
+    sid, book = svc.register_import(None, _doc(tmp_path, "notes_de_cours.txt"))
+    assert sid == python.id
+    assert svc.store.get_book_subject_id(book.id) == python.id
+    assert len(svc.store.list_subjects()) == 2, "aucune matière créée par l'import"
+
+
+def test_llm_null_falls_back_to_unclassified(tmp_path: Path) -> None:
+    svc = _service(tmp_path)
+    svc.store.create_subject("Python")
+    svc.store.create_subject("Réseaux")
+    _mock_subject_llm(svc, payload='{"subject": null}')
+    sid, _ = svc.register_import(None, _doc(tmp_path, "notes_de_cours.txt"))
+    subj = svc.store.get_subject(sid)
+    assert subj is not None and subj.name == "Non classé"
+
+
+def test_llm_invalid_or_unknown_falls_back(tmp_path: Path) -> None:
+    for idx, payload in enumerate(
+        (
+            "pas du json",
+            '{"autre": 1}',
+            '{"subject": "Inexistant"}',
+            '{"subject": ""}',
+            '{"subject": "  "}',
+            "",
+        )
+    ):
+        case_dir = tmp_path / f"cas_{idx}"
+        case_dir.mkdir()
+        svc = _service(case_dir)
+        svc.store.create_subject("Python")
+        _mock_subject_llm(svc, payload=payload)
+        sid, _ = svc.register_import(None, _doc(case_dir, "notes_de_cours.txt"))
+        subj = svc.store.get_subject(sid)
+        assert subj is not None and subj.name == "Non classé", payload
+        assert len(svc.store.list_subjects()) == 2, payload
+
+
+def test_llm_failure_falls_back_silently(tmp_path: Path) -> None:
+    svc = _service(tmp_path)
+    svc.store.create_subject("Python")
+    _mock_subject_llm(svc, exc=httpx.ConnectError("panne réseau"))
+    sid, _ = svc.register_import(None, _doc(tmp_path, "notes_de_cours.txt"))
+    subj = svc.store.get_subject(sid)
+    assert subj is not None and subj.name == "Non classé"
+
+
+def test_lexical_first_no_llm_call(tmp_path: Path) -> None:
+    svc = _service(tmp_path)
+    python = svc.store.create_subject("Python")
+    svc.store.create_subject("Histoire")
+    calls: list = []
+    # Le mock répondrait "Histoire" : s'il est appelé, le rattachement suit.
+    _mock_subject_llm(svc, payload='{"subject": "Histoire"}', calls=calls)
+    sid, _ = svc.register_import(None, _doc(tmp_path, "cours_python_avance.txt"))
+    assert sid == python.id, "recouvrement lexical gratuit d'abord"
+    assert calls == [], "LLM seulement en dernier recours (zéro appel réseau)"
+
+
+def test_explicit_never_calls_llm(tmp_path: Path) -> None:
+    svc = _service(tmp_path)
+    svc.store.create_subject("Python")
+    calls: list = []
+    _mock_subject_llm(svc, payload='{"subject": "Python"}', calls=calls)
+    sid, _ = svc.register_import("Physique", _doc(tmp_path, "quelconque.txt"))
+    assert svc.store.get_subject(sid).name == "Physique"
+    assert calls == []
+
+
+def test_no_subject_created_by_llm_pick(tmp_path: Path) -> None:
+    svc = _service(tmp_path)
+    svc.store.create_subject("Python")
+    svc.store.create_subject("Réseaux")
+    before = {s.id for s in svc.store.list_subjects()}
+    _mock_subject_llm(svc, payload='{"subject": "Rust"}')
+    sid, _ = svc.register_import(None, _doc(tmp_path, "notes_de_cours.txt"))
+    after = {s.id for s in svc.store.list_subjects()}
+    # "Rust" inconnu ⇒ Non classé (créé, c'est le bac), rien d'autre.
+    assert after - before == {sid}
+    assert svc.store.get_subject(sid).name == "Non classé"
+
+
+def test_llm_skipped_without_candidates(tmp_path: Path) -> None:
+    svc = _service(tmp_path)
+    calls: list = []
+    _mock_subject_llm(svc, payload='{"subject": "Python"}', calls=calls)
+    sid, _ = svc.register_import(None, _doc(tmp_path, "notes_de_cours.txt"))
+    assert svc.store.get_subject(sid).name == "Non classé"
+    assert calls == [], "aucun candidat ⇒ aucun appel LLM"

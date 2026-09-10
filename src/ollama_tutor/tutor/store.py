@@ -2897,6 +2897,42 @@ class LibraryStore:
             "book_categories", "book_id", "category_id", book_id, category_id
         )
 
+    def replace_book_categories(self, book_id: str, category_ids: list[int]) -> bool:
+        """Replace ALL category memberships of a book in one transaction.
+
+        Removes absent links, adds new ones; empty list detaches everything.
+        Every id is validated BEFORE any write (unknown category ⇒ KeyError,
+        nothing written). Returns True when memberships changed, False when
+        the final set already matched (idempotent). The book row is never
+        touched. Raises KeyError when the book is unknown.
+        """
+        self._require_book(book_id)
+        wanted: list[int] = []
+        for cid in category_ids or []:
+            cid = int(cid)
+            if cid not in wanted:
+                wanted.append(cid)
+        for cid in wanted:
+            self._get_label("categories", "category", cid)  # KeyError if unknown
+        current = sorted(
+            r["id"]
+            for r in self._list_labels_for_book(
+                "categories", "book_categories", "category_id", book_id
+            )
+        )
+        if current == sorted(wanted):
+            return False
+        self._conn.execute(
+            "DELETE FROM book_categories WHERE book_id = ?", (book_id,)
+        )
+        for cid in wanted:
+            self._conn.execute(
+                "INSERT INTO book_categories (book_id, category_id) VALUES (?, ?)",
+                (book_id, cid),
+            )
+        self._conn.commit()
+        return True
+
     def list_books_by_category(self, category_id: int) -> list[Any]:
         self._get_label("categories", "category", category_id)  # KeyError
         return self._list_books_via_join("book_categories", "category_id", category_id)

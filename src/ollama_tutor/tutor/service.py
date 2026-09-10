@@ -214,6 +214,11 @@ LESSON_LLM_TIMEOUT_S = 180.0
 #: out deterministically. Summaries/answers stay at 180 s.
 LESSON_COURSE_TIMEOUT_S = 360.0
 
+#: Bounded timeout for the import subject-pick LLM call (last resort only:
+#: lexical match runs first, synchronously and for free). Short prompt,
+#: short answer — a local model answers in seconds.
+IMPORT_SUBJECT_LLM_TIMEOUT_S = 30.0
+
 
 #: Règles d'ancrage STRICTES anti-hallucination (petit LLM local :
 #: termes inventés, faussetés, exemples génériques non ancrés). Suffixe
@@ -2561,23 +2566,138 @@ class TutorService:
         """Resolve the subject id for an import (returns ``subject_id``).
 
         - Nom explicite non vide → comportement actuel : match insensible
-          à la casse, sinon création (via :meth:`_resolve_subject`).
-        - Vide/None → (a) recouvrement lexical : si le stem du fichier
-          partage ≥1 token significatif avec un domaine existant, rattache
-          à ce domaine ; (b) sinon bac UNIQUE et stable « Non classé »
-          (créé une fois puis réutilisé — JAMAIS un domaine par fichier,
-          JAMAIS de nom issu du nom de fichier).
+          à la casse, sinon création (via :meth:`_resolve_subject` ; le LLM
+          n'est jamais consulté).
+        - Vide/None → (a) recouvrement lexical, gratuit et synchrone : si
+          le stem du fichier partage ≥1 token significatif avec un domaine
+          existant, rattache à ce domaine (aucun appel réseau) ;
+          (b) en dernier recours, choix LLM parmi les matières existantes
+          (timeout borné, échec silencieux) ; (c) sinon bac UNIQUE et
+          stable « Non classé » (créé une fois puis réutilisé — JAMAIS un
+          domaine par fichier, JAMAIS de nom issu du nom de fichier,
+          JAMAIS de création auto de matière par le LLM).
         """
         cleaned = str(subject_name).strip()[:80] if subject_name is not None else ""
         if cleaned:
             return self._resolve_subject(cleaned)
         stem = Path(str(path)).stem if path is not None else ""
+        subjects = self.store.list_subjects()
         file_tokens = self._subject_tokens(stem)
         if file_tokens:
-            for s in self.store.list_subjects():
+            for s in subjects:
                 if file_tokens & self._subject_tokens(s.name):
                     return s.id
+        candidates = [
+            s for s in subjects
+            if s.name.strip().lower() != self.UNCLASSIFIED_SUBJECT_NAME.lower()
+        ]
+        if candidates:
+            filename = Path(str(path)).name if path is not None else stem
+            picked = self._choose_subject_via_llm(filename or stem, candidates)
+            if picked is not None:
+                return picked
         return self._resolve_subject(self.UNCLASSIFIED_SUBJECT_NAME)
+
+    @staticmethod
+    def _parse_import_subject_answer(text: str) -> str | None:
+        """Parse strict ``{"subject": "<nom>"|null}`` (nom ou None)."""
+        s = (text or "").strip()
+        if s.startswith("```"):
+            s = re.sub(r"^```[A-Za-z0-9_-]*[ \t]*\r?\n?", "", s)
+            s = re.sub(r"\r?\n?[ \t]*```$", "", s).strip()
+        try:
+            data = json.loads(s)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        name = data.get("subject")
+        if name is None:
+            return None
+        name = str(name).strip()
+        return name or None
+
+    def _build_import_subject_messages(
+        self, filename: str, subjects: list[Any]
+    ) -> list[dict[str, str]]:
+        """Short subject-pick prompt (names + a few book titles each)."""
+        lines: list[str] = []
+        for s in subjects:
+            try:
+                titles = [b.title for b in self.store.list_books(s.id)[:4]]
+            except Exception:
+                titles = []
+            titles = [t for t in (str(t or "").strip() for t in titles) if t]
+            if titles:
+                lines.append(f"- {s.name} (exemples : {', '.join(titles)})")
+            else:
+                lines.append(f"- {s.name}")
+        system = (
+            "Tu classes un document importé dans UNE matière existante. "
+            "Réponds STRICTEMENT en JSON, sans aucun texte autour : "
+            '{"subject": "<nom exact>"} pour rattacher, {"subject": null} '
+            "si aucune matière ne convient. Ne réponds JAMAIS un autre nom "
+            "que ceux de la liste."
+        )
+        user = (
+            f"Document : « {filename} »\n\nMatières existantes :\n"
+            + "\n".join(lines)
+            + "\n\nQuelle matière ?"
+        )
+        return [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+
+    def _choose_subject_via_llm(
+        self, filename: str, subjects: list[Any]
+    ) -> str | None:
+        """Pick an existing subject id via LLM (last resort, sync).
+
+        Returns the matched subject id, or ``None`` (null/invalid/unknown
+        answer, HTTP failure, timeout). Unknown names NEVER create a
+        subject. Purely synchronous (``httpx.Client``, ``stream: False``,
+        bounded timeout) like :meth:`generate_lesson_text` — the import
+        path is sync and must never touch asyncio.
+        """
+        if not subjects:
+            return None
+        messages = self._build_import_subject_messages(filename, subjects)
+        payload: dict[str, Any] = {
+            "model": self.config.tutor_model,
+            "messages": messages,
+            "stream": False,
+            "think": False,
+        }
+        try:
+            with httpx.Client(
+                base_url=self._lesson_ollama_base_url(),
+                timeout=httpx.Timeout(IMPORT_SUBJECT_LLM_TIMEOUT_S),
+                transport=self.lesson_http_transport,
+            ) as http:
+                resp = http.post("/api/chat", json=payload)
+        except Exception as exc:
+            logger.warning("choix LLM du domaine impossible: %s", exc)
+            return None
+        if resp.status_code != 200:
+            logger.warning(
+                "choix LLM du domaine: HTTP %s", resp.status_code
+            )
+            return None
+        try:
+            data = resp.json()
+        except Exception:
+            return None
+        message = data.get("message") if isinstance(data, dict) else None
+        content = message.get("content", "") if isinstance(message, dict) else ""
+        name = self._parse_import_subject_answer(content)
+        if not name:
+            return None
+        for s in subjects:
+            if s.name.lower() == name.lower():
+                return s.id
+        logger.warning("le LLM a renvoyé un domaine inconnu: %r", name)
+        return None
 
     # ------------------------------------------------------------------
     # Cancellation
