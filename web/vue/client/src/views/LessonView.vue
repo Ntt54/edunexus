@@ -43,7 +43,7 @@ function learnerId(): string {
 
 /* ── Types ────────────────────────────────────────────────── */
 interface LessonDiscussion { id: string; notion_id?: string; path_step_id?: string; learner_id?: string; subject_id?: string; }
-interface LessonContent { id: string; kind: string; content: string; sources?: Array<{ book_id?: string; book?: string; chapter?: string; confidence?: number }>; confidence?: number; created_at?: string; }
+interface LessonContent { id: string; kind: string; content: string; sources?: Array<{ book_id?: string; book?: string; chapter?: string; confidence?: number }>; confidence?: number; created_at?: string; model?: string | null; fallback?: boolean; }
 interface LessonMsg { id: string; role: string; content: string; sources?: unknown[]; created_at?: string; }
 interface ExerciseQuestion { id: string; type: string; statement: string; options?: string[]; answer?: string; }
 interface ExerciseAttempt { id: string; questions: ExerciseQuestion[]; score?: number; passed?: boolean; per_question?: Array<{ statement?: string; question_id?: string; given?: string; expected?: string; correct?: boolean; explanation?: string }>; correct_count?: number; total?: number; feedback?: string; }
@@ -111,6 +111,22 @@ type LessonTab = "discussion" | "course" | "summary" | "exercises";
 const activeTab = ref<LessonTab>("discussion");
 const courseContents = computed(() => contents.value.filter(c => c.kind === "lesson_course"));
 const summaryContents = computed(() => contents.value.filter(c => c.kind === "lesson_summary"));
+
+// ── Pastille modèle (contrat generated_contents[].model/fallback) ───
+// Nom court : après le dernier « / », sans le tag après « : »
+// (ex. « unsloth/Qwen3-8B-GGUF:Q8_0 » ⇒ « Qwen3-8B-GGUF »).
+// fallback ou model null/absent (vieux contenus) ⇒ « hors-ligne ».
+function contentModel(c: LessonContent): string | null {
+  const m = (c as { model?: unknown }).model;
+  return typeof m === "string" && m.trim() ? m : null;
+}
+function isOfflineContent(c: LessonContent): boolean {
+  return (c as { fallback?: unknown }).fallback === true || contentModel(c) == null;
+}
+function shortModelName(model: string): string {
+  const afterSlash = model.split("/").pop() ?? model;
+  return afterSlash.split(":")[0] || model;
+}
 const hasNoSources = computed(() => {
   if (!contents.value.length && !messages.value.length) return false;
   if (contents.value.length>0 && contents.value.every(c => !c.sources || c.sources.length===0)) return true;
@@ -548,6 +564,7 @@ function goBack() { router.push("/parcours"); }
             <div class="notebook-output-head">
               <span class="capture-kind">{{ t("lesson.course") }}</span>
               <span class="head-actions">
+                <StatusPill :tone="isOfflineContent(c) ? 'slate' : 'green'" :title="contentModel(c) ?? t('lesson.offline')">{{ isOfflineContent(c) ? t("lesson.offline") : shortModelName(contentModel(c) as string) }}</StatusPill>
                 <StatusPill tone="indigo">{{ t("lesson.words", { count: wordCount(c.content) }) }}</StatusPill>
                 <button
                   type="button"
@@ -585,6 +602,7 @@ function goBack() { router.push("/parcours"); }
             <div class="notebook-output-head">
               <span class="capture-kind">{{ t("lesson.summary") }}</span>
               <span class="head-actions">
+                <StatusPill :tone="isOfflineContent(c) ? 'slate' : 'green'" :title="contentModel(c) ?? t('lesson.offline')">{{ isOfflineContent(c) ? t("lesson.offline") : shortModelName(contentModel(c) as string) }}</StatusPill>
                 <StatusPill tone="orange">{{ t("lesson.words", { count: wordCount(c.content) }) }}</StatusPill>
                 <button
                   type="button"

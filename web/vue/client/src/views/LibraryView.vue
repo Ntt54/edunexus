@@ -297,6 +297,30 @@ async function attachOrphan(book: SourceBook) {
 }
 
 // ── Domain operations ──────────────────────────────────────────
+function notifySubjectsChanged() {
+  // Le sélecteur topbar (AppShell) recharge ses domaines, sans polling.
+  window.dispatchEvent(new CustomEvent("edunexus:subjects-changed"));
+}
+
+async function renameDomain(domain: TreeNode) {
+  const name = prompt(t("library.renameDomain") + " :", domain.name);
+  if (name == null) return;
+  if (!name.trim() || name.trim() === domain.name) return;
+  try {
+    await tutorApi.renameSubject(domain.id, name.trim());
+    importProgress.value = t("library.domainRenamed");
+    await refreshBooks();
+    notifySubjectsChanged();
+    setTimeout(() => { importProgress.value = ""; }, 2500);
+  } catch (e) {
+    // 400 vide, 404 inconnu/route absente, 409 doublon : repli propre.
+    const st = (e as { status?: number }).status;
+    importProgress.value = st === 409
+      ? t("subject.exists")
+      : st === 400 ? t("subject.nameEmpty") : t("library.domainRenameFailed");
+  }
+}
+
 async function deleteDomain(domain: TreeNode) {
   const n = domain.books.length;
   const base = t("library.deleteDomainConfirm", { name: domain.name });
@@ -307,6 +331,7 @@ async function deleteDomain(domain: TreeNode) {
     openDomains.value.delete(domain.id);
     importProgress.value = t("library.domainDeleted");
     await refreshBooks();
+    notifySubjectsChanged();
     setTimeout(() => { importProgress.value = ""; }, 2500);
   } catch { /* best-effort */ }
 }
@@ -499,6 +524,18 @@ async function deleteBook(book: SourceBook) {
     await tutorApi.deleteBook(book.id);
     await refreshBooks();
   } catch { /* best-effort */ }
+}
+
+async function unlinkBook(book: SourceBook, domain: TreeNode) {
+  if (!confirm(t("subject.unlinkConfirm", { title: book.title }))) return;
+  try {
+    await tutorApi.unlinkBookFromSubject(domain.id, book.id);
+    importProgress.value = t("subject.unlinked");
+    await refreshBooks();
+    setTimeout(() => { importProgress.value = ""; }, 2500);
+  } catch {
+    importProgress.value = t("subject.unlinkFailed");
+  }
 }
 
 async function reindexBook(book: SourceBook) {
@@ -791,6 +828,7 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
             <strong class="lib-tlabel" @click="toggleDomain(domain.id)">{{ domain.name }}</strong>
             <span class="lib-tcount">{{ domain.books.length }} doc</span>
             <span class="lib-tacts">
+              <button type="button" class="lib-tact" :title="t('library.renameDomain')" @click.stop="renameDomain(domain)">✎</button>
               <button type="button" class="lib-tact del" :title="t('library.deleteDomain')" @click.stop="deleteDomain(domain)">🗑</button>
             </span>
           </div>
@@ -814,6 +852,7 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
                   </div>
                   <span class="lib-src-actions">
                     <button type="button" class="lib-tact" :title="t('library.reindex')" @click.stop="reindexBook(book)">↻</button>
+                    <button type="button" class="lib-tact" :title="t('subject.unlink')" @click.stop="unlinkBook(book, domain)">⤴</button>
                     <button type="button" class="lib-src-del" :title="t('library.deleteBook')" @click.stop="deleteBook(book)">×</button>
                   </span>
                 </div>
@@ -862,6 +901,7 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
                     </div>
                     <span class="lib-src-actions">
                       <button type="button" class="lib-tact" :title="t('library.reindex')" @click.stop="reindexBook(book)">↻</button>
+                      <button type="button" class="lib-tact" :title="t('subject.unlink')" @click.stop="unlinkBook(book, domain)">⤴</button>
                       <button type="button" class="lib-src-del" :title="t('library.deleteBook')" @click.stop="deleteBook(book)">×</button>
                     </span>
                   </div>

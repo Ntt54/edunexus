@@ -44,7 +44,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
     ...init,
   });
-  if (!response.ok) throw new Error(`Erreur API ${response.status}`);
+  if (!response.ok) {
+    // Détail serveur FR quand présent (ex. 400/409/404 métier) + statut
+    // exploitable par les vues, sans changer le type Error levé.
+    let detail = "";
+    try { const j = await response.json(); if (j?.detail) detail = String(j.detail); } catch { /* ignore */ }
+    const err = new Error(detail ? `Erreur API ${response.status} : ${detail}` : `Erreur API ${response.status}`) as Error & { status?: number };
+    err.status = response.status;
+    throw err;
+  }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
@@ -138,6 +146,21 @@ export const tutorApi = {
   },
   async deleteSubject(id: string): Promise<{ deleted: boolean }> {
     return request<{ deleted: boolean }>(`/subjects/${encodeURIComponent(id)}`, { method: "DELETE" });
+  },
+  async createSubject(name: string): Promise<{ id: string; name: string }> {
+    return request<{ id: string; name: string }>("/subjects", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+  },
+  async unlinkBookFromSubject(subjectId: string, bookId: string): Promise<{ removed: boolean }> {
+    return request<{ removed: boolean }>(`/subjects/${encodeURIComponent(subjectId)}/books/${encodeURIComponent(bookId)}`, { method: "DELETE" });
+  },
+  async renameSubject(id: string, name: string): Promise<{ id: string; name: string }> {
+    return request<{ id: string; name: string }>(`/subjects/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ name }),
+    });
   },
   async linkBookToSubject(subjectId: string, bookId: string): Promise<{ linked: boolean }> {
     return request<{ linked: boolean }>(`/subjects/${encodeURIComponent(subjectId)}/books`, {

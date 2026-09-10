@@ -1,6 +1,6 @@
 <!-- EduNexus UI direction: Atelier de progression — header complet avec badge moteur, sélecteurs modèles, espaces, apprenants et statut. -->
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { RouterLink, RouterView } from "vue-router";
 import {
   BarChart3, BookOpen, Bot, BrainCircuit, Camera, CheckSquare, Compass,
@@ -262,6 +262,34 @@ function onSubjectChange(event: Event) {
   localStorage.setItem("edunexus.space", value);
 }
 
+async function createSubject() {
+  const name = prompt(t("subject.createPrompt") + " :");
+  if (name == null) return;
+  if (!name.trim()) {
+    setStatus(t("subject.nameEmpty"));
+    return;
+  }
+  try {
+    const created = await tutorApi.createSubject(name.trim());
+    await loadSubjects();
+    // La matière créée devient la matière active (sélecteur + persistance ;
+    // les vues scopent déjà leurs appels par subject_id).
+    activeSubjectId.value = created.id;
+    localStorage.setItem("edunexus.space", created.id);
+    setStatus(t("subject.created", { name: created.name }));
+  } catch (e) {
+    const st = (e as { status?: number }).status;
+    const detail = e instanceof Error ? e.message : "";
+    setStatus(st === 409 ? t("subject.exists") : st === 400 ? t("subject.nameEmpty") : detail || t("subject.createFailed"));
+  }
+}
+
+// Nom d'apprenant résolu depuis la liste chargée ; repli discret (« — »),
+// jamais l'id hexadécimal affiché tel quel.
+const activeLearnerName = computed(() =>
+  learners.value.find((l) => l.id === activeLearnerId.value)?.name || "",
+);
+
 async function loadLearners() {
   try {
     const data = await tutorApi.getLearners();
@@ -285,8 +313,7 @@ async function onLearnerChange(event: Event) {
   localStorage.setItem("edunexus.learner", lid);
   try {
     await tutorApi.activateLearner(lid);
-    const name = learners.value.find(l => l.id === lid)?.name || "";
-    setStatus("Apprenant actif : " + name);
+    setStatus("Apprenant actif : " + (activeLearnerName.value || "—"));
   } catch (e) {
     setStatus("Erreur : " + (e instanceof Error ? e.message : String(e)));
   }
@@ -305,12 +332,21 @@ async function addLearner() {
 }
 
 // ── Initialization ────────────────────────────────────────────────
+function handleSubjectsChanged() {
+  // Rename / suppression depuis la bibliothèque : recharge ponctuelle,
+  // sans polling ; la sélection active est préservée si elle existe.
+  loadSubjects();
+}
 onMounted(() => {
   favModels.value = loadFavModels();
   loadEngine();
   loadModels();
   loadSubjects();
   loadLearners();
+  window.addEventListener("edunexus:subjects-changed", handleSubjectsChanged);
+});
+onUnmounted(() => {
+  window.removeEventListener("edunexus:subjects-changed", handleSubjectsChanged);
 });
 </script>
 
@@ -371,10 +407,19 @@ onMounted(() => {
             <option v-if="!subjects.length" value="" disabled>— importez un document —</option>
             <option v-for="s in subjects" :key="s.id" :value="s.id">{{ s.name }}</option>
           </select>
+          <button
+            type="button"
+            class="topbar-icon-btn"
+            :title="t('subject.create')"
+            :aria-label="t('subject.create')"
+            @click="createSubject"
+          >
+            <Plus :size="14" aria-hidden="true" />
+          </button>
         </div>
 
         <!-- Learner selector -->
-        <div class="topbar-chip" title="Apprenant actif">
+        <div class="topbar-chip" :title="activeLearnerName ? 'Apprenant actif : ' + activeLearnerName : 'Apprenant actif'">
           <Users :size="14" aria-hidden="true" />
           <select
             :value="activeLearnerId"
