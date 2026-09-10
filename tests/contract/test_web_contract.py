@@ -81,6 +81,14 @@ IGNORED_ROUTES: set[tuple[str, str]] = {
     ("POST", "/api/tutor/subjects/{}/revision-sheet"),
     # --- Leçon : validation manuelle (SPA Vue, services/api.ts) ---
     ("POST", "/api/tutor/lesson-discussions/{}/complete-manual"),
+    # --- Leçon : question/réponse RAG de la notion (SPA Vue LessonView, services/api.ts) ---
+    ("POST", "/api/tutor/lesson-discussions/{}/ask"),
+    # --- Leçon : cours streamé SSE (contrat déjà attendu par LessonView
+    # via courseStreamUrl, repli POST si 404 ; tutor.html ne le fetche pas) ---
+    ("GET", "/api/tutor/lesson-discussions/{}/course/stream"),
+    # --- Leçon : suppression d'un contenu généré (contrat fixe pour le
+    # front qui suit ; tutor.html ne le fetche pas encore) ---
+    ("DELETE", "/api/tutor/lesson-discussions/{}/contents/{}"),
     # --- Sessions / reprise (SPA Vue : api.ts + useTutorSocket) ---
     ("GET", "/api/tutor/subjects/{}/resume"),
     ("GET", "/api/tutor/subjects/{}/sessions"),
@@ -116,6 +124,14 @@ IGNORED_ROUTES: set[tuple[str, str]] = {
     # --- Jobs US3 : détail ciblé (le panneau Bibliothèque ne polle que la
     # liste ; le détail reste disponible pour suivi unitaire / debug) ---
     ("GET", "/api/ingestion/jobs/{}"),
+    # --- Rattachement orphelins (contrat fixe pour le front à venir ;
+    # tutor.html ne le fetche pas encore — couvert par test_orphans.py) ---
+    ("POST", "/api/tutor/subjects/{}/books"),
+    # --- Gestion matières (contrats fixes pour le front à venir ;
+    # couverts par test_subjects_manage.py) ---
+    ("POST", "/api/tutor/subjects"),
+    ("PUT", "/api/tutor/subjects/{}"),
+    ("DELETE", "/api/tutor/subjects/{}/books/{}"),
 }
 
 # Motifs legacy interdits dans le front (adapté de FORBIDDEN_PATTERNS :

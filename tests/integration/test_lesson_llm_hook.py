@@ -278,6 +278,157 @@ def test_lesson_timeout_per_kind(monkeypatch, tmp_path: Path) -> None:
     assert reads == [360.0, 180.0, 180.0], f"timeouts par kind : {reads}"
 
 
+# ------------------------------------------------------------------
+# Modèle IA persisté par contenu généré (model TEXT, NULL = repli/lignes
+# existantes). Payloads : `model: string|null` + `fallback: bool`.
+# ------------------------------------------------------------------
+
+
+def test_model_migration_idempotent_and_legacy_rows_null(tmp_path: Path) -> None:
+    from src.ollama_tutor.tutor.store import LibraryStore as LS
+
+    config_dir = tmp_path / "config"
+    store = LS(config_dir)
+    subj = store.create_subject("Informatique")
+    store._conn.execute(
+        "INSERT OR IGNORE INTO learner_profiles (id, name, avatar, created_at, updated_at)"
+        " VALUES (?, ?, ?, ?, ?)",
+        ("alice", "alice", "", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+    )
+    store._conn.commit()
+    # Ligne pré-migration (sans model) : lisible, model None.
+    disc_id = "disc-legacy"
+    store._conn.execute(
+        "INSERT INTO lesson_discussions (id, path_step_id, notion_id, subject_id, learner_id, status, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (disc_id, "step-x", "Boucles", subj.id, "alice", "active", "2026-01-01T00:00:00+00:00"),
+    )
+    store._conn.execute(
+        "INSERT INTO generated_lesson_contents (id, discussion_id, kind, content, sources, confidence, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("c-legacy", disc_id, "lesson_course", "ancien cours", "[]", 0.8, "2026-01-01T00:00:00+00:00"),
+    )
+    store._conn.commit()
+    # Migration rejouée 2× : sûre, colonne présente, ligne intacte.
+    store._migrate_lesson_model_column()
+    store._migrate_lesson_model_column()
+    cols = {r["name"] for r in store._conn.execute("PRAGMA table_info(generated_lesson_contents)")}
+    assert "model" in cols
+    rows = store.list_generated_contents(disc_id)
+    assert len(rows) == 1
+    assert rows[0].model is None
+    assert rows[0].to_dict()["model"] is None
+
+
+def test_add_generated_content_with_model(tmp_path: Path) -> None:
+    store, _svc, _step = _seed_lesson(tmp_path)
+    subj = store.create_subject("Physique")
+    store._conn.execute(
+        "INSERT OR IGNORE INTO learner_profiles (id, name, avatar, created_at, updated_at)"
+        " VALUES (?, ?, ?, ?, ?)",
+        ("alice", "alice", "", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+    )
+    store._conn.commit()
+    disc_id = "disc-model"
+    store._conn.execute(
+        "INSERT INTO lesson_discussions (id, path_step_id, notion_id, subject_id, learner_id, status, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (disc_id, "step-x", "Boucles", subj.id, "alice", "active", "2026-01-01T00:00:00+00:00"),
+    )
+    store._conn.commit()
+    obj = store.add_generated_content(
+        disc_id, "lesson_course", "cours", model="llama3.2:3b"
+    )
+    assert obj.model == "llama3.2:3b"
+    assert obj.to_dict()["model"] == "llama3.2:3b"
+    assert store.list_generated_contents(disc_id)[0].model == "llama3.2:3b"
+    # Défaut : repli/hors-ligne ⇒ NULL.
+    obj2 = store.add_generated_content(disc_id, "lesson_summary", "synthèse")
+    assert obj2.model is None
+
+
+def test_e2e_course_persists_effective_model(tmp_path: Path) -> None:
+    store, svc, step = _seed_lesson(tmp_path)
+    llm_body = " ".join(["Mot de cours LLM authentique sur les boucles."] * 130)
+    captured: dict = {}
+    svc.lesson_http_transport = _ok_transport(captured, llm_body)
+    lesson = LessonDiscussionService(store, tutor_service=svc)
+    disc = lesson.get_or_create_discussion(step.id, "alice")
+    course = lesson.generate_course(disc.id)
+    assert course["fallback"] is False
+    assert course["model"] == svc.config.tutor_model
+    assert store.list_generated_contents(disc.id)[0].model == svc.config.tutor_model
+
+
+def test_e2e_course_fallback_model_null(tmp_path: Path) -> None:
+    store, svc, step = _seed_lesson(tmp_path)
+    lesson = LessonDiscussionService(store, tutor_service=None)
+    disc = lesson.get_or_create_discussion(step.id, "alice")
+    course = lesson.generate_course(disc.id)
+    assert course["fallback"] is True
+    assert course["model"] is None
+    assert store.list_generated_contents(disc.id)[0].model is None
+
+
+def test_e2e_summary_persists_effective_model(tmp_path: Path) -> None:
+    store, svc, step = _seed_lesson(tmp_path)
+    llm_body = " ".join(["Phrase de synthèse LLM sur les boucles."] * 30)
+    assert 150 <= len(llm_body.split()) <= 250
+    captured: dict = {}
+    svc.lesson_http_transport = _ok_transport(captured, llm_body)
+    lesson = LessonDiscussionService(store, tutor_service=svc)
+    disc = lesson.get_or_create_discussion(step.id, "alice")
+    summary = lesson.generate_summary(disc.id)
+    assert summary["fallback"] is False
+    assert summary["model"] == svc.config.tutor_model
+
+
+def test_route_course_exposes_model_and_fallback(tmp_path: Path, monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    from src.ollama_tutor.web.server import TutorService as WebTutorService
+    from src.ollama_tutor.web.server import create_app
+
+    config_dir = tmp_path / "config"
+    store = LibraryStore(config_dir)
+    subj = store.create_subject("Informatique")
+    path = store.create_learning_path(subj.id, "Parcours")
+    step = store.add_path_step(path.id, "concept", "notion-loops", "Boucles", ordinal=0)
+    llm_body = " ".join(["Mot de cours LLM authentique sur les boucles."] * 130)
+
+    def fake_generate(self, kind, notion, excerpts, question=None):
+        return llm_body
+
+    monkeypatch.setattr(WebTutorService, "generate_lesson_text", fake_generate)
+    with TestClient(create_app(config_dir=config_dir)) as client:
+        disc_id = client.post(
+            f"/api/tutor/path-steps/{step.id}/discussion",
+            headers={"X-Learner-Id": "alice"},
+        ).json()["discussion"]["id"]
+        body = client.post(
+            f"/api/tutor/lesson-discussions/{disc_id}/generate-course",
+            headers={"X-Learner-Id": "alice"},
+        ).json()["content"]
+        assert body["fallback"] is False
+        assert isinstance(body["model"], str) and body["model"]
+
+    def fake_fail(self, kind, notion, excerpts, question=None):
+        raise RuntimeError("LLM down")
+
+    monkeypatch.setattr(WebTutorService, "generate_lesson_text", fake_fail)
+    with TestClient(create_app(config_dir=config_dir)) as client:
+        disc_id = client.post(
+            f"/api/tutor/path-steps/{step.id}/discussion",
+            headers={"X-Learner-Id": "alice"},
+        ).json()["discussion"]["id"]
+        body = client.post(
+            f"/api/tutor/lesson-discussions/{disc_id}/generate-course",
+            headers={"X-Learner-Id": "alice"},
+        ).json()["content"]
+        assert body["fallback"] is True
+        assert body["model"] is None
+
+
 def test_delete_generated_content_store(tmp_path: Path) -> None:
     store, _svc, step = _seed_lesson(tmp_path)
     lesson = LessonDiscussionService(store, tutor_service=None)

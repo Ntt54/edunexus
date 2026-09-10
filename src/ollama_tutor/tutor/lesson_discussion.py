@@ -10,6 +10,8 @@ fallback deterministic path for offline tests.
 from __future__ import annotations
 
 import asyncio
+import difflib
+import re
 from typing import Any
 
 from .models import LessonDiscussion, SourceReference
@@ -23,6 +25,157 @@ _OFFLINE_MENTION = "généré hors-ligne depuis les extraits"
 #: short per-chunk timeout would kill legitimate slow generations. Applied
 #: per received chunk (live deltas keep flowing), not as an overall cap.
 LESSON_STREAM_TIMEOUT_S = 420.0
+
+#: Excerpt hygiene (prod: promos, legal notices, cover pages and TOCs
+#: became COURSE ITEMS, and the same excerpt repeated 3x in the render).
+#: Pure-Python stdlib signals scored per excerpt; selection-only (never
+#: touches extraction/indexation).
+_URL_RE = re.compile(r"https?://|www\.|t\.me|telegram\.me", re.IGNORECASE)
+_MESSAGING_RE = re.compile(r"t\.me|telegram|whatsapp", re.IGNORECASE)
+_CTA_RE = re.compile(
+    r"cliqu\w*|rejoign\w*|abonn\w*|promo\b|offre exclusive|\blike[sz]?\b"
+    r"|partage[rz]\b|concours|youtube|tiktok|instagram|facebook|discord",
+    re.IGNORECASE,
+)
+_LEGAL_RE = re.compile(
+    r"\bisbn\b|tous droits|copyright|©|mentions?\s+légales?|dépôt légal"
+    r"|achevé d'imprimer",
+    re.IGNORECASE,
+)
+_COVER_RE = re.compile(
+    r"page de garde|quatrième de couverture", re.IGNORECASE
+)
+_TOC_RE = re.compile(r"\bsommaire\b|table des matières", re.IGNORECASE)
+
+#: Junk threshold: an excerpt scoring >= this is excluded from lessons.
+_JUNK_THRESHOLD = 3
+
+
+def _junk_score(text: Any) -> int:
+    """Junk score of an excerpt (higher = more parasitic)."""
+    t = str(text or "").strip()
+    if not t:
+        return 2  # empty slot, never a course item — but not "junk" either
+    score = 0
+    if _MESSAGING_RE.search(t):
+        score += 3  # promo messaging alone disqualifies
+    elif _URL_RE.search(t):
+        score += 2
+    if _CTA_RE.search(t):
+        score += 2
+    if _LEGAL_RE.search(t):
+        score += 3
+    if _COVER_RE.search(t):
+        score += 4
+    if _TOC_RE.search(t):
+        score += 3
+    if len(t) < 25:
+        score += 2  # too thin to be a course item on its own
+    return score
+
+
+def is_junk_excerpt(text: Any) -> bool:
+    """True when an excerpt is parasitic (promo/URL, legal, cover, TOC).
+
+    Pure stdlib, never raises (weird input → False, i.e. kept).
+    """
+    try:
+        return _junk_score(text) >= _JUNK_THRESHOLD
+    except Exception:
+        return False
+
+
+def _norm_excerpt(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").lower()).strip()
+
+
+def _dedupe_indices(texts: list[str]) -> list[int]:
+    """Indices of first occurrences (exact normalized, then near-identical).
+
+    Near-duplicates (difflib ratio ≥ 0.92 on whitespace-normalized text,
+    similar lengths) keep the FIRST occurrence, order preserved. Bounded:
+    beyond 80 texts only exact dedup runs (CPU guard).
+    """
+    seen: dict[str, int] = {}
+    order: list[int] = []
+    keys: list[str] = []
+    for i, t in enumerate(texts):
+        key = _norm_excerpt(t)
+        if not key or key in seen:
+            continue
+        seen[key] = i
+        order.append(i)
+        keys.append(key)
+    if len(order) <= 80:
+        final: list[int] = []
+        final_keys: list[str] = []
+        for i, key in zip(order, keys):
+            dupe = False
+            for fk in final_keys:
+                if abs(len(key) - len(fk)) > max(16, int(max(len(key), len(fk)) * 0.1)):
+                    continue
+                if difflib.SequenceMatcher(None, key, fk).ratio() >= 0.92:
+                    dupe = True
+                    break
+            if not dupe:
+                final.append(i)
+                final_keys.append(key)
+        return final
+    return order
+
+
+def dedupe_excerpts(texts: list[str]) -> list[str]:
+    """Drop exact and near-identical excerpts (first kept, order preserved)."""
+    if not texts:
+        return []
+    return [texts[i] for i in _dedupe_indices(list(texts))]
+
+
+def select_lesson_chunks(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Filter lesson chunks: drop junk, prefer chapters/sections, dedupe.
+
+    - Junk excerpts (promo, legal, cover, TOC) are excluded.
+    - Chunks carrying chapter/section metadata rank before bare ones
+      (cover pages lose when real content exists), stable order otherwise.
+    - Near-identical texts are deduplicated (first kept).
+    - GUARANTEE: non-empty input ⇒ non-empty output (all-filtered keeps
+      the least-junk chunk); empty input ⇒ [] (callers' contract kept).
+    Never raises.
+    """
+    try:
+        if not chunks:
+            return []
+        scored = [
+            (c, _junk_score(c.get("text") if isinstance(c, dict) else ""))
+            for c in chunks
+        ]
+        kept = [c for c, s in scored if s < _JUNK_THRESHOLD]
+        if kept:
+            pool = kept
+        else:
+            best = min(range(len(scored)), key=lambda i: (scored[i][1], i))
+            pool = [scored[best][0]]
+        # Prefer chapters/sections over bare cover-page chunks.
+        pool = sorted(
+            pool,
+            key=lambda c: (
+                0
+                if (
+                    isinstance(c, dict)
+                    and (str(c.get("chapter") or "").strip() or str(c.get("section") or "").strip())
+                )
+                else 1
+            ),
+        )
+        texts = [
+            c.get("text") if isinstance(c, dict) else "" for c in pool
+        ]
+        idx = _dedupe_indices([str(t or "") for t in texts])
+        out = [pool[i] for i in idx]
+        return out or pool[:1]
+    except Exception:
+        return list(chunks) if chunks else []
+
 
 #: Minimal French stopwords so RAG filtering keeps topical keywords only.
 #: Without this, 2-letter words like « en » match nearly every chunk and
@@ -142,6 +295,22 @@ class LessonDiscussionService:
             return ""
         return (getattr(book, "title", "") or "").strip()
 
+    def _llm_model(self) -> str | None:
+        """Effective LLM model name behind the tutor_service hook.
+
+        Reads ``tutor_service.config.tutor_model`` (the model
+        ``generate_lesson_text`` actually sends). ``None`` when the hook
+        path is unavailable — callers persist NULL (offline fallback).
+        Never raises.
+        """
+        try:
+            cfg = getattr(self.tutor_service, "config", None)
+            name = getattr(cfg, "tutor_model", None)
+            name = str(name).strip() if name is not None else ""
+            return name or None
+        except Exception:
+            return None
+
     def _sources_footer(self, chunks: list[dict[str, Any]]) -> str:
         """Readable « Sources : … » footer (book TITLES, never raw ids).
 
@@ -184,12 +353,20 @@ class LessonDiscussionService:
         return list(dict.fromkeys(tokens))  # dedup preserve order
 
     def _filtered_chunks(self, subject_id: str, keywords: list[str]) -> list[dict[str, Any]]:
-        """Chunks filtered to those matching notion keywords (case-insensitive)."""
+        """Chunks filtered to those matching notion keywords (case-insensitive).
+
+        Survivors go through :func:`select_lesson_chunks` (junk excluded,
+        chapters preferred, near-dupes merged) so prompts AND rendered
+        fallbacks never embed promos, legal notices, cover pages or
+        tripled excerpts. Empty keyword matches still return [] (callers'
+        contract preserved); the never-empty guarantee applies once chunks
+        exist.
+        """
         if not subject_id:
             return []
         chunks = self.store.get_indexed_chunks(subject_id)
         if not keywords:
-            return chunks[:10]
+            return select_lesson_chunks(chunks[:10])
         kw_lower = [k.lower() for k in keywords]
         filtered = []
         for c in chunks:
@@ -200,7 +377,7 @@ class LessonDiscussionService:
             if any(k in hay for k in kw_lower):
                 filtered.append(c)
         # If nothing matches, return empty (caller will surface message / empty sources)
-        return filtered
+        return select_lesson_chunks(filtered)
 
     def _sources_from_chunks(self, chunks: list[dict[str, Any]]) -> list[SourceReference]:
         seen: set[str] = set()
@@ -300,7 +477,10 @@ class LessonDiscussionService:
             content = _offline_header("Cours") + content
         # Ensure 800–1200 words
         content = _ensure_word_range(content, 800, 1200, notion, chunks)
-        obj = self.store.add_generated_content(discussion_id, "lesson_course", content, sources=sources, confidence=confidence)
+        obj = self.store.add_generated_content(
+            discussion_id, "lesson_course", content, sources=sources, confidence=confidence,
+            model=self._llm_model() if not is_fallback else None,
+        )
         result = obj.to_dict()
         result["fallback"] = is_fallback
         return result
@@ -364,7 +544,8 @@ class LessonDiscussionService:
             yield {"error": "Réponse vide du modèle"}
             return
         self.store.add_generated_content(
-            discussion_id, "lesson_course", content, sources=sources, confidence=confidence
+            discussion_id, "lesson_course", content, sources=sources, confidence=confidence,
+            model=self._llm_model(),
         )
         yield {"done": True, "fallback": False}
 
@@ -429,7 +610,10 @@ class LessonDiscussionService:
             if is_fallback:
                 content = _offline_header("Synthèse") + content
             content = _ensure_word_range(content, 150, 250, notion, chunks)
-        obj = self.store.add_generated_content(discussion_id, "lesson_summary", content, sources=sources, confidence=confidence)
+        obj = self.store.add_generated_content(
+            discussion_id, "lesson_summary", content, sources=sources, confidence=confidence,
+            model=self._llm_model() if not is_fallback else None,
+        )
         result = obj.to_dict()
         result["fallback"] = is_fallback
         return result

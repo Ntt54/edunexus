@@ -1400,10 +1400,13 @@ class GeneratedLessonContent:
     sources: list[SourceReference] = None  # type: ignore[assignment]
     confidence: float = 0.0
     created_at: str = ""
+    model: str | None = None  # IA utilisée (NULL = repli hors-ligne / lignes existantes)
 
     def __post_init__(self) -> None:
         if self.sources is None:
             self.sources = []
+        if not self.model:
+            self.model = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1414,6 +1417,7 @@ class GeneratedLessonContent:
             "sources": [s.to_dict() for s in self.sources],
             "confidence": self.confidence,
             "created_at": self.created_at,
+            "model": self.model,
         }
 
     @classmethod
@@ -1426,6 +1430,7 @@ class GeneratedLessonContent:
             sources=[SourceReference.from_dict(s) for s in _coerce_json(raw.get("sources"), [])],
             confidence=float(raw.get("confidence", 0.0)),
             created_at=str(raw.get("created_at", "")),
+            model=str(raw.get("model") or "") or None,
         )
 
 

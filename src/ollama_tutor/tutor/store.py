@@ -608,6 +608,7 @@ class LibraryStore:
                 sources TEXT NOT NULL DEFAULT '[]',
                 confidence REAL NOT NULL DEFAULT 0.0,
                 created_at TEXT NOT NULL,
+                model TEXT,
                 FOREIGN KEY (discussion_id) REFERENCES lesson_discussions(id) ON DELETE CASCADE
             );
 
@@ -938,6 +939,7 @@ class LibraryStore:
                 sources TEXT NOT NULL DEFAULT '[]',
                 confidence REAL NOT NULL DEFAULT 0.0,
                 created_at TEXT NOT NULL,
+                model TEXT,
                 FOREIGN KEY (discussion_id) REFERENCES lesson_discussions(id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS lesson_exercise_attempts (
@@ -967,6 +969,7 @@ class LibraryStore:
                 "ALTER TABLE path_steps ADD COLUMN status TEXT NOT NULL DEFAULT 'not_started'"
             )
             cur.commit()
+        self._migrate_lesson_model_column()
         # For existing tables lesson_discussions: ensure missing columns are added
         ld_cols = {r["name"] for r in cur.execute("PRAGMA table_info(lesson_discussions)")}
         if "notion_id" not in ld_cols:
@@ -2613,6 +2616,25 @@ class LibraryStore:
         )
         self._conn.commit()
         return cur.rowcount == 1
+
+    def unlink_book_from_subject(self, subject_id: str, book_id: str) -> bool:
+        """Detach a book from a subject (orphaning, never deletion).
+
+        Only the ``subject_books`` join row is removed; the book row (and
+        its chunks) survives as an orphan, still visible via
+        :meth:`list_all_books`. Returns True when a join row was removed,
+        False when no such link existed. Raises KeyError when the book or
+        the subject is unknown.
+        """
+        if self.get_book(book_id) is None:
+            raise KeyError(f"Unknown book: {book_id}")
+        self._get_subject(subject_id)  # KeyError if unknown
+        cur = self._conn.execute(
+            "DELETE FROM subject_books WHERE subject_id = ? AND book_id = ?",
+            (subject_id, book_id),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
 
     # ------------------------------------------------------------------
     # Categories, corpora & temp-doc lifecycle (Phase 4)
@@ -4303,6 +4325,17 @@ class LibraryStore:
             out.append(d)
         return out
 
+    def _migrate_lesson_model_column(self) -> None:
+        """Add ``model`` to ``generated_lesson_contents`` when absent.
+
+        Idempotent PRAGMA table_info check (existing DBs keep their rows,
+        NULL = pre-migration/offline content). Safe to call on every startup.
+        """
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(generated_lesson_contents)")}
+        if cols and "model" not in cols:
+            self._conn.execute("ALTER TABLE generated_lesson_contents ADD COLUMN model TEXT")
+            self._conn.commit()
+
     def add_generated_content(
         self,
         discussion_id: str,
@@ -4310,6 +4343,7 @@ class LibraryStore:
         content: str,
         sources: list[SourceReference] | None = None,
         confidence: float = 0.0,
+        model: str | None = None,
     ) -> GeneratedLessonContent:
         if kind not in ("lesson_course", "lesson_summary"):
             raise ValueError(f"Invalid kind: {kind}")
@@ -4322,11 +4356,12 @@ class LibraryStore:
             sources=sources or [],
             confidence=float(confidence),
             created_at=now,
+            model=model,
         )
         self._conn.execute(
-            "INSERT INTO generated_lesson_contents (id, discussion_id, kind, content, sources, confidence, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (obj.id, obj.discussion_id, obj.kind, obj.content, json.dumps([s.to_dict() for s in obj.sources]), obj.confidence, obj.created_at),
+            "INSERT INTO generated_lesson_contents (id, discussion_id, kind, content, sources, confidence, created_at, model)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (obj.id, obj.discussion_id, obj.kind, obj.content, json.dumps([s.to_dict() for s in obj.sources]), obj.confidence, obj.created_at, obj.model),
         )
         self._conn.commit()
         return obj

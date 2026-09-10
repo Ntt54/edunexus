@@ -1174,6 +1174,50 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             "active_id": active.id if active else None,
         }
 
+    @app.post("/api/tutor/subjects", status_code=201)
+    async def tutor_subject_create(payload: TutorLabelCreate) -> dict[str, Any]:
+        """Create a subject (thin transport: delegates to LibraryStore).
+
+        Empty name ⇒ 400 ; case-insensitive duplicate ⇒ 409.
+        """
+        name = (payload.name or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="nom de matière requis")
+        if any(s.name.lower() == name.lower() for s in tutor_store.list_subjects()):
+            raise HTTPException(status_code=409, detail="matière déjà existante")
+        try:
+            subject = tutor_store.create_subject(name)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return {"id": subject.id, "name": subject.name}
+
+    @app.put("/api/tutor/subjects/{subject_id}")
+    async def tutor_subject_rename(
+        subject_id: str, payload: TutorLabelCreate
+    ) -> dict[str, Any]:
+        """Rename a subject (thin transport: delegates to LibraryStore).
+
+        Empty name ⇒ 400 ; unknown id ⇒ 404 ; case-insensitive clash with
+        ANOTHER subject ⇒ 409 (renaming to its own name is idempotent).
+        """
+        name = (payload.name or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="nom de matière requis")
+        if tutor_store.get_subject(subject_id) is None:
+            raise HTTPException(status_code=404, detail="domaine inconnu")
+        if any(
+            s.id != subject_id and s.name.lower() == name.lower()
+            for s in tutor_store.list_subjects()
+        ):
+            raise HTTPException(status_code=409, detail="matière déjà existante")
+        try:
+            subject = tutor_store.rename_subject(subject_id, name)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="domaine inconnu")
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return {"id": subject.id, "name": subject.name}
+
     @app.delete("/api/tutor/subjects/{subject_id}")
     async def tutor_subject_delete(subject_id: str) -> dict[str, Any]:
         """Delete a subject (thin transport: delegates to LibraryStore).
@@ -1203,6 +1247,22 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         except KeyError:
             raise HTTPException(status_code=404, detail="livre ou domaine inconnu")
         return {"linked": linked}
+
+    @app.delete("/api/tutor/subjects/{subject_id}/books/{book_id}")
+    async def tutor_subject_unlink_book(
+        subject_id: str, book_id: str
+    ) -> dict[str, Any]:
+        """Detach a book from a subject (thin transport).
+
+        Orphaning only: the join row is removed, the book row (and its
+        chunks) survives and stays visible via GET /api/tutor/books.
+        Unknown book/subject ⇒ 404.
+        """
+        try:
+            removed = tutor_store.unlink_book_from_subject(subject_id, book_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="livre ou domaine inconnu")
+        return {"removed": removed}
 
     # ------------------------------------------------------------------
     # Feature 008 — Profil pédagogique (US1) — thin transport only
