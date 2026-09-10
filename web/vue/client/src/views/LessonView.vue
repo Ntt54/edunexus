@@ -43,7 +43,7 @@ function learnerId(): string {
 
 /* ── Types ────────────────────────────────────────────────── */
 interface LessonDiscussion { id: string; notion_id?: string; path_step_id?: string; learner_id?: string; subject_id?: string; }
-interface LessonContent { id: string; kind: string; content: string; sources?: Array<{ book_id?: string; book?: string; chapter?: string; confidence?: number }>; confidence?: number; created_at?: string; model?: string | null; fallback?: boolean; }
+interface LessonContent { id: string; kind: string; content: string; sources?: Array<{ book_id?: string; book?: string; chapter?: string; confidence?: number }>; confidence?: number; created_at?: string; model?: string | null; fallback?: boolean; validation?: { blocks?: Array<{ index?: unknown; ok?: unknown; error?: unknown }>; checked_at?: string } | null; }
 interface LessonMsg { id: string; role: string; content: string; sources?: unknown[]; created_at?: string; }
 interface ExerciseQuestion { id: string; type: string; statement: string; options?: string[]; answer?: string; }
 interface ExerciseAttempt { id: string; questions: ExerciseQuestion[]; score?: number; passed?: boolean; per_question?: Array<{ statement?: string; question_id?: string; given?: string; expected?: string; correct?: boolean; explanation?: string }>; correct_count?: number; total?: number; feedback?: string; }
@@ -126,6 +126,32 @@ function isOfflineContent(c: LessonContent): boolean {
 function shortModelName(model: string): string {
   const afterSlash = model.split("/").pop() ?? model;
   return afterSlash.split(":")[0] || model;
+}
+
+// ── Pastille « code vérifié » (contrat content.validation) ─────────
+// Absente (vieux contenus, champ manquant, blocs vides) ⇒ RIEN du tout,
+// pas de pastille. Présente ⇒ « code x/y » (vert si tout OK, orange
+// sinon) + title récapitulatif + détail repliable des blocs en échec.
+interface CodeCheck { ok: number; total: number; label: string; title: string; allOk: boolean; failures: Array<{ index: string; error: string }>; }
+function codeCheck(c: LessonContent): CodeCheck | null {
+  const v = (c as { validation?: unknown }).validation;
+  if (!v || typeof v !== "object") return null;
+  const raw = (v as { blocks?: unknown }).blocks;
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const total = raw.length;
+  const ok = raw.filter((b) => b != null && typeof b === "object" && (b as { ok?: unknown }).ok === true).length;
+  const failures = raw
+    .filter((b) => !(b != null && typeof b === "object" && (b as { ok?: unknown }).ok === true))
+    .map((b) => {
+      const o = (b != null && typeof b === "object" ? b : {}) as { index?: unknown; error?: unknown };
+      const err = String(o.error ?? "").trim().slice(0, 200) || "…";
+      return { index: String(o.index ?? "?"), error: err };
+    });
+  const label = t("lesson.codeChecked", { ok, total }) as string;
+  const title = failures.length
+    ? label + " — " + failures.map((f) => "#" + f.index + " : " + f.error).join(" · ")
+    : label;
+  return { ok, total, label, title, allOk: failures.length === 0, failures };
 }
 const hasNoSources = computed(() => {
   if (!contents.value.length && !messages.value.length) return false;
@@ -565,6 +591,7 @@ function goBack() { router.push("/parcours"); }
               <span class="capture-kind">{{ t("lesson.course") }}</span>
               <span class="head-actions">
                 <StatusPill :tone="isOfflineContent(c) ? 'slate' : 'green'" :title="contentModel(c) ?? t('lesson.offline')">{{ isOfflineContent(c) ? t("lesson.offline") : shortModelName(contentModel(c) as string) }}</StatusPill>
+                <StatusPill v-if="codeCheck(c)" :tone="codeCheck(c)!.allOk ? 'green' : 'orange'" :title="codeCheck(c)!.title">{{ codeCheck(c)!.label }}</StatusPill>
                 <StatusPill tone="indigo">{{ t("lesson.words", { count: wordCount(c.content) }) }}</StatusPill>
                 <button
                   type="button"
@@ -582,6 +609,12 @@ function goBack() { router.push("/parcours"); }
             <div class="notebook-output-body" v-html="renderMarkdown(c.content)"></div>
             <div v-if="c.sources && c.sources.length" class="notebook-output-src">Sources : {{ c.sources.map(s => (s.book_id||s.book||'?') + (s.chapter ? ' · ' + s.chapter : '')).join(', ') }}</div>
             <div v-if="c.confidence!=null" class="notebook-output-src">Confiance : {{ Number(c.confidence).toFixed(2) }}</div>
+            <details v-if="codeCheck(c) && codeCheck(c)!.failures.length" class="code-check-details">
+              <summary>{{ t("lesson.codeFailures", { count: codeCheck(c)!.failures.length }) }}</summary>
+              <ul>
+                <li v-for="(f, i) in codeCheck(c)!.failures" :key="i"><strong>#{{ f.index }}</strong> — {{ f.error }}</li>
+              </ul>
+            </details>
           </article>
           <div v-if="!courseContents.length" class="tab-empty">
             <p class="empty-copy">{{ t("lesson.noCourse") }}</p>
@@ -817,6 +850,12 @@ export default { name: "LessonView" };
 .notebook-output-body :deep(.md-h2) { font-size: 15px; }
 .notebook-output-body :deep(.md-h3) { font-size: 13.5px; }
 .notebook-output-src { margin-top: 8px; color: var(--muted); font-size: 11.5px; }
+.code-check-details { margin-top: 8px; font-size: 12px; color: var(--muted); }
+.code-check-details summary { cursor: pointer; font-weight: 700; }
+.code-check-details summary:hover { color: var(--orange-deep); }
+.code-check-details ul { margin: 6px 0 0 18px; padding: 0; }
+.code-check-details li { margin: 3px 0; overflow-wrap: anywhere; }
+.code-check-details li strong { color: var(--orange-deep); }
 
 .exercises-area { display: grid; gap: 14px; }
 .exercise-card { border: 1px solid #cbd1ff; background: #f8f8ff; border-radius: 14px; padding: 16px; display: grid; gap: 12px; }

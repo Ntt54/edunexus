@@ -10,11 +10,13 @@ fallback deterministic path for offline tests.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import difflib
 import re
 from typing import Any
 
-from .models import LessonDiscussion, SourceReference
+from .models import LessonDiscussion, SourceReference, _now_iso
+from .sandbox import RunResult, run_python
 from .store import LibraryStore, normalize_notion_key, sanitize_notion_id
 
 
@@ -192,6 +194,83 @@ _NOTION_STOPWORDS = frozenset({
 def _offline_header(kind_label: str) -> str:
     """Header marking deterministic offline content (honest fallback)."""
     return f"> {kind_label} {_OFFLINE_MENTION} (LLM indisponible).\n\n"
+
+
+#: Fenced ```python blocks (closed only; untagged/other languages ignored).
+_CODEBLOCK_RE = re.compile(
+    r"^[ \t]*```[ \t]*python[ \t]*\r?$([\s\S]*?)^[ \t]*```[ \t]*\r?$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+#: Max validated blocks per course (CPU guard: ≤12 × 3 s).
+_CODECHECK_MAX_BLOCKS = 12
+
+#: Per-block sandbox timeout (seconds). Never exceeded (spec ceiling).
+_CODECHECK_TIMEOUT_S = 3.0
+
+
+def extract_python_blocks(content: str, max_blocks: int = _CODECHECK_MAX_BLOCKS) -> list[str]:
+    """Extract closed ```python fence bodies (other languages ignored).
+
+    Pure stdlib regex; unclosed fences are skipped. Capped at
+    ``max_blocks`` (first ones win, document order).
+    """
+    if not content or not isinstance(content, str):
+        return []
+    return [m.group(1) for m in _CODEBLOCK_RE.finditer(content)][:max(0, int(max_blocks))]
+
+
+def _verdict_for_block(index: int, result: RunResult, timeout: float) -> dict[str, Any]:
+    """Short per-block verdict ({index, ok, error}) from a RunResult."""
+    if result.blocked:
+        lines = [ln for ln in (result.stderr or "").strip().splitlines() if ln.strip()]
+        detail = lines[0] if lines else "politique de sécurité"
+        return {"index": index, "ok": False, "error": f"bloqué-sécurité: {detail}"[:160]}
+    if result.timed_out:
+        return {"index": index, "ok": False, "error": f"timeout après {timeout:g}s"}
+    if result.exit_code != 0:
+        lines = [ln for ln in (result.stderr or "").strip().splitlines() if ln.strip()]
+        detail = lines[-1] if lines else f"exit {result.exit_code}"
+        return {"index": index, "ok": False, "error": detail[:160]}
+    return {"index": index, "ok": True, "error": None}
+
+
+def validate_lesson_codeblocks(
+    blocks: list[str], timeout: float = _CODECHECK_TIMEOUT_S
+) -> dict[str, Any]:
+    """Validate lesson ```python blocks through the sandbox (sync wrapper).
+
+    Each block runs via ``run_python(code, timeout=…)`` with safety ACTIVE
+    (``skip_safety`` never set): verdicts ``{index, ok, error}`` with a
+    short error summary (security-block / timeout / exit / message).
+    ``timeout`` is clamped to 3 s (spec ceiling). Sync contexts call this
+    directly; when a loop is already running (FastAPI route) the runs
+    execute in a dedicated single thread with its own loop. Never raises
+    on block failures (only wraps them); returns
+    ``{"blocks": [...], "checked_at": iso}``.
+    """
+    timeout = min(float(timeout or _CODECHECK_TIMEOUT_S), _CODECHECK_TIMEOUT_S)
+    codes = [b for b in (blocks or []) if isinstance(b, str) and b.strip()]
+
+    async def _all() -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for i, code in enumerate(codes):
+            try:
+                res = await run_python(code, timeout=timeout)
+            except Exception as exc:  # RunnerError only (oversize); never student code
+                out.append({"index": i, "ok": False, "error": f"runner: {exc}"[:160]})
+                continue
+            out.append(_verdict_for_block(i, res, timeout))
+        return out
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        results = asyncio.run(_all())
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            results = pool.submit(lambda: asyncio.run(_all())).result()
+    return {"blocks": results, "checked_at": _now_iso()}
 
 
 class LessonDiscussionService:
@@ -477,9 +556,15 @@ class LessonDiscussionService:
             content = _offline_header("Cours") + content
         # Ensure 800–1200 words
         content = _ensure_word_range(content, 800, 1200, notion, chunks)
+        # Sandbox codecheck (course only): validate ```python blocks; the
+        # content is ALWAYS kept verbatim (never silently dropped) — only
+        # the report rides along (None when no block to check).
+        code_blocks = extract_python_blocks(content)
+        validation = validate_lesson_codeblocks(code_blocks) if code_blocks else None
         obj = self.store.add_generated_content(
             discussion_id, "lesson_course", content, sources=sources, confidence=confidence,
             model=self._llm_model() if not is_fallback else None,
+            validation=validation,
         )
         result = obj.to_dict()
         result["fallback"] = is_fallback

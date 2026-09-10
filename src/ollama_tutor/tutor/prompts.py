@@ -16,6 +16,25 @@ from .vector import ScoredChunk
 
 _VALID_LEVELS = {"beginner", "intermediate", "advanced", "expert"}
 
+# ---------------------------------------------------------------------------
+# Pleias RAG (brendanddev/Pleias-RAG-1B, compat llama.cpp)
+# ---------------------------------------------------------------------------
+
+PLEIAS_TOKENS: dict[str, str] = {
+    "query_start": "<|query_start|>",
+    "query_end": "<|query_end|>",
+    "source_start": "<|source_start|>",
+    "source_id_start": "<|source_id_start|>",
+    "source_id_end": "<|source_id_end|>",
+    "source_end": "<|source_end|>",
+    "language_start": "<|language_start|>",
+    "language_end": "<|language_end|>",
+}
+
+# Limites pour rester < 10000 ctx (llama.cpp) : 1500 chars par chunk
+_PLEIAS_MAX_CHARS_PER_CHUNK = 1500
+_PLEIAS_MAX_SOURCES = 10  # k default 5, max 10
+
 # In-conversation level-override phrases (FR-014): an explicit request inside
 # the question text wins over the configured/default level. French + English.
 _LEVEL_OVERRIDE_KEYS: tuple[tuple[tuple[str, ...], str], ...] = (
@@ -488,12 +507,16 @@ def build_learning_path_prompt(
 def build_path_from_books_prompt(
     book_structures: list[dict],
     level: str = "intermediate",
+    description: str | None = None,
 ) -> str:
     """Build a system prompt asking the LLM to create a learning path from books' TOC.
 
     ``book_structures`` is a list of dicts with keys: title, chapters (list of
     dicts with title, sections).
     ``level`` is the learner's level.
+    ``description`` is the learner's optional goal: when non-blank it adds
+    an « Objectif de l'élève » section guiding the split (prioritise linked
+    chapters, adapt titles); blank/None omits the section entirely.
 
     The LLM must return a JSON array of step objects with keys:
     - title: string
@@ -536,7 +559,17 @@ def build_path_from_books_prompt(
     lines.append("")
     lines.append(f"Niveau de l'élève : {level}.")
     lines.append("")
-    lines.append("Structure des livres :")
+    goal = str(description or "").strip()
+    if goal:
+        lines.append(f"Objectif de l'élève : {goal}")
+        lines.append(
+            "Tiens compte de cet objectif pour guider le découpage : "
+            "priorise les chapitres et sections liés à l'objectif, adapte "
+            "les intitulés des étapes pour y répondre, sans inventer de "
+            "contenu hors des livres fournis."
+        )
+        lines.append("")
+    lines.append("Structure des livres:")
     lines.append(books_str)
     lines.append("")
     lines.append("Règles de construction du parcours :")
@@ -773,3 +806,81 @@ def build_exam_resolve_prompt(
         Message(role=MessageRole.SYSTEM, content=system),
         Message(role=MessageRole.USER, content=user),
     ]
+
+
+# ---------------------------------------------------------------------------
+# Pleias RAG prompt (brendanddev/Pleias-RAG-1B, compat llama.cpp)
+# ---------------------------------------------------------------------------
+
+
+def _pleias_extract_text(chunk: object) -> str:
+    """Extract raw text from ``str`` | ``dict`` with ``text`` | ``ScoredChunk``."""
+    if isinstance(chunk, str):
+        return chunk
+    if isinstance(chunk, dict):
+        v = chunk.get("text")  # type: ignore[attr-defined]
+        if isinstance(v, str):
+            return v
+        if v is not None:
+            return str(v)
+        return ""
+    # ScoredChunk or any object with .text
+    if hasattr(chunk, "text"):
+        v = getattr(chunk, "text")
+        if isinstance(v, str):
+            return v
+        if v is not None:
+            return str(v)
+        return ""
+    # fallback
+    try:
+        return str(chunk)  # type: ignore[arg-type]
+    except Exception:
+        return ""
+
+
+def build_pleias_prompt(
+    question: str,
+    chunks: list[dict | str] | list[str] | list[object],
+    language: str = "français",
+) -> str:
+    """Build Pleias RAG prompt (brendanddev/Pleias-RAG-1B, compat llama.cpp).
+
+    Format officiel (llama.cpp) ::
+
+        <|query_start|>{query}<|query_end|>
+        <|source_start|><|source_id_start|>1<|source_id_end|>{text1}<|source_end|>
+        <|source_start|><|source_id_start|>2<|source_id_end|>{text2}<|source_end|>
+        ...
+        <|language_start|>{language}
+
+    Args:
+        question: requête utilisateur.
+        chunks: liste de ``str`` ou ``dict`` avec clé ``"text"`` ou
+            :class:`ScoredChunk` (tout objet avec attribut ``.text``).
+            Chaque chunk est tronqué à 1500 caractères max.
+            ``k`` par défaut 5, max 10 pour rester < 10000 ctx.
+        language: langue de réponse (défaut ``"français"``).
+
+    Returns:
+        Prompt Pleias prêt à envoyer au LLM (pure, sans side effect, stdlib only).
+    """
+    q = question if isinstance(question, str) else str(question) if question is not None else ""
+    lang = language if isinstance(language, str) else str(language) if language is not None else "français"
+
+    # k default 5, max 10 — on cappe à 10, le retrieval amont fournit 5 par défaut
+    raw_chunks = list(chunks) if chunks is not None else []
+    limited = raw_chunks[:_PLEIAS_MAX_SOURCES]
+
+    parts: list[str] = []
+    parts.append(f"{PLEIAS_TOKENS['query_start']}{q}{PLEIAS_TOKENS['query_end']}")
+    for idx, ch in enumerate(limited, start=1):
+        text = _pleias_extract_text(ch)
+        if len(text) > _PLEIAS_MAX_CHARS_PER_CHUNK:
+            text = text[:_PLEIAS_MAX_CHARS_PER_CHUNK]
+        parts.append(
+            f"{PLEIAS_TOKENS['source_start']}{PLEIAS_TOKENS['source_id_start']}{idx}"
+            f"{PLEIAS_TOKENS['source_id_end']}{text}{PLEIAS_TOKENS['source_end']}"
+        )
+    parts.append(f"{PLEIAS_TOKENS['language_start']}{lang}")
+    return "\n".join(parts)

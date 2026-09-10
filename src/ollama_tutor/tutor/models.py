@@ -1401,12 +1401,15 @@ class GeneratedLessonContent:
     confidence: float = 0.0
     created_at: str = ""
     model: str | None = None  # IA utilisée (NULL = repli hors-ligne / lignes existantes)
+    validation: dict[str, Any] | None = None  # rapport codecheck (NULL = non vérifié)
 
     def __post_init__(self) -> None:
         if self.sources is None:
             self.sources = []
         if not self.model:
             self.model = None
+        if not self.validation:
+            self.validation = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1418,6 +1421,7 @@ class GeneratedLessonContent:
             "confidence": self.confidence,
             "created_at": self.created_at,
             "model": self.model,
+            "validation": self.validation,
         }
 
     @classmethod
@@ -1431,6 +1435,7 @@ class GeneratedLessonContent:
             confidence=float(raw.get("confidence", 0.0)),
             created_at=str(raw.get("created_at", "")),
             model=str(raw.get("model") or "") or None,
+            validation=_coerce_json(raw.get("validation"), None),
         )
 
 

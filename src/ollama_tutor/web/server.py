@@ -2976,8 +2976,12 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             raise HTTPException(400, "book_ids requis")
         if tutor_store.get_subject(subject_id) is None:
             raise HTTPException(404, "Sujet inconnu")
+        raw_description = body.get("description")
+        description = str(raw_description) if isinstance(raw_description, str) else None
         try:
-            result = await tutor_service.generate_path_from_books(subject_id, book_ids)
+            result = await tutor_service.generate_path_from_books(
+                subject_id, book_ids, description=description
+            )
         except PathGenerationError as exc:
             raise HTTPException(422, str(exc))
         return result

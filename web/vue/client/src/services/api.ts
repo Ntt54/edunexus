@@ -334,9 +334,13 @@ export const tutorApi = {
   },
 
   // ── Génération de parcours (depuis livres / OCR) ─────────────
-  async generateFromBooks(subjectId: string, bookIds: string[]): Promise<unknown> {
+  async generateFromBooks(subjectId: string, bookIds: string[], description?: string): Promise<unknown> {
+    // Objectif optionnel : champ omis si vide (contrat backend).
+    const body: { book_ids: string[]; description?: string } = { book_ids: bookIds };
+    const desc = (description ?? "").trim();
+    if (desc) body.description = desc;
     return request(`/subjects/${encodeURIComponent(subjectId)}/path/generate-from-books`, {
-      method: "POST", body: JSON.stringify({ book_ids: bookIds }),
+      method: "POST", body: JSON.stringify(body),
     });
   },
   async pathFromProgram(subjectId: string, programId: string): Promise<unknown> {

@@ -609,6 +609,7 @@ class LibraryStore:
                 confidence REAL NOT NULL DEFAULT 0.0,
                 created_at TEXT NOT NULL,
                 model TEXT,
+                validation TEXT,
                 FOREIGN KEY (discussion_id) REFERENCES lesson_discussions(id) ON DELETE CASCADE
             );
 
@@ -940,6 +941,7 @@ class LibraryStore:
                 confidence REAL NOT NULL DEFAULT 0.0,
                 created_at TEXT NOT NULL,
                 model TEXT,
+                validation TEXT,
                 FOREIGN KEY (discussion_id) REFERENCES lesson_discussions(id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS lesson_exercise_attempts (
@@ -4335,6 +4337,18 @@ class LibraryStore:
         if cols and "model" not in cols:
             self._conn.execute("ALTER TABLE generated_lesson_contents ADD COLUMN model TEXT")
             self._conn.commit()
+        self._migrate_lesson_validation_column()
+
+    def _migrate_lesson_validation_column(self) -> None:
+        """Add ``validation`` to ``generated_lesson_contents`` when absent.
+
+        Idempotent PRAGMA table_info check (existing DBs keep their rows,
+        NULL = never-checked content). Safe to call on every startup.
+        """
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(generated_lesson_contents)")}
+        if cols and "validation" not in cols:
+            self._conn.execute("ALTER TABLE generated_lesson_contents ADD COLUMN validation TEXT")
+            self._conn.commit()
 
     def add_generated_content(
         self,
@@ -4344,6 +4358,7 @@ class LibraryStore:
         sources: list[SourceReference] | None = None,
         confidence: float = 0.0,
         model: str | None = None,
+        validation: dict[str, Any] | None = None,
     ) -> GeneratedLessonContent:
         if kind not in ("lesson_course", "lesson_summary"):
             raise ValueError(f"Invalid kind: {kind}")
@@ -4357,11 +4372,13 @@ class LibraryStore:
             confidence=float(confidence),
             created_at=now,
             model=model,
+            validation=validation,
         )
         self._conn.execute(
-            "INSERT INTO generated_lesson_contents (id, discussion_id, kind, content, sources, confidence, created_at, model)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (obj.id, obj.discussion_id, obj.kind, obj.content, json.dumps([s.to_dict() for s in obj.sources]), obj.confidence, obj.created_at, obj.model),
+            "INSERT INTO generated_lesson_contents (id, discussion_id, kind, content, sources, confidence, created_at, model, validation)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (obj.id, obj.discussion_id, obj.kind, obj.content, json.dumps([s.to_dict() for s in obj.sources]), obj.confidence, obj.created_at, obj.model,
+             json.dumps(obj.validation) if obj.validation is not None else None),
         )
         self._conn.commit()
         return obj

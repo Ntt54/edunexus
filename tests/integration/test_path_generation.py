@@ -7,7 +7,8 @@ pour la route 422. Couvre :
   déterministe + ``fallback: True`` (titres repris tels quels) ;
 - TOC vide ⇒ erreur explicite (aucun parcours coquille vide), route 422 ;
 - DB réelle : N étapes titrées depuis les chapitres, cap ~12 ;
-- validation : titres requis, duration cloisonnée 5-120, sources normalisées.
+- validation : titres requis, duration cloisonnée 5-120, sources normalisées ;
+- description/objectif : texte élève dans le prompt + persisté, omis si vide.
 """
 
 from __future__ import annotations
@@ -223,3 +224,109 @@ async def test_generate_route_422_on_empty_toc(
         )
         assert r2.status_code == 422, r2.text
         assert "insuffisants" in r2.json().get("detail", "")
+
+
+# ---------------------------------------------------------------------------
+# Description / objectif élève (LLM mocké qui CAPTURE le prompt)
+# ---------------------------------------------------------------------------
+
+
+def _capturing_llm(monkeypatch: pytest.MonkeyPatch, captured: dict, payload: str = ""):
+    async def _fake(self, messages, options):
+        captured["system"] = messages[0].content
+        captured["user"] = messages[1].content
+        return payload or json.dumps(
+            [
+                {"title": f"Leçon {i}", "type": "concept", "duration": 15, "source": "bio"}
+                for i in range(1, 7)
+            ]
+        )
+
+    monkeypatch.setattr(TutorService, "_llm_collect", _fake)
+
+
+@pytest.mark.asyncio
+async def test_description_in_prompt_and_persisted(
+    svc: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sid = svc.store.create_subject("SVT").id
+    bid = _seed_book(svc, tmp_path, sid, "bio.txt", [("Cellule", []), ("ADN", [])])
+    captured: dict = {}
+    _capturing_llm(monkeypatch, captured)
+    goal = "Réviser la génétique pour l'examen de juin"
+    result = await svc.service.generate_path_from_books(sid, [bid], description=goal)
+    assert "Objectif de l'élève" in captured["system"]
+    assert goal in captured["system"]
+    assert result["fallback"] is False
+    assert result["description"] == goal
+    stored = svc.store.get_learning_path(result["id"])
+    assert stored is not None and stored.description == goal
+
+
+@pytest.mark.asyncio
+async def test_no_description_unchanged_behavior(
+    svc: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sid = svc.store.create_subject("SVT").id
+    bid = _seed_book(svc, tmp_path, sid, "bio.txt", [("Cellule", []), ("ADN", [])])
+    captured: dict = {}
+    _capturing_llm(monkeypatch, captured)
+    result = await svc.service.generate_path_from_books(sid, [bid])
+    assert "Objectif de l'élève" not in captured["system"]
+    assert result["description"].startswith("Parcours structuré basé sur")
+
+
+@pytest.mark.asyncio
+async def test_blank_description_omitted(
+    svc: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sid = svc.store.create_subject("SVT").id
+    bid = _seed_book(svc, tmp_path, sid, "bio.txt", [("Cellule", []), ("ADN", [])])
+    for blank in ("", "   ", None):
+        captured: dict = {}
+        _capturing_llm(monkeypatch, captured)
+        result = await svc.service.generate_path_from_books(sid, [bid], description=blank)
+        assert "Objectif de l'élève" not in captured["system"]
+        assert result["description"].startswith("Parcours structuré basé sur")
+
+
+@pytest.mark.asyncio
+async def test_description_route_passthrough(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict = {}
+    _capturing_llm(monkeypatch, captured)
+
+    class ScriptedClient(web_server.OllamaClient):
+        def __init__(self, *a, **k):
+            super().__init__()
+
+    monkeypatch.setattr(web_server, "OllamaClient", ScriptedClient)
+    app = web_server.create_app(config_dir=tmp_path / "config")
+    with TestClient(app) as c:
+        p = tmp_path / "bio.txt"
+        p.write_text("contenu cellule adn " * 20, encoding="utf-8")
+        assert c.post("/api/tutor/import", json={"subject": "SVT", "path": str(p)}).status_code == 200
+        # Indexer le livre pour avoir des chapitres ? Non : chunks requis.
+        # On passe par le store direct pour la TOC (même DB, même config).
+        from src.ollama_tutor.tutor.store import LibraryStore as LS
+
+        store = LS(tmp_path / "config")
+        sid = next(s["id"] for s in c.get("/api/tutor/subjects").json()["subjects"] if s["name"] == "SVT")
+        books = c.get("/api/tutor/books").json()["books"]
+        bid = books[0]["id"]
+        store.add_chunks(
+            sid, bid,
+            [{"text": "Cellule texte", "chapter": "Cellule", "section": ""}],
+            [[0.1, 0.2]], "test-model",
+        )
+        goal = "Objectif route : maîtriser la cellule"
+        r = c.post(
+            f"/api/tutor/subjects/{sid}/path/generate-from-books",
+            json={"book_ids": [bid], "description": goal},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["description"] == goal
+        assert "Objectif de l'élève" in captured["system"]
+        assert goal in captured["system"]
