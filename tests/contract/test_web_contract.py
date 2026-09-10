@@ -132,6 +132,7 @@ IGNORED_ROUTES: set[tuple[str, str]] = {
     ("POST", "/api/tutor/subjects"),
     ("PUT", "/api/tutor/subjects/{}"),
     ("DELETE", "/api/tutor/subjects/{}/books/{}"),
+    ("PUT", "/api/tutor/books/{}/subject"),
 }
 
 # Motifs legacy interdits dans le front (adapté de FORBIDDEN_PATTERNS :

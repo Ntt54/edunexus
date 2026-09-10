@@ -240,6 +240,10 @@ class TutorSubjectBookLink(BaseModel):
     book_id: str
 
 
+class TutorBookMove(BaseModel):
+    subject_id: str
+
+
 class TutorCorpusMembership(BaseModel):
     corpus_id: int
 
@@ -634,6 +638,26 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
     async def _startup() -> None:
         if config.tutor_nightly_enabled:
             await tutor_service.start_nightly_scheduler()
+        # The queue worker lives in memory: after a restart, pending books
+        # would stall until a manual click. Resume them automatically;
+        # no pending ⇒ no-op (fast unchanged startup).
+        try:
+            report = await tutor_service.resume_pending_queue()
+        except Exception as exc:  # never let resume kill startup
+            _log_error(config, "queue-resume", f"reprise file: {exc}")
+        else:
+            if report.get("error"):
+                _log_error(
+                    config, "queue-resume",
+                    f"reprise file: {report['error']}",
+                )
+            elif report.get("resumed"):
+                import logging as _logging
+
+                _logging.getLogger(__name__).info(
+                    "queue resume: %s pending book(s), worker restarted",
+                    report.get("pending", 0),
+                )
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
@@ -974,7 +998,17 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             books = tutor_store.list_books(subj.id)
         else:
             books = tutor_store.list_all_books()
-        return {"books": [b.to_dict() for b in books]}
+        # Indexing metadata computed on the fly (no migration, one grouped
+        # lookup): last completed job end + single distinct chunk model.
+        meta = tutor_store.books_indexing_meta([b.id for b in books])
+        rows = []
+        for b in books:
+            row = b.to_dict()
+            extra = meta.get(b.id, {})
+            row["last_indexed_at"] = extra.get("last_indexed_at")
+            row["embed_model"] = extra.get("embed_model")
+            rows.append(row)
+        return {"books": rows}
 
     @app.delete("/api/tutor/book/{book_id}")
     async def tutor_delete_book(book_id: str) -> Response:
@@ -1263,6 +1297,22 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         except KeyError:
             raise HTTPException(status_code=404, detail="livre ou domaine inconnu")
         return {"removed": removed}
+
+    @app.put("/api/tutor/books/{book_id}/subject")
+    async def tutor_book_move_subject(
+        book_id: str, payload: TutorBookMove
+    ) -> dict[str, Any]:
+        """Move a book to a subject in one call (thin transport).
+
+        Removes ALL existing joins of the book, then links the target —
+        atomic (single commit). The book row and its chunks are never
+        touched. Unknown book/subject ⇒ 404.
+        """
+        try:
+            moved = tutor_store.move_book_to_subject(book_id, payload.subject_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="livre ou domaine inconnu")
+        return {"moved": moved, "subject_id": payload.subject_id}
 
     # ------------------------------------------------------------------
     # Feature 008 — Profil pédagogique (US1) — thin transport only
@@ -2374,10 +2424,16 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             "stale": tutor_store.stale_books(subject_id, model),
         }
 
-    @app.post("/api/tutor/books/{book_id}/reindex")
+    @app.post("/api/tutor/books/{book_id}/reindex", status_code=202)
     async def book_reindex(book_id: str) -> dict[str, Any]:
+        """Reindex a book's chunks as a tracked job (never blocks HTTP).
+
+        Returns immediately ``{"book_id", "job_id", "status"}``; progress
+        is polled via ``GET /api/ingestion/jobs`` (the Vue banner already
+        follows jobs). Unknown book ⇒ 404.
+        """
         try:
-            return await tutor_service.reindex_book(book_id)
+            return tutor_service.reindex_book_tracked(book_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Livre inconnu") from exc
 
@@ -2978,12 +3034,16 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             raise HTTPException(404, "Sujet inconnu")
         raw_description = body.get("description")
         description = str(raw_description) if isinstance(raw_description, str) else None
+        raw_path_id = body.get("path_id")
+        path_id = str(raw_path_id) if isinstance(raw_path_id, str) and str(raw_path_id).strip() else None
         try:
             result = await tutor_service.generate_path_from_books(
-                subject_id, book_ids, description=description
+                subject_id, book_ids, description=description, path_id=path_id
             )
         except PathGenerationError as exc:
             raise HTTPException(422, str(exc))
+        except KeyError:
+            raise HTTPException(404, "Parcours inconnu")
         return result
 
     @app.post("/api/tutor/subjects/{subject_id}/path/from-program")

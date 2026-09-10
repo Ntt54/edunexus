@@ -330,3 +330,131 @@ async def test_description_route_passthrough(
         assert body["description"] == goal
         assert "Objectif de l'élève" in captured["system"]
         assert goal in captured["system"]
+
+
+# ---------------------------------------------------------------------------
+# Remplissage d'un parcours existant (path_id optionnel, additif)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fill_empty_existing_path(
+    svc: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sid = svc.store.create_subject("SVT").id
+    bid = _seed_book(svc, tmp_path, sid, "bio.txt", [("Cellule", []), ("ADN", [])])
+    manual = svc.store.create_learning_path(sid, "python", "Mon parcours manuel")
+    captured: dict = {}
+    _capturing_llm(monkeypatch, captured)
+    result = await svc.service.generate_path_from_books(sid, [bid], path_id=manual.id)
+    assert result["filled"] is True
+    assert result["id"] == manual.id
+    # Titre/description manuels CONSERVÉS, jamais écrasés.
+    assert result["title"] == "python"
+    assert result["description"] == "Mon parcours manuel"
+    assert len(result["steps"]) == 6
+    assert result["fallback"] is False
+
+
+@pytest.mark.asyncio
+async def test_nonempty_path_creates_new_path_leaves_old_intact(
+    svc: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sid = svc.store.create_subject("SVT").id
+    bid = _seed_book(svc, tmp_path, sid, "bio.txt", [("Cellule", []), ("ADN", [])])
+    manual = svc.store.create_learning_path(sid, "python", "Mon parcours manuel")
+    svc.store.add_path_step(manual.id, "concept", "c0", title="Étape manuelle", ordinal=0)
+    captured: dict = {}
+    _capturing_llm(monkeypatch, captured)
+    result = await svc.service.generate_path_from_books(sid, [bid], path_id=manual.id)
+    assert result["filled"] is False
+    assert result["id"] != manual.id
+    # Ancien parcours intact : 1 étape, titre inchangé (jamais de destruction).
+    old_steps = svc.store.list_path_steps(manual.id)
+    assert len(old_steps) == 1
+    assert old_steps[0].title == "Étape manuelle"
+    assert svc.store.get_learning_path(manual.id).title == "python"
+    assert len(result["steps"]) == 6
+
+
+@pytest.mark.asyncio
+async def test_unknown_path_id_raises_keyerror(
+    svc: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sid = svc.store.create_subject("SVT").id
+    bid = _seed_book(svc, tmp_path, sid, "bio.txt", [("Cellule", []), ("ADN", [])])
+    captured: dict = {}
+    _capturing_llm(monkeypatch, captured)
+    with pytest.raises(KeyError):
+        await svc.service.generate_path_from_books(sid, [bid], path_id="inexistant")
+
+
+@pytest.mark.asyncio
+async def test_path_from_other_subject_raises_keyerror(
+    svc: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sid = svc.store.create_subject("SVT").id
+    other = svc.store.create_subject("Maths").id
+    bid = _seed_book(svc, tmp_path, sid, "bio.txt", [("Cellule", []), ("ADN", [])])
+    foreign = svc.store.create_learning_path(other, "ailleurs", "")
+    captured: dict = {}
+    _capturing_llm(monkeypatch, captured)
+    with pytest.raises(KeyError):
+        await svc.service.generate_path_from_books(sid, [bid], path_id=foreign.id)
+
+
+@pytest.mark.asyncio
+async def test_absent_path_id_creates_as_before(
+    svc: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sid = svc.store.create_subject("SVT").id
+    bid = _seed_book(svc, tmp_path, sid, "bio.txt", [("Cellule", []), ("ADN", [])])
+    captured: dict = {}
+    _capturing_llm(monkeypatch, captured)
+    result = await svc.service.generate_path_from_books(sid, [bid])
+    assert result["filled"] is False
+    assert result["title"].startswith("Parcours depuis livres")
+
+
+@pytest.mark.asyncio
+async def test_fill_route_200_and_unknown_404(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict = {}
+    _capturing_llm(monkeypatch, captured)
+
+    class ScriptedClient(web_server.OllamaClient):
+        def __init__(self, *a, **k):
+            super().__init__()
+
+    monkeypatch.setattr(web_server, "OllamaClient", ScriptedClient)
+    app = web_server.create_app(config_dir=tmp_path / "config")
+    with TestClient(app) as c:
+        p = tmp_path / "bio.txt"
+        p.write_text("contenu cellule adn " * 20, encoding="utf-8")
+        assert c.post("/api/tutor/import", json={"subject": "SVT", "path": str(p)}).status_code == 200
+        from src.ollama_tutor.tutor.store import LibraryStore as LS
+
+        store = LS(tmp_path / "config")
+        sid = next(s["id"] for s in c.get("/api/tutor/subjects").json()["subjects"] if s["name"] == "SVT")
+        bid = c.get("/api/tutor/books").json()["books"][0]["id"]
+        store.add_chunks(
+            sid, bid,
+            [{"text": "Cellule texte", "chapter": "Cellule", "section": ""}],
+            [[0.1, 0.2]], "test-model",
+        )
+        manual = store.create_learning_path(sid, "python", "manuel")
+        r = c.post(
+            f"/api/tutor/subjects/{sid}/path/generate-from-books",
+            json={"book_ids": [bid], "path_id": manual.id},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["id"] == manual.id
+        assert body["title"] == "python"
+        assert body["filled"] is True
+        r2 = c.post(
+            f"/api/tutor/subjects/{sid}/path/generate-from-books",
+            json={"book_ids": [bid], "path_id": "inexistant"},
+        )
+        assert r2.status_code == 404, r2.text

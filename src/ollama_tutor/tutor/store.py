@@ -2601,6 +2601,44 @@ class LibraryStore:
         self._conn.execute("DELETE FROM books WHERE id = ?", (book_id,))
         self._conn.commit()
 
+    def books_indexing_meta(self, book_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Per-book indexing metadata, computed on the fly (no migration).
+
+        Returns ``{book_id: {"last_indexed_at": iso|None, "embed_model":
+        str|None}}`` where ``last_indexed_at`` is the end (``updated_at``)
+        of the book's newest ``completed`` ingestion job, and
+        ``embed_model`` the single distinct ``embedding_model`` across the
+        book's chunks (``None`` when zero or mixed). Two grouped queries
+        whatever the number of books (never N+1).
+        """
+        ids = sorted({str(b) for b in (book_ids or []) if str(b)})
+        meta: dict[str, dict[str, Any]] = {
+            bid: {"last_indexed_at": None, "embed_model": None} for bid in ids
+        }
+        if not ids:
+            return meta
+        placeholders = ",".join("?" for _ in ids)
+        for book_id, finished in self._conn.execute(
+            "SELECT book_id, MAX(updated_at) AS finished FROM ingestion_jobs "
+            f"WHERE status = 'completed' AND book_id IN ({placeholders}) "
+            "GROUP BY book_id",
+            ids,
+        ).fetchall():
+            if book_id in meta:
+                meta[book_id]["last_indexed_at"] = finished
+        models: dict[str, list[str]] = {}
+        for row in self._conn.execute(
+            "SELECT book_id, embedding_model FROM chunks "
+            f"WHERE book_id IN ({placeholders}) AND embedding_model IS NOT NULL "
+            "GROUP BY book_id, embedding_model",
+            ids,
+        ).fetchall():
+            models.setdefault(row["book_id"], []).append(row["embedding_model"])
+        for bid, names in models.items():
+            if bid in meta and len(names) == 1:
+                meta[bid]["embed_model"] = names[0]
+        return meta
+
     def link_book_to_subject(self, book_id: str, subject_id: str) -> bool:
         """Link an existing book to a subject (orphan re-attachment).
 
@@ -2637,6 +2675,35 @@ class LibraryStore:
         )
         self._conn.commit()
         return cur.rowcount > 0
+
+    def move_book_to_subject(self, book_id: str, subject_id: str) -> bool:
+        """Move a book to a subject in one atomic step.
+
+        Removes ALL existing joins of the book, then links the target —
+        single commit (atomic: never a half-moved book). The book row (and
+        its chunks) is never touched. Returns True when joins changed,
+        False when the book was already linked to the target exclusively
+        (idempotent). Raises KeyError when the book or the subject is
+        unknown (checked before any write).
+        """
+        if self.get_book(book_id) is None:
+            raise KeyError(f"Unknown book: {book_id}")
+        self._get_subject(subject_id)  # KeyError if unknown
+        rows = self._conn.execute(
+            "SELECT subject_id FROM subject_books WHERE book_id = ?",
+            (book_id,),
+        ).fetchall()
+        if [r["subject_id"] for r in rows] == [subject_id]:
+            return False
+        self._conn.execute(
+            "DELETE FROM subject_books WHERE book_id = ?", (book_id,)
+        )
+        self._conn.execute(
+            "INSERT INTO subject_books (subject_id, book_id) VALUES (?, ?)",
+            (subject_id, book_id),
+        )
+        self._conn.commit()
+        return True
 
     # ------------------------------------------------------------------
     # Categories, corpora & temp-doc lifecycle (Phase 4)

@@ -92,18 +92,83 @@ def extract_text(
     raise ValueError(f"Unsupported format: {fmt}")
 
 
+def _pdf_outline_chapters(reader: Any) -> list[tuple[str, int]]:
+    """Native PDF outlines (bookmarks) as ``(title, start_page_1based)``.
+
+    Best-effort and defensive: pypdf outline trees vary (nested lists,
+    Destination objects, plain dicts) and may raise — any anomaly yields
+    ``[]`` (extraction continues without chapters, never crashes).
+    """
+    try:
+        outline = reader.outline
+    except Exception:
+        return []
+    flat: list[tuple[str, Any]] = []
+
+    def _walk(items: Any) -> None:
+        if items is None:
+            return
+        if isinstance(items, (list, tuple)):
+            for sub in items:
+                _walk(sub)
+            return
+        title = str(getattr(items, "title", "") or "").strip()
+        if title:
+            flat.append((title, items))
+
+    try:
+        _walk(outline)
+    except Exception:
+        return []
+    chapters: list[tuple[str, int]] = []
+    for title, dest in flat:
+        page_1based: int | None = None
+        try:
+            raw = reader.get_destination_page_number(dest)
+            page_1based = int(raw) + 1 if raw is not None else None
+        except Exception:
+            page_1based = None
+        if page_1based is None:
+            try:
+                raw_page = getattr(dest, "page", None)
+                number = getattr(raw_page, "number", raw_page)
+                page_1based = int(number) + 1 if number is not None else None
+            except Exception:
+                page_1based = None
+        if page_1based is not None and page_1based >= 1:
+            chapters.append((title, page_1based))
+    return chapters
+
+
 def _extract_pdf(path: Path) -> Iterable[tuple[str, dict[str, Any]]]:
-    """Extract text from a PDF, yielding ``(text, {"page": N})`` per page."""
+    """Extract text from a PDF, yielding ``(text, meta)`` per page.
+
+    ``meta`` always holds ``page`` (1-based) and holds ``chapter`` (native
+    outline title covering the page) when the PDF ships bookmarks.
+    """
     from pypdf import PdfReader
 
     reader = PdfReader(str(path))
+    try:
+        outlines = _pdf_outline_chapters(reader)
+    except Exception:
+        outlines = []
     for page_num, page in enumerate(reader.pages, start=1):
         try:
             text = page.extract_text() or ""
         except Exception:
             text = ""
         if text:
-            yield (text, {"page": page_num})
+            meta: dict[str, Any] = {"page": page_num}
+            current: str | None = None
+            for title, start in outlines:
+                if start <= page_num:
+                    current = title
+                else:
+                    break
+            if current:
+                meta["chapter"] = current
+            yield (text, meta)
 
 
 def _extract_docx(path: Path) -> Iterable[tuple[str, dict[str, Any]]]:
@@ -319,6 +384,52 @@ _HEADING_RE = re.compile(r"^(#{1,4})\s+(.+)$", re.MULTILINE)
 _PAGE_RE = re.compile(r"^(?:---\s*Page\s+(\d+)\s*---|Page\s+(\d+))$", re.MULTILINE)
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
+#: Explicit chapter markers: numbering or chapter keywords (any case).
+_CHAPTER_MARK_RE = re.compile(
+    r"^(?:\d+(?:\.\d+)*\b|chapitre|chapter|partie|part|section|leçon|lesson"
+    r"|titre|annexe|appendix)\b",
+    re.IGNORECASE,
+)
+#: Code/comment giveaways: such a line is NEVER a chapter title.
+_CODE_LINE_RE = re.compile(
+    r"[=;{}]|```|>>>|\.\.\.|//|/\*|:=|^\s*(?:def |class |import |from |for |while "
+    r"|if |return |print\(|TODO\b|FIXME\b|XXX\b|HACK\b)",
+)
+_LIST_MARK_RE = re.compile(r"^(\d+[.)]\s*\S{0,2}$|>\s)")
+
+
+def _is_title_line(line: str) -> str | None:
+    """Return the cleaned title when *line* looks like a real title, else None.
+
+    Strict by design: 3–80 chars, single line, unindented, 1–10 words,
+    mixed case (a capital somewhere) or explicit chapter marker, no
+    sentence-ending punctuation, and NEVER code (``=(){ };`` backticks,
+    ``>>>``, ``//``, leading keywords ``def/for/...``, TODO markers) nor
+    list/quote markers. Code fragments and comments can never become
+    chapters.
+    """
+    text = (line or "").strip()
+    if not (3 <= len(text) <= 80):
+        return None
+    if line != line.lstrip():
+        return None  # indented → likely code
+    if text.startswith(("#", "-", "*", ">")):
+        return None  # markdown markup / list / quote handled elsewhere
+    if _LIST_MARK_RE.match(text):
+        return None
+    if text[-1] in ".!?;:,":
+        return None  # sentence-ending → running text, not a title
+    if _CODE_LINE_RE.search(text):
+        return None
+    words = text.split()
+    if not (1 <= len(words) <= 10):
+        return None
+    if _CHAPTER_MARK_RE.match(text):
+        return text
+    if not any(ch.isupper() for ch in text):
+        return None  # no capital → fragment, not a title
+    return text
+
 
 def chunk_text_structured(
     text: str,
@@ -366,8 +477,22 @@ def chunk_text_structured(
 
     # --- T028: heading scan ------------------------------------------------
     headings: list[tuple[int, str]] = []          # (char_offset, heading_text)
+    h1_titles: list[tuple[int, str]] = []         # (offset, H1 text) → chapters
     for m in _HEADING_RE.finditer(text):
-        headings.append((m.start(), m.group(2).strip()))
+        h_text = m.group(2).strip()
+        headings.append((m.start(), h_text))
+        if len(m.group(1)) == 1 and h_text and not _CODE_LINE_RE.search(h_text):
+            # Explicit H1 = chapter (code-looking H1 like "# x = 1" excluded).
+            h1_titles.append((m.start(), h_text))
+
+    # --- Title-line scan (heuristic chapters for plain text) ---------------
+    title_lines: list[tuple[int, str]] = []       # (char_offset, title)
+    _line_off = 0
+    for line in text.split("\n"):
+        candidate = _is_title_line(line)
+        if candidate is not None:
+            title_lines.append((_line_off, candidate))
+        _line_off += len(line) + 1
 
     # --- T029: page-number scan --------------------------------------------
     pages: list[tuple[int, int]] = []             # (char_offset, page_no)
@@ -390,6 +515,23 @@ def chunk_text_structured(
         for p_off, p_no in pages:
             if p_off <= offset:
                 current = p_no
+            else:
+                break
+        return current
+
+    # --- chapter candidates: explicit H1 wins over heuristic title lines ---
+    chapter_cands: list[tuple[int, int, str]] = []  # (offset, prio, title)
+    for h_off, h_text in h1_titles:
+        chapter_cands.append((h_off, 0, h_text))
+    for t_off, t_text in title_lines:
+        chapter_cands.append((t_off, 1, t_text))
+    chapter_cands.sort(key=lambda c: (c[0], c[1]))
+
+    def _current_chapter(offset: int) -> str | None:
+        current: str | None = None
+        for c_off, _, c_text in chapter_cands:
+            if c_off <= offset:
+                current = c_text
             else:
                 break
         return current
@@ -451,15 +593,16 @@ def chunk_text_structured(
             merged_offsets.append(orig_offsets[idx])
             idx += 1
 
-    para_meta: list[tuple[str | None, int | None]] = [
-        (_current_heading(o), _current_page(o)) for o in merged_offsets
+    para_meta: list[tuple[str | None, int | None, str | None]] = [
+        (_current_heading(o), _current_page(o), _current_chapter(o))
+        for o in merged_offsets
     ]
 
     # --- sub-split long merged paragraphs at sentence boundaries ------------
     # Each resulting piece becomes its own chunk.
     # Track which paragraph each piece belongs to for offset resolution.
     final_texts: list[str] = []
-    final_meta: list[tuple[str | None, int | None]] = []
+    final_meta: list[tuple[str | None, int | None, str | None]] = []
 
     # Effective max for sub-split pieces leaves room for overlap carry
     effective_max = max_chars - overlap if overlap > 0 and max_chars > overlap else max_chars
@@ -501,10 +644,14 @@ def chunk_text_structured(
         else:
             effective = ft
 
-        h, p = final_meta[idx]
+        h, p, ch = final_meta[idx]
         chunk_entry: dict = {"text": effective}
         chunk_entry["section"] = base_meta.get("section", h)
         chunk_entry["page"] = base_meta.get("page", p)
+        chapter_override = base_meta.get("chapter")
+        chunk_entry["chapter"] = (
+            chapter_override if chapter_override else ch
+        )
         chunks.append(chunk_entry)
 
         # Overlap: tail of the final text carried to the next chunk

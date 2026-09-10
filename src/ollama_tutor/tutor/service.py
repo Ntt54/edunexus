@@ -6,6 +6,7 @@ No textual/fastapi imports anywhere in this module.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
 import json
 import logging
@@ -407,6 +408,35 @@ class TutorService:
     def recover_interrupted_indexing(self) -> int:
         """Make interrupted books eligible for a later controlled resume."""
         return self.store.recover_interrupted_indexing()
+
+    async def resume_pending_queue(self) -> dict[str, Any]:
+        """Resume pending books after a (re)start, idempotently.
+
+        Counts ``pending`` rows first: none ⇒ no-op (fast unchanged
+        startup, no worker spawned). Otherwise starts the single worker
+        (already-running ⇒ no-op via :meth:`start_index_queue`); open
+        ingestion rows are reused, completed/failed books untouched.
+        Never raises (startup must not die on a resume hiccup).
+        """
+        try:
+            pending = sum(
+                1 for book in self.store.list_all_books()
+                if book.status == "pending"
+            )
+        except Exception as exc:
+            logger.warning("queue resume: listing failed: %s", exc)
+            return {"resumed": False, "pending": 0, "error": str(exc)}
+        if pending == 0:
+            return {"resumed": False, "pending": 0}
+        task = self._index_queue_task
+        if task is not None and not task.done():
+            return {"resumed": False, "pending": pending, "already_running": True}
+        try:
+            await self.start_index_queue()
+        except Exception as exc:
+            logger.warning("queue resume: worker failed to start: %s", exc)
+            return {"resumed": False, "pending": pending, "error": str(exc)}
+        return {"resumed": True, "pending": pending}
 
     async def start_index_queue(self, *, retry_errors: bool = False) -> dict[str, Any]:
         """Start exactly one worker consuming pending books by creation order."""
@@ -2658,9 +2688,175 @@ class TutorService:
             return {"book_id": book_id, "reembedded": 0}
         model = self.config.tutor_embedding_model
         vectors = await self.client.embed(model, texts)
-        n = self.store.update_chunks_embedding(book_id, vectors, model)
+        n = self.store.update_chunks_embedding(book.id, vectors, model)
         self.retriever.invalidate(subject_id)
         return {"book_id": book_id, "reembedded": n, "model": model}
+
+    def reindex_book_tracked(self, book_id: str) -> dict[str, Any]:
+        """Reindex a book's chunks as a tracked ingestion job (non-blocking).
+
+        Synchronous for the caller: creates (or reuses) the
+        ``ingestion_jobs`` row and returns
+        ``{"book_id", "job_id", "status"}`` immediately; the re-embedding
+        (same texts, same batching as :meth:`reindex_book`, single final
+        DB write) runs in the background as an ``asyncio.Task`` on the
+        running loop, or in a daemon thread otherwise — same pattern as
+        :meth:`_launch_ingestion`.
+
+        - Concurrent reindex of the same book reuses the open job (no
+          duplicate row) — but only for ``indexed`` books, so a reindex
+          never hijacks another import's open job row.
+        - No chunks ⇒ immediate ``completed`` job with ``nodes_created=0``.
+        - The book row is never touched on cancel (stays ``indexed``);
+          failure marks the job ``failed`` (+ book error + errors.log),
+          like the ingestion pipeline.
+        """
+        book = self.store.get_book(book_id)
+        if book is None:
+            raise KeyError(book_id)
+        subject_id = self.store.get_book_subject_id(book_id)
+        if subject_id is None:
+            raise KeyError(f"no_subject_for_{book_id}")
+        if book.status == "indexed":
+            open_job = self.store.find_open_job_by_book(book_id)
+            if open_job is not None:
+                return {
+                    "book_id": book_id,
+                    "job_id": open_job["id"],
+                    "status": "pending",
+                }
+        rows = [
+            r for r in self.store.get_subject_chunks(subject_id)
+            if r["book_id"] == book_id
+        ]
+        texts = [r["text"] for r in rows]
+        model = self.config.tutor_embedding_model
+        if not texts:
+            job = self.store.create_ingestion_job(
+                source_type="file",
+                original_filename=Path(book.source_path).name,
+                content_hash=None,
+                book_id=book.id,
+                status="completed",
+                progress_percent=100,
+                embedding_status="skipped",
+                nodes_created=0,
+            )
+            return {"book_id": book_id, "job_id": job["id"], "status": "completed"}
+        job = self.store.create_ingestion_job(
+            source_type="file",
+            original_filename=Path(book.source_path).name,
+            content_hash=None,
+            book_id=book.id,
+            status="queued",
+            progress_percent=5,
+        )
+        self._launch_reindex(job["id"], subject_id, book.id, texts, model)
+        return {"book_id": book_id, "job_id": job["id"], "status": "pending"}
+
+    def _launch_reindex(
+        self,
+        job_id: str,
+        subject_id: str,
+        book_id: str,
+        texts: list[str],
+        model: str,
+    ) -> None:
+        """Run the reindex pipeline in background (task on loop, else thread)."""
+        self._cancel_flags[book_id] = threading.Event()
+        coro = self._run_reindex_job(job_id, subject_id, book_id, texts, model)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            task = loop.create_task(coro)
+            self._ingestion_tasks[job_id] = task
+            task.add_done_callback(lambda t: self._ingestion_tasks.pop(job_id, None))
+            return
+        t = threading.Thread(
+            target=self._run_reindex_job_thread,
+            args=(job_id, subject_id, book_id, texts, model),
+            daemon=True,
+        )
+        t.start()
+        self._threads[job_id] = t
+
+    def _run_reindex_job_thread(
+        self,
+        job_id: str,
+        subject_id: str,
+        book_id: str,
+        texts: list[str],
+        model: str,
+    ) -> None:
+        try:
+            asyncio.run(self._run_reindex_job(job_id, subject_id, book_id, texts, model))
+        except Exception:
+            # Errors are recorded on the job row inside _run_reindex_job;
+            # never let a stray exception kill the daemon thread silently.
+            pass
+        finally:
+            # The thread's event loop is gone: release the loop-bound httpx
+            # client so the next run builds a fresh one.
+            self._close_client()
+
+    async def _run_reindex_job(
+        self,
+        job_id: str,
+        subject_id: str,
+        book_id: str,
+        texts: list[str],
+        model: str,
+    ) -> None:
+        """Background re-embedding with per-batch job progress (US tracked).
+
+        Same texts and same client call as :meth:`reindex_book`, split
+        into ``tutor_embed_batch_size`` batches with monotone progress
+        (90 → 100), single final DB write. The book row keeps its status
+        throughout (cancel leaves it ``indexed`` and untouched); any other
+        exception fails the job from any state (+ book error + errors.log).
+        """
+        batch_size = max(1, int(getattr(self.config, "tutor_embed_batch_size", 16) or 16))
+        total = len(texts)
+        try:
+            self.store.update_ingestion_job(
+                job_id, status="embedding", progress_percent=90,
+                embedding_status="running",
+            )
+            vectors: list[list[float]] = []
+            for start in range(0, total, batch_size):
+                if self._is_cancelled(book_id):
+                    self.store.update_ingestion_job(
+                        job_id, status="failed",
+                        error_message="Import annulé par l'utilisateur.",
+                    )
+                    return
+                batch = texts[start : start + batch_size]
+                vectors.extend(await self.client.embed(model, batch))
+                done = min(total, start + batch_size)
+                self.store.update_ingestion_job(
+                    job_id, progress_percent=90 + int(10 * done / total)
+                )
+            if self._is_cancelled(book_id):
+                self.store.update_ingestion_job(
+                    job_id, status="failed",
+                    error_message="Import annulé par l'utilisateur.",
+                )
+                return
+            n = self.store.update_chunks_embedding(book_id, vectors, model)
+            self.retriever.invalidate(subject_id)
+            self.store.update_ingestion_job(
+                job_id,
+                status="completed",
+                progress_percent=100,
+                embedding_status="done",
+                nodes_created=n,
+            )
+        except Exception as e:  # fail-closed: failed from any state + errors.log
+            self._fail_ingestion_job(job_id, book_id, str(e))
+        finally:
+            self._cancel_flags.pop(book_id, None)
 
     def schedule_index(
         self, subject_id: str, book: Book, path: Any, fmt: str | None = None
@@ -2880,15 +3076,25 @@ class TutorService:
 
     @staticmethod
     def _ingest_chunk(segments: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
-        """Combine annotated segments then structure-chunk them."""
+        """Combine annotated segments then structure-chunk them.
+
+        Native PDF outline chapters ride as H1 (→ chunk ``chapter``),
+        finer-grained section labels as H2 (→ chunk ``section``, as
+        before); page markers are unchanged.
+        """
         combined_parts: list[str] = []
         for text, meta in segments:
             if not text.strip():
                 continue
+            prefix = ""
+            if meta.get("chapter"):
+                prefix += f"# {meta['chapter']}\n"
+            if meta.get("section"):
+                prefix += f"## {meta['section']}\n"
             if meta.get("page") is not None:
-                combined_parts.append(f"--- Page {meta['page']} ---\n{text}")
-            elif meta.get("section"):
-                combined_parts.append(f"# {meta['section']}\n{text}")
+                combined_parts.append(f"--- Page {meta['page']} ---\n{prefix}{text}")
+            elif prefix:
+                combined_parts.append(f"{prefix}{text}")
             else:
                 combined_parts.append(text)
         return chunk_text_structured("\n\n".join(combined_parts))
@@ -3600,9 +3806,26 @@ class TutorService:
     PATH_DURATION_DEFAULT = 15
 
     async def generate_path_from_books(
-        self, subject_id: str, book_ids: list[str],
+        self,
+        subject_id: str,
+        book_ids: list[str],
+        description: str | None = None,
+        path_id: str | None = None,
     ) -> dict[str, Any]:
         """Generate a learning path from selected books' table of contents.
+
+        ``description`` is the learner's optional goal (additive): when
+        non-blank it guides the LLM split via an « Objectif de l'élève »
+        prompt section and becomes the created path's description;
+        blank/None keeps today's auto description.
+
+        ``path_id`` fills an EXISTING path instead of always creating one
+        (additive): provided + existing + empty ⇒ the manual path is
+        filled in place (its title/description are NEVER overwritten);
+        provided + non-empty ⇒ a NEW path is created (existing steps are
+        never destroyed); provided + unknown (or from another subject) ⇒
+        ``KeyError``; absent ⇒ creation as before. The result gains
+        ``filled: true|false``.
 
         Hardened against degenerate small-local-LLM output: parsed steps
         are validated (titled, duration clamped, source normalised), and a
@@ -3657,9 +3880,12 @@ class TutorService:
                 "sélectionnés n'ont ni chapitres ni sections exploitables."
             )
 
+        # Learner goal (additive): guides the split + becomes the description.
+        goal = str(description or "").strip() or None
+
         # Build prompt and call LLM.
         level = self.config.tutor_level or "intermediate"
-        system_prompt = build_path_from_books_prompt(book_structures, level)
+        system_prompt = build_path_from_books_prompt(book_structures, level, goal)
         messages = [
             Message(role=MessageRole.SYSTEM, content=system_prompt),
             Message(
@@ -3674,9 +3900,12 @@ class TutorService:
         options = self._generation_options()
         raw = await self._llm_collect(messages, options)
 
-        # Parse + validate the LLM response (titles required, durations
-        # clamped, sources normalised to known book/chapter titles).
+        # Parse + validate the LLM response (titles required AND usable,
+        # durations clamped, sources normalised, near-dupes merged).
         steps_data = self._parse_path_steps_response(raw)
+        steps_data = [
+            s for s in steps_data if self._is_step_title_usable(s.get("title", ""))
+        ]
         known_titles: list[str] = []
         for bs in book_structures:
             bt = str(bs.get("title") or "").strip()
@@ -3694,11 +3923,14 @@ class TutorService:
             step["source"] = self._normalize_step_source(
                 step.get("source", ""), known_titles
             )
-        steps_data = steps_data[: self.PATH_MAX_STEPS]
+        steps_data = self._dedupe_steps(steps_data)[: self.PATH_MAX_STEPS]
 
-        # Minimum viable: >=3 steps OR >=1 per selected book. Below that
-        # the LLM output is degenerate → deterministic TOC fallback
-        # (the TOC is non-empty here by the guard above).
+        # Minimum viable: >=3 steps OR >=1 per selected book (dupes don't
+        # count). Below that the LLM output is degenerate → deterministic
+        # TOC fallback (the TOC is non-empty here by the guard above).
+        # The fallback is accepted as soon as it yields honest steps;
+        # only a fully-filtered (empty) fallback raises: legit small docs
+        # (e.g. 2 valid chapters) must not 422, crumbs must never persist.
         fallback = False
         required = max(self.PATH_MIN_STEPS, len(book_ids))
         if len(steps_data) < required:
@@ -3706,16 +3938,33 @@ class TutorService:
                 book_structures, cap=self.PATH_FALLBACK_MAX_STEPS
             )
             fallback = True
+            if not steps_data:
+                raise PathGenerationError(
+                    "Contenus insuffisants pour générer un parcours : aucun "
+                    "titre de chapitre ou section exploitable (fragments, "
+                    "code ou bruit)."
+                )
 
-        # Create the learning path.
-        title = f"Parcours depuis livres — {subject.name}"
-        description = (
-            f"Parcours structuré basé sur {len(book_structures)} livre(s) "
-            f"({len(steps_data)} étapes)"
-        )
-        if fallback:
-            description += " — généré depuis la table des matières"
-        path = self.store.create_learning_path(subject_id, title, description)
+        # Target path: fill an existing EMPTY path in place (manual
+        # title/description kept), else create (never destroy steps).
+        filled = False
+        if path_id:
+            existing = self.store.get_learning_path(path_id)
+            if existing is None or existing.subject_id != subject_id:
+                raise KeyError(f"Parcours introuvable : {path_id}")
+            if not self.store.list_path_steps(existing.id):
+                path = existing
+                filled = True
+        if not filled:
+            # Create the learning path.
+            title = f"Parcours depuis livres — {subject.name}"
+            description = goal or (
+                f"Parcours structuré basé sur {len(book_structures)} livre(s) "
+                f"({len(steps_data)} étapes)"
+            )
+            if fallback:
+                description += " — généré depuis la table des matières"
+            path = self.store.create_learning_path(subject_id, title, description)
 
         # Create PathSteps from the validated steps.
         for ordinal, step in enumerate(steps_data):
@@ -3737,6 +3986,7 @@ class TutorService:
         result = path.to_dict()
         result["steps"] = [s.to_dict() for s in self.store.list_path_steps(path.id)]
         result["fallback"] = fallback
+        result["filled"] = filled
         return result
 
     def path_from_program(
@@ -3884,6 +4134,59 @@ class TutorService:
             })
         return result
 
+    #: Code giveaways: such a step title is a crumb, never a lesson step.
+    #: (A lone ":" is NOT code — "La cellule : unité du vivant" is legit;
+    #: real code is caught by =, :=, brackets, leading keywords, ...).
+    _STEP_CODE_RE = re.compile(
+        r"=|\(\)|\{|\}|;\s*$|```|>>>|\.\.\.|//|/\*"
+        r"|^\s*(?:def |class |import |from |for |while |if |return |print\()",
+    )
+
+    @staticmethod
+    def _is_step_title_usable(title: str) -> bool:
+        """True when a step title is lesson-worthy (anti-crumb guard).
+
+        Rejects: <2 chars, leading lowercase (mid-sentence fragment like
+        « de la boucle while » or « linewidth : … »), pure code (``x = 3``,
+        ``a := 3``, ``for ...``, …). Applies to LLM AND fallback steps
+        alike — a rejected chapter/section never becomes a step.
+
+        NOTE: a 15-char minimum was considered but conflicts with legit
+        short titles already relied upon (« Leçon 1 », « Cellule », « ADN »,
+        existing suites); crumbs are caught by the lowercase/code rules.
+        """
+        t = (title or "").strip()
+        if len(t) < 2:
+            return False
+        if t[0].islower():
+            return False
+        if TutorService._STEP_CODE_RE.search(t):
+            return False
+        return True
+
+    @staticmethod
+    def _dedupe_steps(
+        steps: list[dict[str, Any]], ratio: float = 0.92
+    ) -> list[dict[str, Any]]:
+        """Drop near-identical steps by title (first kept, order preserved)."""
+        kept: list[dict[str, Any]] = []
+        keys: list[str] = []
+        for step in steps:
+            key = re.sub(r"\s+", " ", str(step.get("title") or "").lower()).strip()
+            if not key:
+                continue
+            dupe = False
+            for fk in keys:
+                if abs(len(key) - len(fk)) > max(16, int(max(len(key), len(fk)) * 0.1)):
+                    continue
+                if difflib.SequenceMatcher(None, key, fk).ratio() >= ratio:
+                    dupe = True
+                    break
+            if not dupe:
+                kept.append(step)
+                keys.append(key)
+        return kept
+
     @staticmethod
     def _normalize_step_source(source: str, known_titles: list[str]) -> str:
         """Normalise a step source to a known book/chapter title when possible.
@@ -3923,10 +4226,11 @@ class TutorService:
     ) -> list[dict[str, Any]]:
         """Deterministic steps straight from the TOC (no LLM).
 
-        One ``reading`` step per non-empty chapter (title reused verbatim,
+        One ``reading`` step per usable chapter (title reused verbatim,
         book title as source); title-less chapters with sections yield one
-        step per non-empty section instead. Empty chapters are skipped.
-        Capped at ``cap`` steps, book order preserved.
+        step per usable section instead. Rejected chapters/sections (crumbs:
+        too short, lowercase fragments, code) NEVER become steps. Capped
+        at ``cap`` steps, book order preserved.
         """
         steps: list[dict[str, Any]] = []
         for bs in book_structures:
@@ -3936,17 +4240,20 @@ class TutorService:
                     return steps
                 ch_title = str(ch.get("title") or "")
                 if ch_title.strip():
-                    steps.append({
-                        "title": ch_title,
-                        "type": "reading",
-                        "duration": 15,
-                        "source": book_title,
-                    })
+                    if TutorService._is_step_title_usable(ch_title):
+                        steps.append({
+                            "title": ch_title,
+                            "type": "reading",
+                            "duration": 15,
+                            "source": book_title,
+                        })
                     continue
                 for sec in ch.get("sections", []):
                     if len(steps) >= cap:
                         return steps
-                    if str(sec or "").strip():
+                    if str(sec or "").strip() and TutorService._is_step_title_usable(
+                        str(sec)
+                    ):
                         steps.append({
                             "title": str(sec),
                             "type": "reading",
