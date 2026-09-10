@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator
 
+import httpx
+
 logger = logging.getLogger(__name__)
 
 
@@ -79,6 +81,15 @@ async def read_limited_upload(
     return b"".join(parts)
 
 
+class PathGenerationError(ValueError):
+    """Raised when no usable learning-path content exists.
+
+    Neither the LLM output nor the books' table of contents yields steps
+    (books without chapters or sections). Mapped to a readable 4xx by the
+    route — never a silent empty path.
+    """
+
+
 def _log_error(config: Any, source: str, message: str, detail: str = "") -> None:
     """Append ``[ISO-8601] [source] message`` (+ detail) to errors.log.
 
@@ -96,7 +107,13 @@ def _log_error(config: Any, source: str, message: str, detail: str = "") -> None
     except Exception:
         pass
 
-from ..client import OllamaClient
+from ..client import (
+    DEFAULT_BASE_URL,
+    DEFAULT_KEEP_ALIVE,
+    OllamaAPIError,
+    OllamaClient,
+    OllamaConnectionError,
+)
 from ..models import Message, MessageRole, OllamaOptions
 from .assessment import (
     _CATEGORY_TO_DIAGNOSIS,
@@ -178,6 +195,7 @@ class PrepareReport:
     def to_dict(self) -> dict[str, Any]:
         return {
             "flashcards_new": self.flashcards_new,
+            "flashcards_skipped": self.flashcards_skipped,
             "glossary_new": self.glossary_new,
             "concepts_new": self.concepts_new,
             "skipped": self.skipped,
@@ -185,6 +203,88 @@ class PrepareReport:
             "glossary_skipped": self.glossary_skipped,
             "concepts_skipped": self.concepts_skipped,
         }
+
+
+#: Bounded timeout for the synchronous lesson LLM call (slow CPU, non-streaming).
+LESSON_LLM_TIMEOUT_S = 180.0
+
+#: Longer timeout for full courses: measured ~6 words/s on this CPU-only
+#: box, so 800–1200 words need ~4–6 min of generation — 180 s would time
+#: out deterministically. Summaries/answers stay at 180 s.
+LESSON_COURSE_TIMEOUT_S = 360.0
+
+
+#: Règles d'ancrage STRICTES anti-hallucination (petit LLM local :
+#: termes inventés, faussetés, exemples génériques non ancrés). Suffixe
+#: commun aux 3 prompts de leçon — mêmes kinds/signatures, contrat inchangé.
+_LESSON_GROUNDING_RULES = (
+    " Règles d'ancrage strictes : n'affirme que ce qui figure "
+    "explicitement dans les extraits fournis. Exemples de code : uniquement "
+    "ceux tirés ou directement dérivés des extraits, ne jamais inventer "
+    "d'API, de fonction ni de syntaxe. Définitions : reprends exactement la "
+    "terminologie des extraits, ne jamais inventer de terme technique. En "
+    "cas d'incertitude ou d'information absente des extraits, signale-le "
+    "par « selon les extraits » plutôt que d'affirmer. Réponds strictement "
+    "en français."
+)
+
+
+def _build_lesson_prompts(
+    kind: str, notion: str, excerpts: list[str], question: str | None = None
+) -> tuple[str, str]:
+    """Strict French prompts for lesson generation (free text, never JSON).
+
+    ``kind`` is ``lesson_course`` (structured course, 800–1200 words),
+    ``lesson_summary`` (150–250 words) or ``lesson_answer`` (short targeted
+    answer to the learner's ``question``, 100–200 words). The model must
+    stay grounded in the provided excerpts and never cite technical
+    identifiers.
+    """
+    src = "\n".join(f"- {e}" for e in excerpts[:6] if str(e).strip())
+    if not src:
+        src = "- (aucun extrait indexé)"
+    if kind == "lesson_summary":
+        system = (
+            "Tu es un tuteur pédagogique francophone. Tu rédiges une synthèse "
+            "de cours concise, fidèle aux extraits fournis, en français, en "
+            "texte libre (titres Markdown autorisés). Longueur stricte : 150 "
+            "à 250 mots. Ne cite jamais d'identifiants techniques, uniquement "
+            "des titres lisibles." + _LESSON_GROUNDING_RULES
+        )
+        user = (
+            f"Rédige une synthèse de 150 à 250 mots sur la notion "
+            f"« {notion} » à partir de ces extraits :\n{src}"
+        )
+    elif kind == "lesson_answer":
+        system = (
+            "Tu es un tuteur pédagogique francophone. Tu réponds à la question "
+            "de l'élève de façon courte et ciblée, fidèle aux extraits "
+            "fournis, en français, en texte libre. Longueur stricte : 100 à "
+            "200 mots. Reste ancré à la notion et aux extraits ; ne cite "
+            "jamais d'identifiants techniques, uniquement des titres lisibles."
+            + _LESSON_GROUNDING_RULES
+        )
+        asked = (question or "").strip() or "(question vide)"
+        user = (
+            f"Notion de la leçon : « {notion} ».\n"
+            f"Question de l'élève : {asked}\n"
+            f"Réponds en 100 à 200 mots à partir de ces extraits :\n{src}"
+        )
+    else:
+        system = (
+            "Tu es un tuteur pédagogique francophone. Tu rédiges un cours "
+            "complet et structuré, fidèle aux extraits fournis, en français, "
+            "en texte libre (titres Markdown autorisés : définition, "
+            "explications, exemples détaillés, cas d'usage, erreurs courantes, "
+            "points clés). Longueur stricte : 800 à 1200 mots. Ne cite jamais "
+            "d'identifiants techniques, uniquement des titres lisibles."
+            + _LESSON_GROUNDING_RULES
+        )
+        user = (
+            f"Rédige un cours structuré de 800 à 1200 mots sur la notion "
+            f"« {notion} » à partir de ces extraits :\n{src}"
+        )
+    return system, user
 
 
 class TutorService:
@@ -265,6 +365,10 @@ class TutorService:
         self.quiz_engine = QuizEngine(store, self._llm_client, config)
         self._cancel_flags: dict[str, threading.Event] = {}
         self._threads: dict[str, threading.Thread] = {}
+        # Sync HTTP transport for the lesson LLM hook (generate_lesson_text).
+        # None in production (real Ollama daemon); tests inject an
+        # httpx.MockTransport for offline runs.
+        self.lesson_http_transport: Any = None
         # Feature 010 P1-A (US3): strong refs to in-flight ingestion tasks.
         # asyncio only holds weak refs — without this the pipeline could be
         # GC'd mid-flight. Keyed by job_id, popped by the done-callback.
@@ -379,10 +483,33 @@ class TutorService:
                     continue
                 self._index_queue_current = book.id
                 self._cancel_flags[book.id] = threading.Event()
+                # Tracked run: the worker drives the book's ingestion_jobs
+                # row through the phased pipeline (5→100) instead of the
+                # blind legacy path, so progress/ETA polling sees it.
+                job: dict[str, Any] | None = None
                 try:
-                    await self._run_index(
-                        subject_id, book, Path(book.source_path), book.format
+                    job = self.ensure_book_job(
+                        book.id, subject_id, Path(book.source_path)
                     )
+                except Exception as exc:  # DB trouble: fall back to blind run
+                    logger.warning(
+                        "queue job tracking unavailable for book %s: %s",
+                        book.id,
+                        exc,
+                    )
+                try:
+                    if job is not None:
+                        await self._run_ingestion_job(
+                            job["id"],
+                            subject_id,
+                            book.id,
+                            Path(book.source_path),
+                            book.format,
+                        )
+                    else:
+                        await self._run_index(
+                            subject_id, book, Path(book.source_path), book.format
+                        )
                 finally:
                     self._index_queue_current = None
                 final = self.store.get_book(book.id)
@@ -391,6 +518,9 @@ class TutorService:
                 elif final is not None and final.status == "error":
                     if self._retryable_index_error(final.error) and final.retry_count < 3:
                         self.store.retry_book(book.id)
+                        if job is not None:
+                            # Same job id keeps polling continuity across retries.
+                            self.store.requeue_ingestion_job(job["id"])
                         await asyncio.sleep(min(30, 2 ** final.retry_count))
                         continue
                     self._index_queue_errors += 1
@@ -1400,6 +1530,113 @@ class TutorService:
         if truncated:
             text += "\n\n[Réponse tronquée : limite de jetons atteinte]"
         return text
+
+    def _lesson_ollama_base_url(self) -> str:
+        """Base URL for the sync Ollama lesson call (reuses client config)."""
+        for handle in (self._llm_client, self.client):
+            if isinstance(handle, OllamaClient):
+                base = getattr(handle, "base_url", "") or ""
+                if base.strip():
+                    return str(base).rstrip("/")
+        return DEFAULT_BASE_URL
+
+    def generate_lesson_text(
+        self, kind: str, notion: str, excerpts: list[str], question: str | None = None
+    ) -> str:
+        """Generate lesson text synchronously via Ollama ``/api/chat``.
+
+        Hook consumed by ``LessonDiscussionService._try_llm_text``: ``kind``
+        is ``lesson_course`` (structured course, 800–1200 words),
+        ``lesson_summary`` (150–250 words) or ``lesson_answer`` (short
+        targeted answer to the learner's ``question``, 100–200 words);
+        ``notion`` is the sanitized lesson topic; ``excerpts`` are the
+        grounding source passages.
+
+        Purely synchronous (``httpx.Client``, ``stream: False``) — the
+        calling path is sync and must never touch asyncio. Uses
+        ``config.tutor_model`` with a bounded timeout (slow CPU). Raises on
+        any failure (connection, timeout, HTTP error, invalid/empty
+        response): the caller falls back to the honest offline content.
+        """
+        if kind not in ("lesson_course", "lesson_summary", "lesson_answer"):
+            raise ValueError(f"Invalid lesson kind: {kind!r}")
+        system, user = _build_lesson_prompts(
+            kind, notion or "notion", excerpts or [], question=question
+        )
+        payload: dict[str, Any] = {
+            "model": self.config.tutor_model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "stream": False,
+            "think": False,
+            "keep_alive": DEFAULT_KEEP_ALIVE,
+        }
+        try:
+            with httpx.Client(
+                base_url=self._lesson_ollama_base_url(),
+                timeout=httpx.Timeout(
+                    LESSON_COURSE_TIMEOUT_S
+                    if kind == "lesson_course"
+                    else LESSON_LLM_TIMEOUT_S
+                ),
+                transport=self.lesson_http_transport,
+            ) as http:
+                resp = http.post("/api/chat", json=payload)
+        except httpx.ConnectError as exc:
+            raise OllamaConnectionError(
+                f"Cannot connect to Ollama for lesson text: {exc}"
+            ) from exc
+        except httpx.TimeoutException as exc:
+            raise OllamaConnectionError(
+                f"Ollama lesson request timed out: {exc}"
+            ) from exc
+        except Exception as exc:
+            raise OllamaConnectionError(
+                f"Unexpected lesson HTTP error: {exc}"
+            ) from exc
+        if resp.status_code != 200:
+            raise OllamaAPIError(resp.status_code, resp.text)
+        try:
+            data = resp.json()
+        except Exception as exc:
+            raise OllamaAPIError(resp.status_code, f"invalid JSON: {exc}") from exc
+        message = data.get("message") if isinstance(data, dict) else None
+        text = message.get("content", "") if isinstance(message, dict) else ""
+        if not isinstance(text, str) or not text.strip():
+            raise OllamaAPIError(resp.status_code, "empty lesson content")
+        return text
+
+    async def stream_lesson_text(
+        self,
+        kind: str,
+        notion: str,
+        excerpts: list[str],
+        question: str | None = None,
+    ) -> AsyncIterator[str]:
+        """Stream lesson text deltas via the LLM ``chat_stream`` (SSE backend).
+
+        Same prompts/model as :meth:`generate_lesson_text` (builders
+        existants, ``config.tutor_model``). Async generator yielding
+        non-empty content chunks; raises on failure (the SSE caller emits
+        an ``error`` event and persists nothing).
+        """
+        if kind not in ("lesson_course", "lesson_summary", "lesson_answer"):
+            raise ValueError(f"Invalid lesson kind: {kind!r}")
+        system, user = _build_lesson_prompts(
+            kind, notion or "notion", excerpts or [], question=question
+        )
+        messages = [
+            Message(role=MessageRole.SYSTEM, content=system),
+            Message(role=MessageRole.USER, content=user),
+        ]
+        options = self._generation_options()
+        async for ev in self._llm_client.chat_stream(
+            messages, self.config.tutor_model, options=options
+        ):
+            if ev.kind == "content" and ev.text:
+                yield ev.text
 
     def _collect_past_errors(self, concept_id: str) -> list[str]:
         """Recent incorrect/partial attempt feedback for a concept (context)."""
@@ -2466,6 +2703,36 @@ class TutorService:
             )
         return job["id"]
 
+    def ensure_book_job(
+        self, book_id: str, subject_id: str, path: Any
+    ) -> dict[str, Any]:
+        """Create (or reuse) the tracked job row for a queue-mode import.
+
+        The ``queue=true`` route registers the book via
+        :meth:`register_import`, then calls this so progress/ETA polling
+        sees the import: initial status ``queued``/5 %. A rapid double POST
+        reuses the open row (no duplicate line). Never launches any work —
+        the sequential queue worker drives the row.
+        """
+        open_job = self.store.find_open_job_by_book(book_id)
+        if open_job is not None:
+            return open_job
+        book = self.store.get_book(book_id)
+        if book is None:
+            raise KeyError(book_id)
+        try:
+            content_hash = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        except OSError:
+            content_hash = None
+        return self.store.create_ingestion_job(
+            source_type="file",
+            original_filename=Path(path).name if path is not None else None,
+            content_hash=content_hash,
+            book_id=book.id,
+            status="queued",
+            progress_percent=5,
+        )
+
     def get_ingestion_job(self, job_id: str) -> dict[str, Any]:
         """Return a serialisable ingestion job snapshot (polling).
 
@@ -3321,16 +3588,33 @@ class TutorService:
     # Learning path from books TOC / captured program (Feature 008)
     # ------------------------------------------------------------------
 
+    #: Minimum viable LLM steps: at least 3, or at least 1 per book.
+    PATH_MIN_STEPS = 3
+    #: Hard cap on persisted steps (the prompt already asks for 6-20).
+    PATH_MAX_STEPS = 20
+    #: Cap on deterministic TOC-fallback steps.
+    PATH_FALLBACK_MAX_STEPS = 12
+    #: Step duration bounds (minutes).
+    PATH_DURATION_MIN = 5
+    PATH_DURATION_MAX = 120
+    PATH_DURATION_DEFAULT = 15
+
     async def generate_path_from_books(
         self, subject_id: str, book_ids: list[str],
     ) -> dict[str, Any]:
         """Generate a learning path from selected books' table of contents.
 
+        Hardened against degenerate small-local-LLM output: parsed steps
+        are validated (titled, duration clamped, source normalised), and a
+        deterministic TOC fallback (``fallback: True``) replaces unusable
+        output. Raises :class:`PathGenerationError` when neither the LLM
+        nor the TOC yields usable content (mapped to 4xx by the route).
+
         1. Fetches chunks from the selected books, grouped by chapter.
         2. Builds a TOC structure: [{title, chapters: [{title, sections: [...]}]}]
         3. Calls the LLM via build_path_from_books_prompt to generate structured steps.
-        4. Creates a LearningPath with PathStep entries.
-        5. Returns the created path as a dict.
+        4. Validates steps (or deterministic TOC fallback), creates the path.
+        5. Returns the created path as a dict (plus ``fallback`` flag).
         """
         subject = self.store.require_subject(subject_id)
 
@@ -3365,6 +3649,14 @@ class TutorService:
                     })
             book_structures.append({"title": title, "chapters": chapters})
 
+        # No usable TOC at all: fail explicitly BEFORE calling the LLM
+        # (never persist a silent empty path).
+        if not self._toc_has_content(book_structures):
+            raise PathGenerationError(
+                "Contenus insuffisants pour générer un parcours : les livres "
+                "sélectionnés n'ont ni chapitres ni sections exploitables."
+            )
+
         # Build prompt and call LLM.
         level = self.config.tutor_level or "intermediate"
         system_prompt = build_path_from_books_prompt(book_structures, level)
@@ -3382,8 +3674,38 @@ class TutorService:
         options = self._generation_options()
         raw = await self._llm_collect(messages, options)
 
-        # Parse the LLM response.
+        # Parse + validate the LLM response (titles required, durations
+        # clamped, sources normalised to known book/chapter titles).
         steps_data = self._parse_path_steps_response(raw)
+        known_titles: list[str] = []
+        for bs in book_structures:
+            bt = str(bs.get("title") or "").strip()
+            if bt:
+                known_titles.append(bt)
+            for ch in bs.get("chapters", []):
+                ct = str(ch.get("title") or "").strip()
+                if ct:
+                    known_titles.append(ct)
+                for sec in ch.get("sections", []):
+                    st = str(sec or "").strip()
+                    if st:
+                        known_titles.append(st)
+        for step in steps_data:
+            step["source"] = self._normalize_step_source(
+                step.get("source", ""), known_titles
+            )
+        steps_data = steps_data[: self.PATH_MAX_STEPS]
+
+        # Minimum viable: >=3 steps OR >=1 per selected book. Below that
+        # the LLM output is degenerate → deterministic TOC fallback
+        # (the TOC is non-empty here by the guard above).
+        fallback = False
+        required = max(self.PATH_MIN_STEPS, len(book_ids))
+        if len(steps_data) < required:
+            steps_data = self._fallback_path_steps_from_toc(
+                book_structures, cap=self.PATH_FALLBACK_MAX_STEPS
+            )
+            fallback = True
 
         # Create the learning path.
         title = f"Parcours depuis livres — {subject.name}"
@@ -3391,9 +3713,11 @@ class TutorService:
             f"Parcours structuré basé sur {len(book_structures)} livre(s) "
             f"({len(steps_data)} étapes)"
         )
+        if fallback:
+            description += " — généré depuis la table des matières"
         path = self.store.create_learning_path(subject_id, title, description)
 
-        # Create PathSteps from the LLM response.
+        # Create PathSteps from the validated steps.
         for ordinal, step in enumerate(steps_data):
             activity_type = step.get("type", "concept")
             if activity_type not in ("concept", "exercise", "quiz", "reading"):
@@ -3412,6 +3736,7 @@ class TutorService:
 
         result = path.to_dict()
         result["steps"] = [s.to_dict() for s in self.store.list_path_steps(path.id)]
+        result["fallback"] = fallback
         return result
 
     def path_from_program(
@@ -3513,7 +3838,10 @@ class TutorService:
         """Parse the LLM JSON array response for structured learning path steps.
 
         Expects: [{"title": "...", "type": "concept", "duration": 15, "source": "..."}]
-        Falls back to a single concept step on parse failure.
+        Hardened: items without a title are dropped, non-numeric durations
+        fall back to 15 min, durations are clamped to 5-120 min, and a
+        ``None`` source never becomes the string "None". Unparseable input
+        yields [] (the caller applies the deterministic TOC fallback).
         """
         import re as _re
 
@@ -3537,16 +3865,95 @@ class TutorService:
         for item in arr:
             if not isinstance(item, dict):
                 continue
+            title = str(item.get("title") or "").strip()
+            if not title:
+                continue
             step_type = str(item.get("type", "concept")).strip()
             if step_type not in valid_types:
                 step_type = "concept"
+            try:
+                duration = int(item.get("duration", 15))
+            except (TypeError, ValueError):
+                duration = 15
+            duration = max(5, min(120, duration))
             result.append({
-                "title": str(item.get("title", "")),
+                "title": title,
                 "type": step_type,
-                "duration": int(item.get("duration", 15)),
-                "source": str(item.get("source", "")),
+                "duration": duration,
+                "source": str(item.get("source") or "").strip(),
             })
         return result
+
+    @staticmethod
+    def _normalize_step_source(source: str, known_titles: list[str]) -> str:
+        """Normalise a step source to a known book/chapter title when possible.
+
+        Exact case-insensitive match wins; otherwise a ≥3-letter substring
+        match against a known title (either direction) resolves to the
+        canonical title. Unknown sources are kept verbatim (no info loss).
+        """
+        s = (source or "").strip()
+        if not s:
+            return ""
+        low = s.lower()
+        for title in known_titles:
+            if title.lower() == low:
+                return title
+        if len(low) >= 3:
+            for title in known_titles:
+                tl = title.lower()
+                if len(tl) >= 3 and (tl in low or low in tl):
+                    return title
+        return s
+
+    @staticmethod
+    def _toc_has_content(book_structures: list[dict]) -> bool:
+        """True when the TOC holds at least one usable chapter or section."""
+        for bs in book_structures:
+            for ch in bs.get("chapters", []):
+                if str(ch.get("title") or "").strip():
+                    return True
+                if any(str(s or "").strip() for s in ch.get("sections", [])):
+                    return True
+        return False
+
+    @staticmethod
+    def _fallback_path_steps_from_toc(
+        book_structures: list[dict], cap: int = 12
+    ) -> list[dict[str, Any]]:
+        """Deterministic steps straight from the TOC (no LLM).
+
+        One ``reading`` step per non-empty chapter (title reused verbatim,
+        book title as source); title-less chapters with sections yield one
+        step per non-empty section instead. Empty chapters are skipped.
+        Capped at ``cap`` steps, book order preserved.
+        """
+        steps: list[dict[str, Any]] = []
+        for bs in book_structures:
+            book_title = str(bs.get("title") or "").strip()
+            for ch in bs.get("chapters", []):
+                if len(steps) >= cap:
+                    return steps
+                ch_title = str(ch.get("title") or "")
+                if ch_title.strip():
+                    steps.append({
+                        "title": ch_title,
+                        "type": "reading",
+                        "duration": 15,
+                        "source": book_title,
+                    })
+                    continue
+                for sec in ch.get("sections", []):
+                    if len(steps) >= cap:
+                        return steps
+                    if str(sec or "").strip():
+                        steps.append({
+                            "title": str(sec),
+                            "type": "reading",
+                            "duration": 15,
+                            "source": book_title,
+                        })
+        return steps
 
     def get_subject_domain(self, subject_id: str) -> str:
         """Get the classified domain for a subject."""

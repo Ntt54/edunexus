@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import re
 import sqlite3
 import threading
 import time
@@ -58,6 +60,66 @@ from .models import (
 _SUBJECT_NAME_MAX = 80
 _CONCEPT_NAME_MAX = 60
 _VALID_LEVELS = {"beginner", "intermediate", "advanced", "expert"}
+
+#: Freelist ratio above which a post-delete VACUUM is worth its cost.
+VACUUM_FREELIST_THRESHOLD = 0.20
+
+logger = logging.getLogger(__name__)
+
+
+_DEDUP_SUFFIX_RE = re.compile(r"-[0-9a-f]{8}$", re.IGNORECASE)
+
+
+def strip_dedup_suffix(stem: str) -> str:
+    """Remove a server dedup suffix (``-{8 hex}``) from a filename stem.
+
+    When an upload collides with an existing file in ``uploads/``, the web
+    layer renames it ``{stem}-{8hex}{suffix}`` to keep a unique path on
+    disk. The displayed book title must NOT inherit that suffix, so only
+    the title derivation is cleaned — the file on disk keeps its unique
+    name. Stems without the exact suffix are returned unchanged.
+    """
+    return _DEDUP_SUFFIX_RE.sub("", stem)
+
+
+_NOTION_DOC_EXTS = frozenset({".txt", ".md", ".pdf", ".epub", ".docx", ".pptx"})
+
+
+def sanitize_notion_id(raw: Any) -> str:
+    """Sanitize a lesson notion id so it is NEVER a filename.
+
+    Path steps built from book imports may carry ``activity_id`` values
+    derived from filenames (``Programmer-en-python-d010dd1a``). Strip a
+    leftover document extension (import-supported set only) plus the
+    server dedup suffix (``-{8 hex}``). Values without those markers are
+    returned stripped but otherwise unchanged.
+    """
+    name = str(raw or "").strip()
+    if not name:
+        return ""
+    if Path(name).suffix.lower() in _NOTION_DOC_EXTS:
+        name = Path(name).stem
+    return strip_dedup_suffix(name.strip()).strip()
+
+
+_NOTION_SEP_RE = re.compile(r"[_\.\-]+")
+
+
+_WS_RE = re.compile(r"\s+")
+
+
+def normalize_notion_key(raw: Any) -> str:
+    """Normalized comparison key for notion-vs-book-title matching.
+
+    Both sides go through the same pipeline: leftover document extension,
+    server dedup suffix (``-{8 hex}``, legacy book rows included), then
+    ``_``/``.``/``-`` separators → spaces, collapsed whitespace, lowercase.
+    Lets a bare filename stem (« Programmer-en-samusant-avec-Python »)
+    match its book title whatever the separators/suffix/extension.
+    """
+    name = sanitize_notion_id(raw)
+    name = _NOTION_SEP_RE.sub(" ", name)
+    return _WS_RE.sub(" ", name).strip().lower()
 
 
 def _json(value: Any) -> str:
@@ -1268,6 +1330,7 @@ class LibraryStore:
         self._conn.commit()
         if self._active_id == subject_id:
             self._active_id = None
+        self._maybe_vacuum_after_delete()
 
     def select_subject(self, subject_id: str) -> Subject:
         subject = self._get_subject(subject_id)
@@ -1491,7 +1554,7 @@ class LibraryStore:
                     "status = 'pending', error = NULL, chunks_done = 0, "
                     "chunks_total = 0, retry_count = 0, next_retry_at = NULL, "
                     "last_error_at = NULL WHERE id = ?",
-                    (p.stem, fmt, fingerprint, current.id),
+                    (strip_dedup_suffix(p.stem), fmt, fingerprint, current.id),
                 )
                 self._conn.commit()
                 return self.get_book(current.id)
@@ -1522,7 +1585,7 @@ class LibraryStore:
         now = _now_iso()
         book = Book(
             id=_uid(),
-            title=p.stem,
+            title=strip_dedup_suffix(p.stem),
             source_path=str(p),
             format=fmt,
             fingerprint=fingerprint,
@@ -1579,6 +1642,7 @@ class LibraryStore:
 
     # Forward-only pipeline order; ``failed`` is reachable from any state.
     INGESTION_STATUS_ORDER = (
+        "queued",
         "uploaded",
         "extracting",
         "classifying",
@@ -1590,6 +1654,7 @@ class LibraryStore:
 
     # French display labels (phase_label is UI-facing).
     INGESTION_PHASE_LABELS = {
+        "queued": "En file d'attente",
         "uploaded": "Import reçu",
         "extracting": "Extraction du contenu",
         "classifying": "Classification du document",
@@ -1845,6 +1910,49 @@ class LibraryStore:
         ).fetchone()
         return self._job_dict(row) if row is not None else None
 
+    def find_open_job_by_book(self, book_id: str) -> dict[str, Any] | None:
+        """Newest non-terminal job linked to a book, or ``None``.
+
+        Used by the queue path so a rapid double POST reuses the same row
+        instead of inserting a duplicate.
+        """
+        if not book_id:
+            return None
+        row = self._conn.execute(
+            "SELECT * FROM ingestion_jobs WHERE book_id = ? "
+            "AND status NOT IN ('completed', 'failed') "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (book_id,),
+        ).fetchone()
+        return self._job_dict(row) if row is not None else None
+
+    def requeue_ingestion_job(self, job_id: str) -> dict[str, Any] | None:
+        """Reset a job row to ``queued``/5 % for a worker retry attempt.
+
+        Dedicated worker-retry operation (the forward-only guard in
+        :meth:`update_ingestion_job` refuses to reopen terminal rows):
+        clears the stale error so polling shows a fresh attempt on the
+        SAME job id. Returns the fresh snapshot, or ``None`` if unknown.
+        """
+        from .models import _now_iso
+
+        row = self._conn.execute(
+            "SELECT * FROM ingestion_jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        self._conn.execute(
+            "UPDATE ingestion_jobs SET status = 'queued', progress_percent = 5, "
+            "phase_label = ?, embedding_status = 'pending', error_message = NULL, "
+            "updated_at = ? WHERE id = ?",
+            (self.INGESTION_PHASE_LABELS.get("queued", "queued"), _now_iso(), job_id),
+        )
+        self._conn.commit()
+        fresh = self._conn.execute(
+            "SELECT * FROM ingestion_jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        return self._job_dict(fresh)
+
     # ------------------------------------------------------------------
     # Indexing (T014): chunks, embeddings cache, status transitions
     # ------------------------------------------------------------------
@@ -1946,6 +2054,41 @@ class LibraryStore:
         if vacuum:
             self._conn.execute("VACUUM")
         return self.maintenance_report()
+
+    def freelist_ratio(self) -> float:
+        """Ratio of free pages over total DB pages (0.0 on any error)."""
+        try:
+            free = self._conn.execute("PRAGMA freelist_count").fetchone()[0]
+            total = self._conn.execute("PRAGMA page_count").fetchone()[0]
+        except Exception:
+            return 0.0
+        if not total:
+            return 0.0
+        return float(free) / float(total)
+
+    def maybe_vacuum(
+        self, *, threshold: float = VACUUM_FREELIST_THRESHOLD
+    ) -> bool:
+        """VACUUM iff the freelist ratio exceeds *threshold*.
+
+        Best-effort: never raises (failures are logged, never propagated).
+        Returns True when a VACUUM was performed.
+        """
+        try:
+            if self.freelist_ratio() > threshold:
+                self.optimize(vacuum=True)
+                return True
+            return False
+        except Exception as exc:
+            logger.warning("maybe_vacuum skipped: %s", exc)
+            return False
+
+    def _maybe_vacuum_after_delete(self) -> None:
+        """Best-effort compaction after a successful delete (never raises)."""
+        try:
+            self.maybe_vacuum()
+        except Exception as exc:  # par principe, jamais propagé
+            logger.warning("post-delete vacuum skipped: %s", exc)
 
     def backup_to(self, destination: Path) -> Path:
         """Create a consistent SQLite backup using the native backup API."""
@@ -2184,6 +2327,7 @@ class LibraryStore:
         )
         self._conn.execute("DELETE FROM books WHERE id = ?", (book_id,))
         self._conn.commit()
+        self._maybe_vacuum_after_delete()
 
     # ------------------------------------------------------------------
     # PGVector backend (opt-in, SQLite is default fallback)
@@ -2451,6 +2595,24 @@ class LibraryStore:
         )
         self._conn.execute("DELETE FROM books WHERE id = ?", (book_id,))
         self._conn.commit()
+
+    def link_book_to_subject(self, book_id: str, subject_id: str) -> bool:
+        """Link an existing book to a subject (orphan re-attachment).
+
+        Returns True when a new join row was created, False when the link
+        already existed (no error, no duplicate row). Raises KeyError when
+        the book or the subject is unknown. Never deletes any data.
+        """
+        if self.get_book(book_id) is None:
+            raise KeyError(f"Unknown book: {book_id}")
+        self._get_subject(subject_id)  # KeyError if unknown
+        cur = self._conn.execute(
+            "INSERT OR IGNORE INTO subject_books (subject_id, book_id) "
+            "VALUES (?, ?)",
+            (subject_id, book_id),
+        )
+        self._conn.commit()
+        return cur.rowcount == 1
 
     # ------------------------------------------------------------------
     # Categories, corpora & temp-doc lifecycle (Phase 4)
@@ -4054,12 +4216,35 @@ class LibraryStore:
         ).fetchone()
         if step is None:
             raise KeyError(f"Unknown path_step: {path_step_id}")
-        notion_id = str(step["activity_id"] or "")
+        notion_id = sanitize_notion_id(step["activity_id"])
         # Resolve subject_id via learning_paths
         path_row = self._conn.execute(
             "SELECT subject_id FROM learning_paths WHERE id = ?", (step["path_id"],)
         ).fetchone()
         subject_id = str(path_row["subject_id"]) if path_row is not None else ""
+        if notion_id:
+            # A notion that merely repeats a book title is a filename leak,
+            # not a lesson topic: fall back to the step (concept) title.
+            # Comparison is normalized on BOTH sides (extension, dedup
+            # suffix, separators, case) so bare stems and legacy suffixed
+            # rows match too.
+            try:
+                book_keys = {
+                    normalize_notion_key(r["title"])
+                    for r in self._conn.execute(
+                        "SELECT b.title FROM books b "
+                        "JOIN subject_books sb ON sb.book_id = b.id "
+                        "WHERE sb.subject_id = ?",
+                        (subject_id,),
+                    ).fetchall()
+                }
+            except Exception:
+                book_keys = set()
+            book_keys.discard("")
+            if normalize_notion_key(notion_id) in book_keys:
+                step_title = sanitize_notion_id(step["title"]) or str(step["title"] or "").strip()
+                if step_title and normalize_notion_key(step_title) not in book_keys:
+                    notion_id = step_title
         now = _now_iso()
         disc = LessonDiscussion(
             id=_uid(),
@@ -4152,6 +4337,28 @@ class LibraryStore:
             (discussion_id,),
         ).fetchall()
         return [GeneratedLessonContent.from_dict(dict(r)) for r in rows]
+
+    def delete_generated_content(
+        self, content_id: str, discussion_id: str | None = None
+    ) -> bool:
+        """Delete a generated lesson content; returns True when a row was removed.
+
+        When ``discussion_id`` is given the delete is scoped to that
+        discussion (a row from another discussion is left untouched and
+        reports False).
+        """
+        if discussion_id is None:
+            cur = self._conn.execute(
+                "DELETE FROM generated_lesson_contents WHERE id = ?",
+                (content_id,),
+            )
+        else:
+            cur = self._conn.execute(
+                "DELETE FROM generated_lesson_contents WHERE id = ? AND discussion_id = ?",
+                (content_id, discussion_id),
+            )
+        self._conn.commit()
+        return cur.rowcount > 0
 
     def add_exercise_attempt(
         self,

@@ -9,10 +9,36 @@ fallback deterministic path for offline tests.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from .models import LessonDiscussion, SourceReference
-from .store import LibraryStore
+from .store import LibraryStore, normalize_notion_key, sanitize_notion_id
+
+
+#: Honest-fallback header mention (required in offline generated content).
+_OFFLINE_MENTION = "généré hors-ligne depuis les extraits"
+
+#: Stall budget for one SSE course stream: CPU courses run ~4–6 min, so a
+#: short per-chunk timeout would kill legitimate slow generations. Applied
+#: per received chunk (live deltas keep flowing), not as an overall cap.
+LESSON_STREAM_TIMEOUT_S = 420.0
+
+#: Minimal French stopwords so RAG filtering keeps topical keywords only.
+#: Without this, 2-letter words like « en » match nearly every chunk and
+#: unrelated excerpts (invoices, legal notices) leak into the lesson.
+_NOTION_STOPWORDS = frozenset({
+    "les", "des", "une", "est", "sont", "dans", "pour", "avec", "sur",
+    "aux", "ces", "cette", "plus", "tout", "tous", "toute", "toutes",
+    "comme", "entre", "sans", "sous", "par", "pas", "que", "qui",
+    "dont", "leur", "leurs", "notre", "votre", "mais", "donc", "car",
+    "the", "and", "for",
+})
+
+
+def _offline_header(kind_label: str) -> str:
+    """Header marking deterministic offline content (honest fallback)."""
+    return f"> {kind_label} {_OFFLINE_MENTION} (LLM indisponible).\n\n"
 
 
 class LessonDiscussionService:
@@ -72,18 +98,89 @@ class LessonDiscussionService:
     # RAG filtered ask (FR-002 / FR-003)
     # ------------------------------------------------------------------
 
+    def _resolve_notion(self, disc: Any) -> str:
+        """Effective lesson notion — never a filename (root fix).
+
+        Sanitizes ``disc.notion_id`` (leftover extension + server dedup
+        suffix) so old rows created before the store-level fix are also
+        repaired at generation time. When the sanitized notion merely
+        repeats a book title of the subject (normalized comparison on both
+        sides: extension, dedup suffix, separators, case), falls back to
+        the step (concept) title instead.
+        """
+        notion = sanitize_notion_id(getattr(disc, "notion_id", "") or "")
+        step = None
+        try:
+            step = self.store.get_path_step(getattr(disc, "path_step_id", "") or "")
+        except Exception:
+            step = None
+        step_title = (step.title or "").strip() if step is not None else ""
+        if not notion:
+            return step_title or "notion"
+        subject_id = getattr(disc, "subject_id", "") or ""
+        if subject_id:
+            try:
+                book_keys = {
+                    normalize_notion_key(b.title)
+                    for b in self.store.list_books(subject_id)
+                }
+            except Exception:
+                book_keys = set()
+            book_keys.discard("")
+            if normalize_notion_key(notion) in book_keys:
+                if step_title and normalize_notion_key(step_title) not in book_keys:
+                    return step_title
+        return notion
+
+    def _book_title(self, book_id: str) -> str:
+        """Readable book title for a book id (never raises, never leaks ids)."""
+        try:
+            book = self.store.get_book(book_id)
+        except Exception:
+            return ""
+        if book is None:
+            return ""
+        return (getattr(book, "title", "") or "").strip()
+
+    def _sources_footer(self, chunks: list[dict[str, Any]]) -> str:
+        """Readable « Sources : … » footer (book TITLES, never raw ids).
+
+        Resolves each chunk's ``book_id`` to its title via the store
+        (:meth:`_book_title`). Unknown books are skipped silently — a raw
+        id must never leak into rendered content.
+        """
+        titles: list[str] = []
+        seen: set[str] = set()
+        for c in chunks[:6]:
+            bid = str(c.get("book_id", "") or "")
+            if not bid or bid in seen:
+                continue
+            seen.add(bid)
+            title = self._book_title(bid)
+            if title and title not in titles:
+                titles.append(title)
+        if not titles:
+            return ""
+        return "Sources : " + ", ".join(titles) + "."
+
     def _notion_keywords(self, path_step_id: str) -> list[str]:
         """Keywords derived from the step title / activity_id for RAG filtering."""
         step = self.store.get_path_step(path_step_id)
         if step is None:
             return []
         title = (step.title or step.activity_id or "").lower()
-        # split on non-alphanum, keep tokens >=2 chars
+        # Sanitize a leftover filename (extension + dedup suffix) so hex
+        # junk never becomes a keyword.
+        title = sanitize_notion_id(title) or title
+        # split on non-alphanum, keep topical tokens (>=3 chars, no
+        # stopwords): 2-letter words like « en » match nearly every chunk
+        # and pull unrelated excerpts (invoices, legal notices) in.
         import re
-        tokens = re.findall(r"[a-zàâéèêôû0-9]{2,}", title.lower())
+        tokens = re.findall(r"[a-zàâéèêôû0-9]{3,}", title.lower())
+        tokens = [t for t in tokens if t not in _NOTION_STOPWORDS]
         # fallback to title words
         if not tokens and title.strip():
-            tokens = [w for w in title.split() if len(w) >= 2]
+            tokens = [w for w in title.split() if len(w) >= 3 and w not in _NOTION_STOPWORDS]
         return list(dict.fromkeys(tokens))  # dedup preserve order
 
     def _filtered_chunks(self, subject_id: str, keywords: list[str]) -> list[dict[str, Any]]:
@@ -143,13 +240,28 @@ class LessonDiscussionService:
         # Persist user message
         self.store.add_lesson_message(discussion_id, "user", question.strip(), sources=[])
 
-        # Deterministic answer (offline-safe). If tutor_service available try it but fallback.
-        answer = f"Réponse sur « {disc.notion_id or 'notion'} » : {question.strip()}"
-        if chunks:
-            # cite first source
-            answer += f"\n\nSource : {sources[0].book_id if sources else ''}"
+        notion = self._resolve_notion(disc)
+        # Try the sync LLM hook first (short targeted answer grounded in the
+        # filtered excerpts); on failure/None ONLY, keep the deterministic
+        # echo as the offline fallback (existing format preserved).
+        answer = self._try_llm_text(
+            "lesson_answer", notion, chunks, question=question.strip()
+        )
+        is_fallback = False
+        if not answer:
+            is_fallback = True
+            answer = f"Réponse sur « {notion} » : {question.strip()}"
+            if sources:
+                # Readable source (book title via store), never a raw id.
+                source_title = self._book_title(sources[0].book_id)
+                if source_title:
+                    answer += f"\n\nSource : {source_title}"
         self.store.add_lesson_message(discussion_id, "assistant", answer, sources=sources)
-        return {"answer": answer, "sources": [s.to_dict() for s in sources]}
+        return {
+            "answer": answer,
+            "sources": [s.to_dict() for s in sources],
+            "fallback": is_fallback,
+        }
 
     # ------------------------------------------------------------------
     # Génération cours & synthèse (FR-004 / FR-005 / FR-015 — US2)
@@ -171,21 +283,90 @@ class LessonDiscussionService:
         chunks = self._filtered_chunks(disc.subject_id, keywords)
         sources = self._sources_from_chunks(chunks)
         confidence = 0.85 if sources else 0.0
-        notion = disc.notion_id or (self.store.get_path_step(disc.path_step_id).title if self.store.get_path_step(disc.path_step_id) else "notion")
-        # Try LLM via tutor_service if available, else deterministic
+        notion = self._resolve_notion(disc)
+        # Try LLM via tutor_service if available, else honest offline fallback.
         content = self._course_fallback(notion, chunks, keywords)
+        is_fallback = True
         # If tutor_service provides sync generate, attempt (best-effort)
         if self.tutor_service is not None:
             try:
                 maybe = self._try_llm_course(notion, chunks)
                 if maybe and _word_count(maybe) >= 800:
                     content = maybe
+                    is_fallback = False
             except Exception:
                 pass
+        if is_fallback:
+            content = _offline_header("Cours") + content
         # Ensure 800–1200 words
         content = _ensure_word_range(content, 800, 1200, notion, chunks)
         obj = self.store.add_generated_content(discussion_id, "lesson_course", content, sources=sources, confidence=confidence)
-        return obj.to_dict()
+        result = obj.to_dict()
+        result["fallback"] = is_fallback
+        return result
+
+    async def stream_course(
+        self, discussion_id: str, learner_id: str | None = None
+    ) -> Any:
+        """Stream a full course as ``delta``/``done``/``error`` events (SSE backend).
+
+        Same grounding as :meth:`generate_course` (sanitized notion, filtered
+        chunks, sources, confidence). Live LLM deltas are yielded as
+        ``{"delta": text}``; when the stream completes, the full text is
+        persisted like ``generate_course`` and ``{"done": True, "fallback":
+        False}`` is yielded. On LLM failure (missing hook, exception, stall
+        beyond ``LESSON_STREAM_TIMEOUT_S`` per chunk, empty answer),
+        ``{"error": ...}`` is yielded INSTEAD and nothing is persisted —
+        never generic disguised text.
+        """
+        disc = self.store.get_lesson_discussion(discussion_id)
+        if disc is None:
+            raise KeyError(f"Unknown discussion: {discussion_id}")
+        if learner_id is not None and disc.learner_id != learner_id:
+            raise PermissionError("learner_id mismatch")
+        keywords = self._notion_keywords(disc.path_step_id)
+        chunks = self._filtered_chunks(disc.subject_id, keywords)
+        sources = self._sources_from_chunks(chunks)
+        confidence = 0.85 if sources else 0.0
+        notion = self._resolve_notion(disc)
+        streamer = (
+            getattr(self.tutor_service, "stream_lesson_text", None)
+            if self.tutor_service is not None
+            else None
+        )
+        if not callable(streamer):
+            yield {"error": "LLM indisponible pour la génération du cours"}
+            return
+        excerpts = [(c.get("text") or "")[:500] for c in chunks[:6]]
+        parts: list[str] = []
+        try:
+            it: Any = streamer("lesson_course", notion, excerpts)
+            while True:
+                try:
+                    delta = await asyncio.wait_for(
+                        it.__anext__(), timeout=LESSON_STREAM_TIMEOUT_S
+                    )
+                except StopAsyncIteration:
+                    break
+                if delta:
+                    parts.append(delta)
+                    yield {"delta": delta}
+        except asyncio.TimeoutError:
+            yield {
+                "error": f"Délai de génération dépassé ({int(LESSON_STREAM_TIMEOUT_S)} s)"
+            }
+            return
+        except Exception as exc:
+            yield {"error": str(exc) or "Génération du cours impossible"}
+            return
+        content = "".join(parts)
+        if not content.strip():
+            yield {"error": "Réponse vide du modèle"}
+            return
+        self.store.add_generated_content(
+            discussion_id, "lesson_course", content, sources=sources, confidence=confidence
+        )
+        yield {"done": True, "fallback": False}
 
     def generate_summary(self, discussion_id: str, learner_id: str | None = None) -> dict[str, Any]:
         """Génère une synthèse 150–250 mots (FR-005/FR-015).
@@ -199,32 +380,59 @@ class LessonDiscussionService:
         if learner_id is not None and disc.learner_id != learner_id:
             raise PermissionError("learner_id mismatch")
         keywords = self._notion_keywords(disc.path_step_id)
-        notion = disc.notion_id or (self.store.get_path_step(disc.path_step_id).title if self.store.get_path_step(disc.path_step_id) else "notion")
+        notion = self._resolve_notion(disc)
         # Check for existing course
         existing = [c for c in self.store.list_generated_contents(discussion_id) if c.kind == "lesson_course"]
         sources: list[SourceReference]
         confidence: float
+        is_fallback = True
         if existing:
             course = existing[-1]
             sources = list(course.sources) if course.sources else []
             confidence = float(course.confidence) if course.confidence else 0.8
-            # Derive summary from course — pad using course content itself + chunks
-            content = self._summary_from_course(notion, course.content)
+            chunks = self._filtered_chunks(disc.subject_id, keywords)
             if not sources:
-                chunks = self._filtered_chunks(disc.subject_id, keywords)
                 sources = self._sources_from_chunks(chunks)
                 confidence = 0.8 if sources else 0.0
-            else:
-                chunks = self._filtered_chunks(disc.subject_id, keywords)
+            # Readable titles for the summary head (never raw ids).
+            course_titles: list[str] = []
+            for s in sources:
+                t = self._book_title(s.book_id)
+                if t and t not in course_titles:
+                    course_titles.append(t)
+            # Derive summary from course — pad using course content itself + chunks
+            content = self._summary_from_course(notion, course.content, source_titles=course_titles)
+            if self.tutor_service is not None:
+                try:
+                    maybe = self._try_llm_summary(notion, chunks)
+                    if maybe and 150 <= _word_count(maybe) <= 250:
+                        content = maybe
+                        is_fallback = False
+                except Exception:
+                    pass
+            if is_fallback:
+                content = _offline_header("Synthèse") + content
             content = _ensure_word_range(content, 150, 250, notion, chunks, course_content=course.content)
         else:
             chunks = self._filtered_chunks(disc.subject_id, keywords)
             sources = self._sources_from_chunks(chunks)
             confidence = 0.8 if sources else 0.0
             content = self._summary_fallback(notion, chunks, keywords)
+            if self.tutor_service is not None:
+                try:
+                    maybe = self._try_llm_summary(notion, chunks)
+                    if maybe and 150 <= _word_count(maybe) <= 250:
+                        content = maybe
+                        is_fallback = False
+                except Exception:
+                    pass
+            if is_fallback:
+                content = _offline_header("Synthèse") + content
             content = _ensure_word_range(content, 150, 250, notion, chunks)
         obj = self.store.add_generated_content(discussion_id, "lesson_summary", content, sources=sources, confidence=confidence)
-        return obj.to_dict()
+        result = obj.to_dict()
+        result["fallback"] = is_fallback
+        return result
 
     # -- deterministic helpers ------------------------------------------------
 
@@ -253,7 +461,7 @@ class LessonDiscussionService:
             f"Exemple 1 — déclaration : `x = 3` associe la valeur 3 à la variable x. Exemple 2 — réaffectation : `x = x + 1`. "
             f"Exemple 3 — usage dans une boucle : `for i in range(5): print(i)` où i parcourt les valeurs. "
             f"Chaque exemple illustre la portée, la durée de vie et la mutabilité liée à {notion}. "
-            f"Sources : chapitre et page cités ci-dessus.\n\n"
+            f"{self._sources_footer(chunks) or 'Sources : extraits rattachés à cette leçon.'}\n\n"
             f"## 4. Cas d'usage\n"
             f"On utilise {notion} pour stocker un état, compter des itérations, mémoriser un résultat intermédiaire, ou paramétrer une fonction. "
             f"Cas d'usage typique : calcul d'une somme, suivi d'un score, configuration d'un algorithme.\n\n"
@@ -268,7 +476,12 @@ class LessonDiscussionService:
         )
         return base
 
-    def _summary_from_course(self, notion: str, course_content: str) -> str:
+    def _summary_from_course(
+        self,
+        notion: str,
+        course_content: str,
+        source_titles: list[str] | None = None,
+    ) -> str:
         words = course_content.split()
         # Take first ~120 words then reframe as bullet summary, keep varied
         head = " ".join(words[:120])
@@ -276,8 +489,14 @@ class LessonDiscussionService:
         import re
         sents = re.split(r"(?<=[.!?])\s+", course_content.strip())
         varied = " ".join(s.strip() for s in sents[2:5] if s.strip())[:300]
+        # Titles up front (never raw ids): the tail may be trimmed to fit
+        # the 150–250 word range, the head always survives.
+        titles_line = ""
+        if source_titles:
+            titles_line = "Sources : " + ", ".join(source_titles) + ".\n\n"
         return (
             f"# Synthèse : {notion}\n\n"
+            f"{titles_line}"
             f"Points clés : {head}\n\n"
             f"Éléments repris du cours : {varied}\n\n"
             f"- Définition : {notion} est la brique de base vue en cours.\n"
@@ -295,22 +514,56 @@ class LessonDiscussionService:
         else:
             excerpts = f"contenu sur {notion}"
         # Build from real excerpts rather than fixed filler
+        footer = self._sources_footer(chunks)
         return (
             f"# Synthèse : {notion}\n\n"
             f"Résumé concis de « {notion} » directement depuis les sources : {excerpts}. "
             f"Points clés : définition, exemples de déclaration et d'usage, cas d'usage comme compteur ou stockage d'état, "
             f"et erreurs courantes à éviter (nommage, initialisation). "
             f"Sources mobilisées : {excerpts[:200]}. "
-            f"Cette synthèse permet de raviver la mémoire sans relire le cours complet.\n"
+            + (f"{footer} " if footer else "")
+            + f"Cette synthèse permet de raviver la mémoire sans relire le cours complet.\n"
         )
 
-    def _try_llm_course(self, notion: str, chunks: list[dict[str, Any]]) -> str | None:
-        # Best-effort sync LLM call if tutor_service exposes a sync method
-        try:
-            # TutorService.ask is async; skip
+    def _try_llm_text(
+        self,
+        kind: str,
+        notion: str,
+        chunks: list[dict[str, Any]],
+        question: str | None = None,
+    ) -> str | None:
+        """Best-effort sync LLM call through an optional tutor_service hook.
+
+        The hook is ``tutor_service.generate_lesson_text(kind, notion,
+        excerpts, question=...)`` (sync, returns ``str``). Missing hook,
+        failing hook or empty result → ``None`` (the caller uses the honest
+        offline fallback). ``TutorService.ask`` is async and is never
+        attempted from this sync path.
+        """
+        if self.tutor_service is None:
             return None
+        fn = getattr(self.tutor_service, "generate_lesson_text", None)
+        if not callable(fn):
+            return None
+        try:
+            excerpts = [(c.get("text") or "")[:500] for c in chunks[:6]]
+            if question is None:
+                result = fn(kind, notion, excerpts)
+            else:
+                result = fn(kind, notion, excerpts, question=question)
         except Exception:
             return None
+        if isinstance(result, str) and result.strip():
+            return result
+        return None
+
+    def _try_llm_course(self, notion: str, chunks: list[dict[str, Any]]) -> str | None:
+        # Best-effort sync LLM call if tutor_service exposes the sync hook.
+        return self._try_llm_text("lesson_course", notion, chunks)
+
+    def _try_llm_summary(self, notion: str, chunks: list[dict[str, Any]]) -> str | None:
+        # Best-effort sync LLM call if tutor_service exposes the sync hook.
+        return self._try_llm_text("lesson_summary", notion, chunks)
 
     # ------------------------------------------------------------------
     # Exercices (FR-006 / FR-007 / FR-008 — US3)
@@ -381,7 +634,7 @@ class LessonDiscussionService:
             raise PermissionError("learner_id mismatch")
         keywords = self._notion_keywords(disc.path_step_id)
         chunks = self._filtered_chunks(disc.subject_id, keywords)
-        notion = disc.notion_id or (self.store.get_path_step(disc.path_step_id).title if self.store.get_path_step(disc.path_step_id) else "notion")
+        notion = self._resolve_notion(disc)
         types = self._question_types_for_subject(disc.subject_id)
         # 3–5 questions — deterministic 4 but vary between 3-5 on regeneration
         # Use count of existing attempts to rotate between 3,4,5

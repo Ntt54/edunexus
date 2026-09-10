@@ -54,6 +54,7 @@ from ..tutor.conversations import ConversationService
 from ..tutor.errors import AppError, NotFoundError
 from ..tutor.service import (
     MAX_UPLOAD_BYTES,
+    PathGenerationError,
     TutorService,
     read_limited_upload,
     validate_upload_length,
@@ -233,6 +234,10 @@ class TutorLabelRename(BaseModel):
 
 class TutorCategoryMembership(BaseModel):
     category_id: int
+
+
+class TutorSubjectBookLink(BaseModel):
+    book_id: str
 
 
 class TutorCorpusMembership(BaseModel):
@@ -889,11 +894,20 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             return {"book_id": book.id, "status": "ready"}
 
         if queue_requested:
-            # Persistent queue mode leaves the row pending and lets the single
-            # worker claim it in creation order. Starting here means several
-            # rapid imports are accepted without spawning one task per book.
+            # Tracked queue mode: one ingestion_jobs row per import (created
+            # here, initial status queued/5 %) so progress/ETA polling sees
+            # these imports; the single worker then drives THAT row
+            # (phases 5→100) instead of a blind path. A rapid double POST
+            # reuses the open row (no duplicate line). Response keeps its
+            # historical shape and gains job_id (additive only).
+            job = tutor_service.ensure_book_job(book.id, subject_id, path)
             await tutor_service.start_index_queue()
-            return {"book_id": book.id, "status": "pending", "queued": True}
+            return {
+                "book_id": book.id,
+                "status": "pending",
+                "queued": True,
+                "job_id": job["id"],
+            }
 
         tasks: dict[str, asyncio.Task] = getattr(
             app.state, "tutor_index_tasks", None
@@ -1173,6 +1187,22 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         except KeyError:
             raise HTTPException(status_code=404, detail="domaine inconnu")
         return {"deleted": True}
+
+    @app.post("/api/tutor/subjects/{subject_id}/books")
+    async def tutor_subject_link_book(
+        subject_id: str, payload: TutorSubjectBookLink
+    ) -> dict[str, Any]:
+        """Link an existing book to a subject (thin transport).
+
+        Orphan re-attachment: the book row survives subject deletion (joins
+        CASCADE) and can be re-linked here. Duplicate link ⇒
+        ``{"linked": False}`` without error; unknown book/subject ⇒ 404.
+        """
+        try:
+            linked = tutor_store.link_book_to_subject(payload.book_id, subject_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="livre ou domaine inconnu")
+        return {"linked": linked}
 
     # ------------------------------------------------------------------
     # Feature 008 — Profil pédagogique (US1) — thin transport only
@@ -2560,6 +2590,37 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail="Génération du cours impossible (voir errors.log)")
         return {"content": content}
 
+    @app.get("/api/tutor/lesson-discussions/{discussion_id}/course/stream")
+    async def lesson_course_stream(discussion_id: str, request: Request) -> StreamingResponse:
+        """Stream a full course as SSE (thin transport, LessonView contract).
+
+        Pre-flight (404/403) runs BEFORE any SSE byte is sent. Wire format:
+        ``data: {"delta": "…"}``* then ``data: {"done": true, "fallback":
+        false}``; on LLM failure ``data: {"error": "…"}`` (the front falls
+        back to the classic POST). The finished text is persisted like
+        generate-course. No buffering: one flush per yielded chunk.
+        """
+        from ..tutor.lesson_discussion import LessonDiscussionService
+        learner_id = request.headers.get("x-learner-id") or request.query_params.get("learner_id") or None
+        if learner_id is not None:
+            learner_id = learner_id.strip() or None
+        disc = tutor_store.get_lesson_discussion(discussion_id)
+        if disc is None:
+            raise HTTPException(status_code=404, detail="Discussion inconnue")
+        if learner_id is not None and disc.learner_id != learner_id:
+            raise HTTPException(status_code=403, detail="learner_id mismatch")
+        svc = LessonDiscussionService(tutor_store, tutor_service=tutor_service)
+
+        async def _sse() -> AsyncIterator[bytes]:
+            async for event in svc.stream_course(discussion_id, learner_id=learner_id):
+                yield ("data: " + json.dumps(event, ensure_ascii=False) + "\n\n").encode("utf-8")
+
+        return StreamingResponse(
+            _sse(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     @app.post("/api/tutor/lesson-discussions/{discussion_id}/generate-summary")
     async def lesson_generate_summary(discussion_id: str, request: Request) -> dict[str, Any]:
         """Generate a condensed summary (FR-005/FR-015) — independent if no course."""
@@ -2578,6 +2639,18 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             _log_error(config, "lesson-summary", f"generate-summary {discussion_id}: {exc}", traceback.format_exc())
             raise HTTPException(status_code=500, detail="Génération de la synthèse impossible (voir errors.log)")
         return {"content": content}
+
+    @app.delete("/api/tutor/lesson-discussions/{discussion_id}/contents/{content_id}")
+    async def lesson_delete_content(discussion_id: str, content_id: str) -> dict[str, Any]:
+        """Delete a generated lesson content (course/summary) — thin transport."""
+        try:
+            deleted = tutor_store.delete_generated_content(content_id, discussion_id)
+        except Exception as exc:
+            _log_error(config, "lesson-content", f"delete-content {discussion_id}/{content_id}: {exc}", traceback.format_exc())
+            raise HTTPException(status_code=500, detail="Suppression impossible (voir errors.log)")
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Contenu inconnu")
+        return {"deleted": True}
 
     @app.post("/api/tutor/lesson-discussions/{discussion_id}/exercises")
     async def lesson_generate_exercises(discussion_id: str, request: Request) -> dict[str, Any]:
@@ -2655,6 +2728,34 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
     async def lesson_complete_manual(discussion_id: str, request: Request) -> dict[str, Any]:
         """Alias for manual completion (FR-008)."""
         return await _lesson_complete_impl(discussion_id, request)
+
+    @app.post("/api/tutor/lesson-discussions/{discussion_id}/ask")
+    async def lesson_ask(discussion_id: str, request: Request) -> dict[str, Any]:
+        """Ask a question scoped to the lesson notion (FR-003) — thin transport."""
+        learner_id = request.headers.get("x-learner-id") or request.query_params.get("learner_id") or ""
+        learner_id = learner_id.strip()
+        if not learner_id:
+            raise HTTPException(status_code=400, detail="learner_id requis (header X-Learner-Id ou query param)")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        question = str(body.get("question", "")).strip() if isinstance(body, dict) else ""
+        if not question:
+            raise HTTPException(status_code=400, detail="question requise")
+        from ..tutor.lesson_discussion import LessonDiscussionService
+        svc = LessonDiscussionService(tutor_store, tutor_service=tutor_service)
+        try:
+            return svc.ask_notion(discussion_id, question, learner_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Discussion inconnue")
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            _log_error(config, "lesson-ask", f"ask {discussion_id}: {exc}", traceback.format_exc())
+            raise HTTPException(status_code=500, detail="Réponse impossible (voir errors.log)")
 
     # ------------------------------------------------------------------
     # REST: Learning paths — Parcours (Feature 006 — adaptive learning)
@@ -2815,7 +2916,10 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             raise HTTPException(400, "book_ids requis")
         if tutor_store.get_subject(subject_id) is None:
             raise HTTPException(404, "Sujet inconnu")
-        result = await tutor_service.generate_path_from_books(subject_id, book_ids)
+        try:
+            result = await tutor_service.generate_path_from_books(subject_id, book_ids)
+        except PathGenerationError as exc:
+            raise HTTPException(422, str(exc))
         return result
 
     @app.post("/api/tutor/subjects/{subject_id}/path/from-program")
