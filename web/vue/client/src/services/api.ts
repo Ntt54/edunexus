@@ -81,6 +81,7 @@ async function requestRoot<T>(path: string): Promise<T> {
 export interface IngestionJob {
   id: string;
   status: string;
+  book_id?: string | null;
   original_filename?: string | null;
   phase_label?: string | null;
   progress_percent?: number;
@@ -334,11 +335,13 @@ export const tutorApi = {
   },
 
   // ── Génération de parcours (depuis livres / OCR) ─────────────
-  async generateFromBooks(subjectId: string, bookIds: string[], description?: string): Promise<unknown> {
-    // Objectif optionnel : champ omis si vide (contrat backend).
-    const body: { book_ids: string[]; description?: string } = { book_ids: bookIds };
+  async generateFromBooks(subjectId: string, bookIds: string[], description?: string, pathId?: string): Promise<unknown> {
+    // Objectif optionnel : champ omis si vide. path_id optionnel : remplit
+    // le parcours ciblé s'il est vide (contrat backend), ignoré sinon.
+    const body: { book_ids: string[]; description?: string; path_id?: string } = { book_ids: bookIds };
     const desc = (description ?? "").trim();
     if (desc) body.description = desc;
+    if (pathId) body.path_id = pathId;
     return request(`/subjects/${encodeURIComponent(subjectId)}/path/generate-from-books`, {
       method: "POST", body: JSON.stringify(body),
     });
@@ -433,6 +436,12 @@ export const tutorApi = {
   async deleteBook(id: string): Promise<void> {
     // Route serveur au singulier : DELETE /api/tutor/book/{book_id} (204).
     await request(`/book/${encodeURIComponent(id)}`, { method: "DELETE" });
+  },
+  async moveBook(bookId: string, subjectId: string): Promise<{ moved: boolean }> {
+    return request<{ moved: boolean }>(`/books/${encodeURIComponent(bookId)}/subject`, {
+      method: "PUT",
+      body: JSON.stringify({ subject_id: subjectId }),
+    });
   },
   async reindexBook(id: string): Promise<void> {
     await request(`/books/${encodeURIComponent(id)}/reindex`, { method: "POST" });

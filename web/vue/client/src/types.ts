@@ -44,6 +44,10 @@ export interface SourceBook {
   format?: string;
   pages?: number;
   chunks_total?: number;
+  // Renseignés par GET /books quand le backend les expose (sinon absents :
+  // la ligne « indexé le … · modèle … » reste masquée, jamais « null »).
+  last_indexed_at?: string | null;
+  embed_model?: string | null;
 }
 
 export interface LibraryCategory {

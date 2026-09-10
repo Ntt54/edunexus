@@ -19,7 +19,7 @@ import { useLearningStore } from "@/stores/learning";
 import { usePreferences } from "@/stores/preferences";
 
 const { state, toggleQueue } = useLearningStore();
-const { t } = usePreferences();
+const { t, locale } = usePreferences();
 
 // ── State ──────────────────────────────────────────────────────
 const categories = ref<LibraryCategory[]>([]);
@@ -31,6 +31,8 @@ const allBooks = ref<SourceBook[]>([]);
 const queue = ref<QueueStatus>({ running: false, pending_count: 0, completed_count: 0 });
 const activeJobs = ref<IngestionJob[]>([]);
 const etaText = ref("");
+// Échecs survenus pendant le suivi en cours (transition quiescente).
+const failedNow = ref<Array<{ title: string; error: string }>>([]);
 const searchQuery = ref("");
 const showImport = ref(false);
 const showSearchModal = ref(false);
@@ -82,6 +84,18 @@ const formatChip = (book: SourceBook): string => {
   if (book.sourceType) return book.sourceType;
   return "Note";
 };
+
+// Ligne « indexé le … · modèle … » : masquée si l'un des deux champs
+// manque (vieux contenus, backend antérieur) — jamais « null » affiché.
+// Date en locale locale avec garde (chaîne brute si inparsable).
+function bookIndexMeta(book: SourceBook): string | null {
+  const at = book.last_indexed_at;
+  const model = book.embed_model;
+  if (typeof at !== "string" || !at || typeof model !== "string" || !model) return null;
+  const d = new Date(at);
+  const when = isNaN(d.getTime()) ? at : d.toLocaleString(locale.value === "en" ? "en" : "fr");
+  return t("library.indexedLine", { date: when, model }) as string;
+}
 
 function catsOf(bookId: string): number[] {
   return bookCategories.value.get(bookId) ?? [];
@@ -181,6 +195,11 @@ const shownPercent = computed(() =>
 interface EtaSample { t: number; p: number; }
 let etaJobId: string | null = null;
 let etaSamples: EtaSample[] = [];
+// Livres en cours de réindexation (clic ↻) : le job d'ingestion ne porte
+// pas le type d'opération (source_type=file dans les deux cas), le suivi
+// se fait donc côté client par book_id. Non réactif volontairement : la
+// lecture a lieu dans les rendus déclenchés par le polling.
+const reindexBookIds = new Set<string>();
 
 function resetEta(jobId: string | null) {
   etaJobId = jobId;
@@ -214,7 +233,18 @@ function trackProgress(job: IngestionJob) {
 async function refreshJobs() {
   try {
     const res = await tutorApi.getIngestionJobs(10);
-    activeJobs.value = (res.jobs ?? []).filter((j) => j.status !== "completed" && j.status !== "failed");
+    const jobs = res.jobs ?? [];
+    for (const j of jobs) {
+      if (j.status !== "completed" && j.status !== "failed") activeSeenIds.add(j.id);
+    }
+    failedNow.value = jobs
+      .filter((j) => j.status === "failed" && activeSeenIds.has(j.id))
+      .slice(0, 3)
+      .map((j) => ({
+        title: j.original_filename || "",
+        error: String(j.error_message || "").slice(0, 160),
+      }));
+    activeJobs.value = jobs.filter((j) => j.status !== "completed" && j.status !== "failed");
   } catch {
     // Erreur transitoire : on garde la dernière liste connue (pas de reset
     // de l'estimateur sur un simple raté réseau).
@@ -222,10 +252,26 @@ async function refreshJobs() {
     if (job) trackProgress(job);
     return;
   }
+  // Élagage du marquage réindex : job terminé/échoué ⇒ plus de suivi.
+  for (const id of [...reindexBookIds]) {
+    if (!activeJobs.value.some((j) => j.book_id === id)) reindexBookIds.delete(id);
+  }
   const job = shownJob.value;
   if (job) trackProgress(job);
   else resetEta(null);
 }
+
+// Le job affiché est-il une réindexation (vs import) ? Titre résolu depuis
+// les livres chargés, repli sur le nom de fichier du job.
+const shownJobIsReindex = computed(() =>
+  !!shownJob.value && !!shownJob.value.book_id && reindexBookIds.has(shownJob.value.book_id),
+);
+const reindexTitle = computed(() => {
+  const j = shownJob.value;
+  if (!j) return "";
+  const b = allBooksFlat.value.find((x) => x.id === j.book_id);
+  return b?.title || j.original_filename || "";
+});
 
 async function refreshBooks() {
   const gen = ++booksGeneration;
@@ -349,6 +395,42 @@ function hasActiveWork(): boolean {
   return allBooksFlat.value.some((b) => b.status === "indexing" || b.status === "pending");
 }
 
+// ── État final honnête de la bannière ────────────────────────────
+// Transition actif→quiescent : UN refreshBooks() final explicite (le livre
+// apparaît sans refresh manuel), bannière « terminé/échec » brève (3,5 s),
+// PUIS repliée (masquée) — jamais de progrès périmé affiché au repos.
+// Échecs détectés = jobs failed vus actifs pendant ce suivi (pas
+// l'historique ancien). Gardes anti-polling-infini inchangés.
+const bannerOutcome = ref<null | { ok: boolean; detail: string }>(null);
+const bannerVisible = computed(() => hasActiveWork() || bannerOutcome.value != null);
+let wasActive = false;
+let outcomeTimer: ReturnType<typeof setTimeout> | null = null;
+let finalRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+const activeSeenIds = new Set<string>();
+
+function clearOutcomeTimers() {
+  if (outcomeTimer) { clearTimeout(outcomeTimer); outcomeTimer = null; }
+  if (finalRefreshTimer) { clearTimeout(finalRefreshTimer); finalRefreshTimer = null; }
+}
+
+function clearOutcome() {
+  clearOutcomeTimers();
+  bannerOutcome.value = null;
+}
+
+function onQuiescent() {
+  clearOutcomeTimers();
+  const failed = failedNow.value[0];
+  bannerOutcome.value = failed
+    ? { ok: false, detail: (failed.title ? "« " + failed.title + " »" : "") + (failed.error ? " — " + failed.error : "") }
+    : { ok: true, detail: "" };
+  // (a) Refresh final explicite, légèrement différé (commit serveur).
+  finalRefreshTimer = setTimeout(() => { void refreshBooks(); }, 1200);
+  // (b) Repli après 3,5 s : plus aucun progrès périmé affiché.
+  outcomeTimer = setTimeout(() => { bannerOutcome.value = null; }, 3500);
+  activeSeenIds.clear();
+}
+
 async function pollTick(): Promise<void> {
   pollTimer = null;
   if (pollInFlight) return;
@@ -363,11 +445,19 @@ async function pollTick(): Promise<void> {
   } finally {
     pollInFlight = false;
   }
-  if (hasActiveWork()) pollTimer = setTimeout(pollTick, 2000);
+  const activeNow = hasActiveWork();
+  if (activeNow) {
+    if (bannerOutcome.value) clearOutcome();
+    pollTimer = setTimeout(pollTick, 2000);
+  } else if (wasActive) {
+    onQuiescent();
+  }
+  wasActive = activeNow;
 }
 
 function startPolling() {
   stopPolling();
+  clearOutcome();
   pollTimer = setTimeout(pollTick, 2000);
 }
 
@@ -380,7 +470,10 @@ onMounted(() => {
     if (hasActiveWork()) startPolling();
   });
 });
-onUnmounted(stopPolling);
+onUnmounted(() => {
+  stopPolling();
+  clearOutcome();
+});
 
 // Start polling when queue becomes active
 watch(
@@ -476,7 +569,7 @@ async function createCategory() {
   } catch { /* best-effort */ }
 }
 
-function startRenameCat(cat: CategoryNode) {
+function startRenameCat(cat: { id: number | null; name: string }) {
   if (cat.id == null) return;
   renamingCategoryId.value = cat.id;
   renamingName.value = cat.name;
@@ -487,7 +580,7 @@ function startRenameCat(cat: CategoryNode) {
   });
 }
 
-async function commitRename(cat: CategoryNode) {
+async function commitRename(cat: { id: number | null; name: string }) {
   if (cat.id == null) { renamingCategoryId.value = null; return; }
   const name = renamingName.value.trim();
   if (!name || name === cat.name) { renamingCategoryId.value = null; return; }
@@ -526,24 +619,57 @@ async function deleteBook(book: SourceBook) {
   } catch { /* best-effort */ }
 }
 
-async function unlinkBook(book: SourceBook, domain: TreeNode) {
-  if (!confirm(t("subject.unlinkConfirm", { title: book.title }))) return;
+// ── Déplacement inter-domaines (un geste) ────────────────────────
+// PUT /books/{id}/subject {"subject_id"} : 200 {moved}, 404 si inconnu.
+// « Sans domaine » envoie "" (sémantique définie côté backend) ; route
+// absente ⇒ repli propre, jamais de crash. Après succès, refreshBooks()
+// fait changer le livre de bloc sans refresh manuel. Les orphelins gardent
+// leur Rattacher (route link déjà live) — pas de régression.
+const moveTargets = ref(new Map<string, string>());
+const movingBook = ref<string | null>(null);
+
+function moveTarget(bookId: string): string {
+  return moveTargets.value.get(bookId) ?? "";
+}
+
+async function onMoveSelect(book: SourceBook, value: string) {
+  moveTargets.value.delete(book.id);
+  if (!value || movingBook.value) return;
+  movingBook.value = book.id;
   try {
-    await tutorApi.unlinkBookFromSubject(domain.id, book.id);
-    importProgress.value = t("subject.unlinked");
+    if (value.startsWith("cat:")) {
+      // Changement de catégorie (REMPLACEMENT des catégories actuelles —
+      // « changer de catégorie »), sans confirm (action réversible).
+      const catId = Number(value.slice(4));
+      if (!Number.isInteger(catId)) throw new Error("bad category");
+      await tutorApi.setBookCategories(book.id, [catId]);
+      bookCategories.value.set(book.id, [catId]);
+      state.notice = t("library.categoryChanged") as string;
+    } else {
+      await tutorApi.moveBook(book.id, value === "__none__" ? "" : value);
+      state.notice = t("library.moved") as string;
+    }
     await refreshBooks();
-    setTimeout(() => { importProgress.value = ""; }, 2500);
   } catch {
-    importProgress.value = t("subject.unlinkFailed");
+    // 404, route absente ou réseau : toast propre, pas de crash.
+    state.notice = value.startsWith("cat:")
+      ? (t("library.categoryChangeFailed") as string)
+      : (t("library.moveFailed") as string);
   }
+  movingBook.value = null;
 }
 
 async function reindexBook(book: SourceBook) {
+  // Suivi explicite : le livre reste « indexed » pendant sa réindexation,
+  // donc la bannière ne le détecterait pas sans ce marquage.
+  reindexBookIds.add(book.id);
   try {
     await tutorApi.reindexBook(book.id);
     await refreshBooks();
     startPolling();
-  } catch { /* best-effort */ }
+  } catch {
+    reindexBookIds.delete(book.id); // 404/échec : aucun suivi à attendre
+  }
 }
 
 // ── Queue operations ───────────────────────────────────────────
@@ -574,6 +700,22 @@ async function doSemanticSearch() {
 }
 
 // ── Build tree structure ───────────────────────────────────────
+// ── Catégories vides de premier niveau ───────────────────────────
+// Règle (documentée) : une catégorie SANS livre nulle part (0 doc global)
+// se rend comme un bac à part entière, pair des domaines (domaines d'abord,
+// catégories vides ensuite) — jamais nichée sous un domaine. Dès qu'elle
+// contient des livres, retour au rendu imbriqué (montre l'appartenance).
+// Les catégories vides d'UN domaine mais pleines ailleurs restent affichées
+// « 0 doc » dans ce domaine (cible d'affectation visible partout).
+const emptyTopCategories = computed(() => {
+  const counts = new Map<number, number>();
+  for (const b of allBooksFlat.value) {
+    for (const c of catsOf(b.id)) counts.set(c, (counts.get(c) ?? 0) + 1);
+  }
+  return categories.value.filter((c) => (counts.get(c.id) ?? 0) === 0);
+});
+
+const emptyTopCatIds = computed(() => new Set(emptyTopCategories.value.map((c) => c.id)));
 interface TreeNode {
   id: string;
   name: string;
@@ -635,12 +777,12 @@ const tree = computed<TreeNode[]>(() => {
     }
 
     const catNodes: CategoryNode[] = [];
-    // Ordered categories
+    // Ordered categories — y compris vides (« 0 doc », cible d'affectation
+    // visible), SAUF les globalement vides rendues de premier niveau.
+    const topIds = emptyTopCatIds.value;
     for (const cat of categories.value) {
-      const catBooks = catMap.get(cat.id);
-      if (catBooks?.length) {
-        catNodes.push({ id: cat.id, name: cat.name, books: catBooks });
-      }
+      if (topIds.has(cat.id)) continue;
+      catNodes.push({ id: cat.id, name: cat.name, books: catMap.get(cat.id) ?? [] });
     }
     // Uncategorized
     const uncatBooks = catMap.get(null);
@@ -660,7 +802,9 @@ const tree = computed<TreeNode[]>(() => {
       open: openDomains.value.has(subId),
       books,
       categories: catNodes,
-      flat: !catNodes.some((c) => c.id != null),
+      // Plat quand aucune VRAIE catégorie non vide (les nœuds vides seuls
+      // ne justifient pas un niveau intermédiaire).
+      flat: !catNodes.some((c) => c.id != null && c.books.length > 0),
       headless: subName == null,
     });
   }
@@ -767,9 +911,16 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
       <p v-if="importProgress" class="lib-progress-msg" style="margin: 6px 0 0;">{{ importProgress }}</p>
     </section>
 
-    <!-- Queue Banner -->
-    <section class="queue-banner" :class="{ running: queue.running }">
-      <div>
+    <!-- Queue Banner : visible pendant le travail ou le bref état final,
+      repliée (masquée) au repos — jamais de progrès périmé affiché. -->
+    <section v-if="bannerVisible" class="queue-banner" :class="{ running: queue.running }">
+      <div v-if="bannerOutcome">
+        <div class="queue-state">
+          <span></span>{{ bannerOutcome.ok ? t('library.queueDone') : t('library.queueFailed') }}
+        </div>
+        <strong v-if="!bannerOutcome.ok && bannerOutcome.detail">{{ bannerOutcome.detail }}</strong>
+      </div>
+      <div v-else>
         <div class="queue-state">
           <span></span>{{ queue.running ? t('library.queueWorking') : t('library.queueReady') }}
         </div>
@@ -791,7 +942,8 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
           >
             <div class="lib-progress-fill" :style="{ width: shownPercent + '%' }" />
           </div>
-          <p class="lib-progress-line">{{ t('library.jobProgress', { phase: shownJob.phase_label || shownJob.status, percent: shownPercent }) }}<template v-if="etaText"> · {{ etaText }}</template></p>
+          <p class="lib-progress-line" v-if="shownJobIsReindex">{{ t('library.reindexingOf', { title: reindexTitle, percent: shownPercent }) }}<template v-if="etaText"> · {{ etaText }}</template></p>
+          <p class="lib-progress-line" v-else>{{ t('library.jobProgress', { phase: shownJob.phase_label || shownJob.status, percent: shownPercent }) }}<template v-if="etaText"> · {{ etaText }}</template></p>
         </div>
       </div>
       <button type="button" class="secondary-action" @click="toggleQueueBtn">
@@ -846,16 +998,63 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
                       <span v-if="book.pages">{{ book.pages }} pages</span>
                       <span v-else-if="book.chunks_total">{{ book.chunks_total }} fragments</span>
                     </div>
+                    <div v-if="bookIndexMeta(book)" class="lib-src-meta">{{ bookIndexMeta(book) }}</div>
                     <div v-if="book.status === 'indexing'" style="height: 4px; border-radius: 99px; background: #e7e8f7; overflow: hidden; margin-top: 6px;">
                       <div style="width: 40%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--orange), #f5ad4e); animation: indeterminate 1.4s ease infinite;" />
                     </div>
                   </div>
                   <span class="lib-src-actions">
                     <button type="button" class="lib-tact" :title="t('library.reindex')" @click.stop="reindexBook(book)">↻</button>
-                    <button type="button" class="lib-tact" :title="t('subject.unlink')" @click.stop="unlinkBook(book, domain)">⤴</button>
+                    <select
+                      :value="moveTarget(book.id)"
+                      :aria-label="t('library.moveTo')"
+                      :title="t('library.moveTo')"
+                      :disabled="movingBook !== null"
+                      style="min-height: 26px; font-size: 11px; max-width: 128px;"
+                      @change="onMoveSelect(book, ($event.target as HTMLSelectElement).value)"
+                    >
+                      <option value="">{{ t('library.moveTo') }}</option>
+                      <optgroup :label="t('library.moveDomains')">
+                        <option v-for="sub in subjects.filter(s => s.id !== domain.id)" :key="sub.id" :value="sub.id">{{ sub.name }}</option>
+                        <option value="__none__">{{ t('library.orphans') }}</option>
+                      </optgroup>
+                      <optgroup v-if="categories.length" :label="t('library.moveCategories')">
+                        <option v-for="cat in categories" :key="'movecat-' + cat.id" :value="'cat:' + cat.id">{{ cat.name }}</option>
+                      </optgroup>
+                    </select>
                     <button type="button" class="lib-src-del" :title="t('library.deleteBook')" @click.stop="deleteBook(book)">×</button>
                   </span>
                 </div>
+                <!-- Catégories réelles vides : visibles et actionnables même
+                  en mode plat (sinon une création resterait invisible). -->
+                <template v-for="cat in domain.categories" :key="'flat-' + (cat.id ?? 'uncat')">
+                  <div v-if="cat.id != null && !cat.books.length" class="lib-tnode" :class="{ open: openCategories.has(cat.id ?? -1) }">
+                    <div class="lib-trow">
+                      <span class="lib-tcaret" @click="toggleCategory(cat.id ?? -1)">
+                        <ChevronRight :size="14" aria-hidden="true" />
+                      </span>
+                      <template v-if="renamingCategoryId === cat.id">
+                        <input
+                          v-model="renamingName"
+                          class="lib-rename-input"
+                          type="text"
+                          style="width: 160px; min-height: 26px; font-size: 12px;"
+                          @keydown.enter="cat.id != null && commitRename(cat)"
+                          @keydown.escape="renamingCategoryId = null"
+                          @blur="cat.id != null && commitRename(cat)"
+                        />
+                      </template>
+                      <template v-else>
+                        <span class="lib-tlabel" @click="toggleCategory(cat.id ?? -1)">{{ cat.name }}</span>
+                      </template>
+                      <span class="lib-tcount">{{ cat.books.length }} doc</span>
+                      <span v-if="cat.id != null" class="lib-tacts">
+                        <button type="button" class="lib-tact" :title="t('library.renameCategory')" @click.stop="startRenameCat(cat)">✎</button>
+                        <button type="button" class="lib-tact del" :title="t('library.deleteCategory')" @click.stop="deleteCategoryById(cat.id)">🗑</button>
+                      </span>
+                    </div>
+                  </div>
+                </template>
               </template>
               <!-- Category nodes -->
               <template v-else>
@@ -894,6 +1093,7 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
                         <span v-if="book.pages">{{ book.pages }} pages</span>
                         <span v-else-if="book.chunks_total">{{ book.chunks_total }} fragments</span>
                       </div>
+                      <div v-if="bookIndexMeta(book)" class="lib-src-meta">{{ bookIndexMeta(book) }}</div>
                       <!-- Indexing progress bar -->
                       <div v-if="book.status === 'indexing'" style="height: 4px; border-radius: 99px; background: #e7e8f7; overflow: hidden; margin-top: 6px;">
                         <div style="width: 40%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--orange), #f5ad4e); animation: indeterminate 1.4s ease infinite;" />
@@ -901,7 +1101,23 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
                     </div>
                     <span class="lib-src-actions">
                       <button type="button" class="lib-tact" :title="t('library.reindex')" @click.stop="reindexBook(book)">↻</button>
-                      <button type="button" class="lib-tact" :title="t('subject.unlink')" @click.stop="unlinkBook(book, domain)">⤴</button>
+                      <select
+                        :value="moveTarget(book.id)"
+                        :aria-label="t('library.moveTo')"
+                        :title="t('library.moveTo')"
+                        :disabled="movingBook !== null"
+                        style="min-height: 26px; font-size: 11px; max-width: 128px;"
+                        @change="onMoveSelect(book, ($event.target as HTMLSelectElement).value)"
+                      >
+                        <option value="">{{ t('library.moveTo') }}</option>
+                        <optgroup :label="t('library.moveDomains')">
+                          <option v-for="sub in subjects.filter(s => s.id !== domain.id)" :key="sub.id" :value="sub.id">{{ sub.name }}</option>
+                          <option value="__none__">{{ t('library.orphans') }}</option>
+                        </optgroup>
+                        <optgroup v-if="categories.length" :label="t('library.moveCategories')">
+                          <option v-for="cat in categories" :key="'movecat-' + cat.id" :value="'cat:' + cat.id">{{ cat.name }}</option>
+                        </optgroup>
+                      </select>
                       <button type="button" class="lib-src-del" :title="t('library.deleteBook')" @click.stop="deleteBook(book)">×</button>
                     </span>
                   </div>
@@ -909,6 +1125,36 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
               </div>
               </template>
             </div>
+          </div>
+        </div>
+      </div>
+      <!-- Catégories vides de premier niveau : pairs des domaines (ordre :
+        domaines puis catégories vides), mêmes en-tête/compteurs/actions. -->
+      <div v-if="!loading && emptyTopCategories.length" class="lib-tree" style="margin-top: 10px;">
+        <div v-for="cat in emptyTopCategories" :key="'topcat-' + cat.id" class="lib-tnode" :class="{ open: openCategories.has(cat.id) }">
+          <div class="lib-trow">
+            <span class="lib-tcaret" @click="toggleCategory(cat.id)">
+              <ChevronRight :size="14" aria-hidden="true" />
+            </span>
+            <template v-if="renamingCategoryId === cat.id">
+              <input
+                v-model="renamingName"
+                class="lib-rename-input"
+                type="text"
+                style="width: 160px; min-height: 26px; font-size: 12px;"
+                @keydown.enter="commitRename(cat)"
+                @keydown.escape="renamingCategoryId = null"
+                @blur="commitRename(cat)"
+              />
+            </template>
+            <template v-else>
+              <span class="lib-tlabel" @click="toggleCategory(cat.id)">{{ cat.name }}</span>
+            </template>
+            <span class="lib-tcount">0 doc</span>
+            <span class="lib-tacts">
+              <button type="button" class="lib-tact" :title="t('library.renameCategory')" @click.stop="startRenameCat(cat)">✎</button>
+              <button type="button" class="lib-tact del" :title="t('library.deleteCategory')" @click.stop="deleteCategoryById(cat.id)">🗑</button>
+            </span>
           </div>
         </div>
       </div>
@@ -932,6 +1178,7 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
             <span v-if="book.pages">{{ book.pages }} pages</span>
             <span v-else-if="book.chunks_total">{{ book.chunks_total }} fragments</span>
           </div>
+          <div v-if="bookIndexMeta(book)" class="lib-src-meta">{{ bookIndexMeta(book) }}</div>
           <div v-if="book.status === 'indexing'" style="height: 4px; border-radius: 99px; background: #e7e8f7; overflow: hidden; margin-top: 6px;">
             <div style="width: 40%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--orange), #f5ad4e); animation: indeterminate 1.4s ease infinite;" />
           </div>

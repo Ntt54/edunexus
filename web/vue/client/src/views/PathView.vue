@@ -82,6 +82,7 @@ const loadingBooks = ref(false);
 const availableBooks = ref<Array<{ id: string; title: string; name: string; status: string; format: string; sourceType: string; pages: number | null; chunks_total: number | null }>>([]);
 const selectedBookIds = ref<string[]>([]);
 const generatingBooks = ref(false);
+const bookGoal = ref("");
 
 /* Drag state */
 const draggedStepIndex = ref<number | null>(null);
@@ -153,6 +154,10 @@ const completedCount = computed(
   () => selectedPath.value?.steps.filter((s) => s.status === "completed").length ?? 0,
 );
 const totalCount = computed(() => selectedPath.value?.steps.length ?? 0);
+// Cible de remplissage : le parcours sélectionné s'il est vide.
+const fillTarget = computed(() =>
+  selectedPath.value && selectedPath.value.steps.length === 0 ? selectedPath.value : null,
+);
 
 /* ── Data loading ─────────────────────────────────────────────── */
 async function loadPaths() {
@@ -361,6 +366,7 @@ async function openBookModal() {
   showBookModal.value = true;
   loadingBooks.value = true;
   selectedBookIds.value = [];
+  bookGoal.value = "";
   try {
     const data = await tutorApi.getBooks();
     // Normalisation défensive : forme inattendue (vieux bundle, payload
@@ -397,8 +403,26 @@ async function openBookModal() {
 async function generateFromBooks() {
   if (!subjectId.value || selectedBookIds.value.length === 0) return;
   generatingBooks.value = true;
+  error.value = null;
+  // Remplissage : le parcours sélectionné ne reçoit les étapes que s'il
+  // est vide (titre gardé) ; sinon un nouveau parcours est créé.
+  const target = selectedPath.value && selectedPath.value.steps.length === 0
+    ? selectedPath.value.id
+    : undefined;
+  const call = (pathId?: string) =>
+    tutorApi.generateFromBooks(subjectId.value, selectedBookIds.value, bookGoal.value || undefined, pathId);
   try {
-    const result = await tutorApi.generateFromBooks(subjectId.value, selectedBookIds.value) as { id: string; title: string };
+    let result: { id: string; title: string };
+    try {
+      result = await call(target) as { id: string; title: string };
+    } catch (e) {
+      // 404 sur un parcours supprimé entre-temps ⇒ repli création classique.
+      if (target && (e as { status?: number }).status === 404) {
+        result = await call(undefined) as { id: string; title: string };
+      } else {
+        throw e;
+      }
+    }
     showBookModal.value = false;
     await loadPaths();
     if (result?.id) await selectPath(result.id);
@@ -661,6 +685,18 @@ async function generateFromBooks() {
                 </label>
                 <p v-if="availableBooks.length === 0" class="lib-empty">{{ t("path.noBooks") }}</p>
               </div>
+              <div style="margin-top: 12px;">
+                <label class="field-label" for="book-goal">{{ t("path.bookGoalLabel") }}</label>
+                <textarea
+                  id="book-goal"
+                  v-model="bookGoal"
+                  rows="2"
+                  maxlength="500"
+                  :placeholder="t('path.bookGoalPlaceholder')"
+                  style="width: 100%; resize: vertical;"
+                ></textarea>
+                <p style="margin: 4px 0 0; color: var(--muted); font-size: 12px;">{{ t("path.bookGoalHint") }}</p>
+              </div>
               <div class="modal-actions">
                 <button
                   class="primary-action"
@@ -671,6 +707,7 @@ async function generateFromBooks() {
                   {{ generatingBooks ? t("path.generating") : t("path.generateFromBooks") }}
                 </button>
               </div>
+              <p style="margin: 8px 0 0; color: var(--muted); font-size: 12px;">{{ fillTarget ? t("path.fillEmpty", { name: fillTarget.title }) : t("path.createNew") }}</p>
             </div>
           </div>
 
