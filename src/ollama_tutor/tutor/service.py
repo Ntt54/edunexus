@@ -321,11 +321,16 @@ class TutorService:
         # B1 multi-fournisseur : le client LLM (génération) peut être
         # un fournisseur externe compatible OpenAI, distinct du client
         # Ollama utilisé pour les embeddings.
+        # Routage par modèle : `_llm_client` est un RoutingLLMClient qui
+        # tranche à l'appel (nom Ollama ⇒ Ollama, sinon cloud configuré,
+        # repli croisé). Les appelants passent déjà tous `model`.
+        from .providers.routing import RoutingLLMClient
+
         if (
             getattr(config, "llm_provider", "ollama") == "openai"
             and getattr(config, "llm_base_url", "")
         ):
-            self._llm_client: Any = OpenAICompatProvider(
+            _cloud: Any = OpenAICompatProvider(
                 base_url=config.llm_base_url,
                 api_key=getattr(config, "llm_api_key", ""),
             )
@@ -336,9 +341,14 @@ class TutorService:
                 self.client = client
             else:
                 self.client = OllamaClient()
+            default = "cloud"
         else:
-            self._llm_client = client
+            _cloud = None
             self.client = client
+            default = "ollama"
+        self._llm_client: Any = RoutingLLMClient(
+            ollama_client=self.client, cloud_client=_cloud, default=default
+        )
         # Pleias RAG lazy init (Oracle blueprint): when no provider was
         # injected and the feature is enabled, build one from the Ollama
         # client (raw /api/generate). OpenAI path falls back to self.client
@@ -392,6 +402,48 @@ class TutorService:
         self._nightly_last_error: str | None = None
         self._nightly_last_window_key: str | None = None
         self._nightly_prepare_status: dict[str, Any] = {}
+
+    def switch_llm_client(self, new_client: Any) -> Any | None:
+        """Hot-swap the generation backend on the live service (no restart).
+
+        Rebuilds the routing wrapper around the same Ollama client: an
+        ``OllamaClient`` clears the cloud leg (back to Ollama default),
+        anything else becomes the new cloud leg (cloud default).
+        ``quiz_engine.client`` follows the new router; the embeddings path
+        (``client`` + retriever, always Ollama local) is never touched.
+        Returns the previous cloud client when the caller should close it,
+        else ``None``. Never raises.
+        """
+        try:
+            from .providers.routing import RoutingLLMClient
+
+            old_router = (
+                self._llm_client
+                if isinstance(self._llm_client, RoutingLLMClient)
+                else None
+            )
+            if isinstance(new_client, OllamaClient):
+                cloud, default = None, "ollama"
+            else:
+                cloud, default = new_client, "cloud"
+            self._llm_client = RoutingLLMClient(
+                ollama_client=self.client, cloud_client=cloud, default=default
+            )
+            try:
+                self.quiz_engine.client = self._llm_client
+            except Exception as exc:
+                logger.warning("switch LLM: quiz_engine rewire failed: %s", exc)
+            logger.info(
+                "LLM backend switched (default=%s, cloud=%s)",
+                default,
+                type(cloud).__name__ if cloud is not None else None,
+            )
+            if old_router is not None:
+                return old_router._cloud
+            return None
+        except Exception as exc:
+            logger.warning("switch LLM failed: %s", exc)
+            return None
 
     def index_queue_status(self) -> dict[str, Any]:
         """Return a lightweight, persistence-backed queue snapshot."""

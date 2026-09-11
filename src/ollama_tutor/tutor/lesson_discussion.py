@@ -1047,6 +1047,146 @@ def _word_count(text: str) -> int:
     return len(text.split())
 
 
+def _split_blocks(text: str) -> list[str]:
+    """Split lesson text into atomic blocks (never split further).
+
+    Paragraphs (blank-line separated), contiguous `|` table lines merged
+    into ONE block, and ``` fences kept whole (an unclosed fence at the
+    end becomes its own block — callers re-close it).
+    """
+    if not text or not text.strip():
+        return []
+    blocks: list[str] = []
+    buf: list[str] = []
+    table: list[str] = []
+    in_fence = False
+
+    def flush_buf() -> None:
+        if buf:
+            chunk = "\n".join(buf).strip()
+            if chunk:
+                blocks.append(chunk)
+            buf.clear()
+
+    def flush_table() -> None:
+        if table:
+            blocks.append("\n".join(table))
+            table.clear()
+
+    for line in text.split("\n"):
+        s = line.strip()
+        if s.startswith("```"):
+            if in_fence:
+                buf.append(line)
+                flush_buf()
+                in_fence = False
+            else:
+                flush_buf()
+                flush_table()
+                buf.append(line)
+                in_fence = True
+            continue
+        if in_fence:
+            buf.append(line)
+            continue
+        if not s:
+            flush_table()
+            flush_buf()
+            continue
+        if s.startswith("|"):
+            flush_buf()
+            table.append(line)
+            continue
+        flush_table()
+        buf.append(line)
+    if in_fence:
+        # Unclosed fence: keep as one block, callers re-close it.
+        flush_buf()
+    else:
+        flush_table()
+        flush_buf()
+    return blocks
+
+
+def _close_open_fence(text: str) -> str:
+    """Append a closing fence when ``` count is odd (orphan fence)."""
+    if text.count("```") % 2 == 1:
+        return text.rstrip() + "\n```"
+    return text
+
+
+def _truncate_to_blocks(text: str, high: int) -> str:
+    """Keep whole blocks up to *high* words (never cut intra-block).
+
+    Accumulates entire blocks while they fit; a single oversize block is
+    kept whole rather than cut (documented best-effort: bounds are met
+    "au mieux", high wins over low on coarse granularity). Re-closes an
+    orphan trailing fence.
+    """
+    blocks = _split_blocks(text)
+    out: list[str] = []
+    n = 0
+    for b in blocks:
+        w = _word_count(b)
+        if n + w <= high or not out:
+            out.append(b)
+            n += w
+        else:
+            break
+    return _close_open_fence("\n\n".join(out))
+
+
+def _norm_block(text: str) -> str:
+    return " ".join(str(text or "").lower().split())
+
+
+def _pad_to_low(text: str, low: int, pool: list[str]) -> str:
+    """Pad with pool blocks up to *low* words (deduped first, cycled after).
+
+    Phase 1 adds only blocks not already present (normalized substring);
+    phase 2 cycles (assumed repetition to honor the min bound). Re-closes
+    an orphan trailing fence. Empty pool ⇒ text unchanged.
+    """
+    if not pool:
+        return text
+    full = _norm_block(text)
+    for cand in pool:
+        if _word_count(text) >= low:
+            break
+        nc = _norm_block(cand)
+        if nc and nc not in full:
+            text += "\n\n" + cand.strip()
+            full = _norm_block(text)
+    idx = 0
+    while _word_count(text) < low:
+        text += "\n\n" + pool[idx % len(pool)].strip()
+        idx += 1
+        if idx > 500:  # safety
+            break
+    return _close_open_fence(text)
+
+
+def _pad_for_diversity(text: str, high: int, pool: list[str], floor: int = 100) -> str:
+    """Add distinct unseen pool blocks to lift lexical diversity (< high).
+
+    Single pass, no repetition (diversity must not blow the max bound).
+    """
+    if not pool:
+        return text
+    full = _norm_block(text)
+    for cand in pool:
+        words = text.split()
+        if len(set(w.lower() for w in words)) >= floor:
+            break
+        if _word_count(text) >= high:
+            break
+        nc = _norm_block(cand)
+        if nc and nc not in full:
+            text += "\n\n" + cand.strip()
+            full = _norm_block(text)
+    return _close_open_fence(text)
+
+
 def _build_padding_pool(notion: str, chunks: list[dict[str, Any]], course_content: str | None = None) -> list[str]:
     """Pool of varied excerpts for padding — real chunk texts preferred."""
     pool: list[str] = []
@@ -1094,51 +1234,33 @@ def _build_padding_pool(notion: str, chunks: list[dict[str, Any]], course_conten
 
 
 def _ensure_word_range(text: str, low: int, high: int, notion: str, chunks: list[dict[str, Any]], course_content: str | None = None) -> str:
+    # Pool hygiene: fence fragments would render as orphan fences — the
+    # final re-close keeps counts even, but whole fences stay whole only
+    # when kept out of sentence-split padding.
+    pool = [p for p in _build_padding_pool(notion, chunks, course_content) if "```" not in p]
     cnt = _word_count(text)
     if low <= cnt <= high:
         # lexical diversity guard: ensure at least 100 distinct tokens when padded range is large
         if low >= 800:
             words = text.split()
             if len(set(w.lower() for w in words)) < 100 and chunks:
-                # force additional varied padding to lift diversity
-                pool = _build_padding_pool(notion, chunks, course_content)
-                idx = 0
-                while len(set(w.lower() for w in text.split())) < 100 and _word_count(text) < high:
-                    text += "\n\n" + pool[idx % len(pool)]
-                    idx += 1
-                    if idx > 30:
-                        break
-                words = text.split()
-                if len(words) > high:
-                    text = " ".join(words[:high])
+                # distinct unseen blocks only (never blow the max bound)
+                text = _pad_for_diversity(text, high, pool)
+                if _word_count(text) > high:
+                    text = _truncate_to_blocks(text, high)
         return text
     if cnt < low:
-        pool = _build_padding_pool(notion, chunks, course_content)
-        idx = 0
-        # cycle through real excerpts to reach low bound
-        while _word_count(text) < low:
-            excerpt = pool[idx % len(pool)]
-            text += "\n\n" + excerpt
-            idx += 1
-            if idx > 300:  # safety
-                break
-        words = text.split()
-        if len(words) > high:
-            text = " ".join(words[:high])
+        # pad with whole blocks (deduped first, cycled only if needed)
+        text = _pad_to_low(text, low, pool)
+        if _word_count(text) > high:
+            text = _truncate_to_blocks(text, high)
         # final diversity check for large targets
         if low >= 800:
             uniq = len(set(w.lower() for w in text.split()))
             if uniq < 100:
-                # inject more distinct chunks if still low
-                extra = 0
-                while uniq < 100 and extra < 20:
-                    text += "\n\n" + pool[extra % len(pool)]
-                    extra += 1
-                    uniq = len(set(w.lower() for w in text.split()))
-                words = text.split()
-                if len(words) > high:
-                    text = " ".join(words[:high])
+                text = _pad_for_diversity(text, high, pool)
+                if _word_count(text) > high:
+                    text = _truncate_to_blocks(text, high)
         return text
-    # cnt > high
-    words = text.split()
-    return " ".join(words[:high])
+    # cnt > high: whole blocks only, never cut mid-table/mid-fence.
+    return _truncate_to_blocks(text, high)

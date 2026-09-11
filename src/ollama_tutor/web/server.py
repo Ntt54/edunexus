@@ -97,6 +97,34 @@ def _mask_api_key(key: str) -> str:
     return "****" + key[-4:]
 
 
+def _is_valid_llm_base_url(url: str) -> bool:
+    """True si *url* est une base http(s) utilisable (schéma + hôte)."""
+    try:
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(str(url or "").strip())
+        return parts.scheme in ("http", "https") and bool(parts.hostname)
+    except Exception:
+        return False
+
+
+def _build_tutor_client(config: Any) -> Any:
+    """Construit le client LLM de génération depuis la config (sans effet réseau).
+
+    openai + base_url ⇒ OpenAICompatProvider, sinon OllamaClient. Utilise
+    le global de module ``OllamaClient`` (seam de monkeypatch pour les
+    tests). Factorisé pour create_app ET le PUT settings (bascule à chaud).
+    """
+    if config.llm_provider == "openai" and config.llm_base_url:
+        from ..tutor.providers.openai_compat import OpenAICompatProvider
+
+        return OpenAICompatProvider(
+            base_url=config.llm_base_url,
+            api_key=config.llm_api_key or None,
+        )
+    return OllamaClient()
+
+
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
@@ -592,14 +620,8 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
     # app's chat client would cross event-loop boundaries.
     tutor_store = LibraryStore(config.config_dir)
     # B1 multi-fournisseur : choisir le client LLM selon la config
-    if config.llm_provider == "openai" and config.llm_base_url:
-        from ..tutor.providers.openai_compat import OpenAICompatProvider
-        tutor_client = OpenAICompatProvider(
-            base_url=config.llm_base_url,
-            api_key=config.llm_api_key or None,
-        )
-    else:
-        tutor_client = OllamaClient()
+    # (même helper que la bascule à chaud du PUT settings).
+    tutor_client = _build_tutor_client(config)
     # Phase 5a provider wiring: the GGUF embedding provider is built ONLY
     # when llama.bin + embed GGUF are configured (explicit local engine).
     # Unconfigured ⇒ None keeps the legacy Ollama path through tutor_client
@@ -628,6 +650,8 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         embedding_provider=embedding_provider,
         document_parser=document_parser,
     )
+    # Exposé pour l'introspection (tests, debug) — interne, hors contrat API.
+    app.state.tutor_service = tutor_service
     # Any ``indexing`` row left by a killed process becomes safely resumable.
     tutor_service.recover_interrupted_indexing()
     # Mastery / gap / path tracker (US4 practice surface).
@@ -3247,6 +3271,28 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
 
     @app.put("/api/tutor/settings")
     async def settings_update(payload: SettingsUpdate) -> dict[str, Any]:
+        # URL cible : invalide ⇒ 400 AVANT toute mutation (ancien client gardé).
+        _wanted_provider = (
+            payload.llm_provider
+            if payload.llm_provider is not None
+            else config.llm_provider
+        )
+        _wanted_url = (
+            payload.llm_base_url
+            if payload.llm_base_url is not None
+            else config.llm_base_url
+        )
+        if (
+            _wanted_provider == "openai"
+            and _wanted_url
+            and not _is_valid_llm_base_url(_wanted_url)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"llm_base_url invalide : {_wanted_url!r}",
+            )
+        # Snapshot avant mutation pour détecter un changement effectif.
+        _prev_llm = (config.llm_provider, config.llm_base_url, config.llm_api_key)
         if payload.options is not None:
             merged = config.options.to_dict()
             merged.update(payload.options)
@@ -3302,6 +3348,30 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         config.save()  # persistance immédiate (préférence utilisateur)
+        # Bascule à chaud du backend LLM sur changement effectif de
+        # (provider, base_url, api_key) : reconstruit via le même helper
+        # que create_app, rebranche le service vivant (pas de restart),
+        # ferme l'ancien client dédié best-effort (jamais de raise).
+        # Triplet inchangé ⇒ aucune reconstruction.
+        if (
+            config.llm_provider,
+            config.llm_base_url,
+            config.llm_api_key,
+        ) != _prev_llm:
+            try:
+                _new_client = _build_tutor_client(config)
+            except Exception as exc:
+                _log_error(
+                    config, "provider-switch",
+                    f"reconstruction client LLM impossible : {exc}",
+                )
+            else:
+                _old_client = tutor_service.switch_llm_client(_new_client)
+                if _old_client is not None:
+                    try:
+                        await _old_client.close()
+                    except Exception:
+                        pass
         if config.tutor_nightly_enabled:
             await tutor_service.start_nightly_scheduler()
         else:
