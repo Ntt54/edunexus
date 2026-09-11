@@ -160,16 +160,229 @@ const hasNoSources = computed(() => {
   return false;
 });
 
+/* ── Mini-markdown maison (sans dépendance) ────────────────────────
+   SÉCURITÉ : tout texte interpolé passe par escHtml (jamais de HTML brut
+   du modèle — v-html oblige) ; les liens javascript:/data:/… sont refusés
+   (rendus en texte seul). Tableaux GFM, fences ```lang, **gras**,
+   *italique*, `code`, [liens](url) et listes ordonnées ; le reste
+   (titres #/listes -/texte) est conservé à l'identique. */
+function safeHref(raw: string): string | null {
+  const u = String(raw || "").trim();
+  if (!u || /[\s<>]/.test(u)) return null;
+  const m = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.exec(u);
+  // Schéma explicite : seuls http(s) passent ; relatif (sans schéma) OK.
+  if (m) {
+    const scheme = m[0].toLowerCase();
+    if (scheme !== "http:" && scheme !== "https:") return null;
+  }
+  return u;
+}
+
+function renderInlineRich(seg: string): string {
+  // seg déjà échappé : on n'y injecte que nos propres balises.
+  let s = seg.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (whole, text: string, url: string) => {
+    const href = safeHref(url);
+    if (!href) return text;
+    const ext = /^https?:\/\//i.test(href);
+    return `<a class="md-link" href="${href}"${ext ? ' target="_blank" rel="noopener"' : ""}>${text}</a>`;
+  });
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[^\w*])\*([^*\n]+?)\*/g, "$1<em>$2</em>");
+  return s;
+}
+
+function renderInline(raw: string): string {
+  // Code inline d'abord (aucun formatage dedans), puis riche sur le reste.
+  return String(raw ?? "").split(/(`[^`\n]+`)/g).map((p, i) => {
+    if (i % 2 === 1) return `<code class="md-code-inline">${escHtml(p.slice(1, -1))}</code>`;
+    return renderInlineRich(escHtml(p));
+  }).join("");
+}
+
+function splitTableRow(line: string): string[] {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|")) s = s.slice(0, -1);
+  return s.split("|").map((c) => c.trim());
+}
+
+// ── Coloration regex maison (zéro lib) ─────────────────────────────
+// NULLE confiance au contenu : on tokenize le code BRUT, chaque morceau
+// est échappé via escHtml AVANT d'être enveloppé. Les mots/nombres sont
+// cherchés hors-entités (&…;) pour ne jamais corrompre un échappement.
+// Python : keywords/builtins/strings/comments/nombres ; autres langages :
+// strings/comments/nombres uniquement (générique discret).
+const PY_KEYWORDS = new Set(
+  ("False None True and as assert async await break class continue def del " +
+    "elif else except finally for from global if import in is lambda nonlocal " +
+    "not or pass raise return try while with yield match case").split(" "),
+);
+const PY_BUILTINS = new Set(
+  ("print len range str int float bool list dict set tuple open enumerate zip " +
+    "map filter sorted sum min max abs round isinstance type input").split(" "),
+);
+
+function highlightWords(chunk: string, isPy: boolean): string {
+  return escHtml(chunk)
+    .split(/(&[a-zA-Z]+;|&#[0-9]+;)/g)
+    .map((part, k) => {
+      if (k % 2 === 1) return part; // entité d'échappement : intacte
+      return part.split(/(\b\d+(?:\.\d+)?\b)/g).map((p, j) => {
+        if (j % 2 === 1) return `<span class="md-tok-num">${p}</span>`;
+        if (!isPy) return p;
+        return p.replace(/\b([A-Za-z_]\w*)(\()?/g, (whole, w: string, paren: string) => {
+          if (PY_KEYWORDS.has(w)) return `<span class="md-tok-kw">${w}</span>${paren || ""}`;
+          if (paren) return `<span class="md-tok-${PY_BUILTINS.has(w) ? "bi" : "fn"}">${w}</span>(`;
+          return whole;
+        });
+      }).join("");
+    })
+    .join("");
+}
+
+function highlightCode(code: string, lang: string): string {
+  const isPy = /^(python|py)$/.test(lang);
+  const re = isPy
+    ? /(#[^\n]*)|("""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')/g
+    : /((?:\/\/|#)[^\n]*)|("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\\n])*`)/g;
+  let out = "";
+  let last = 0;
+  const flushPlain = (chunk: string) => { out += highlightWords(chunk, isPy); };
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(code)) !== null) {
+    if (!m[0].length) { re.lastIndex++; continue; }
+    flushPlain(code.slice(last, m.index));
+    if (m[1] !== undefined) out += `<span class="md-tok-com">${escHtml(m[1])}</span>`;
+    else out += `<span class="md-tok-str">${escHtml(m[2])}</span>`;
+    last = m.index + m[0].length;
+  }
+  flushPlain(code.slice(last));
+  return out;
+}
+
+// ── Copie (Clipboard + repli execCommand) + délégation de clic ─────
+// Les boutons naissent dans du v-html : un seul gestionnaire par conteneur,
+// pas de registre — le texte est relu depuis le DOM rendu (innerText
+// décode les entités, la coloration ne fait qu'envelopper).
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* repli ci-dessous */ }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+function onMarkdownClick(e: Event): void {
+  const target = e.target as HTMLElement | null;
+  const btn = target?.closest?.("[data-copy]") as HTMLElement | null;
+  if (!btn) return;
+  const kind = btn.dataset.copy;
+  const root = btn.closest(".md-codeblock, .md-tablewrap");
+  let text = "";
+  if (kind === "code") {
+    const code = root?.querySelector("code");
+    if (code) text = (code as HTMLElement).innerText;
+  } else if (kind === "table") {
+    const table = root?.querySelector("table");
+    if (table) {
+      text = Array.from((table as HTMLTableElement).rows)
+        .map((r) => Array.from(r.cells)
+          .map((c) => (c as HTMLElement).innerText.replace(/\s+/g, " ").trim()).join("\t"))
+        .join("\n");
+    }
+  }
+  if (!text) return;
+  const label = btn.textContent;
+  void copyText(text).then((ok) => {
+    if (!ok || !btn.isConnected) return;
+    btn.textContent = t("lesson.copied") as string;
+    setTimeout(() => { if (btn.isConnected) btn.textContent = label; }, 1500);
+  });
+}
+
 function renderMarkdown(text: string): string {
   const lines = String(text||"").split("\n");
   let out="";
-  for(const ln of lines){
-    const t=ln.trim();
-    if(!t){ out+='<div style="height:6px"></div>'; continue; }
-    const hm = /^(#{1,3})\s+(.*)$/.exec(t);
-    if(hm){ out+=`<div class="md-h md-h${hm[1].length}">${escHtml(hm[2])}</div>`; continue; }
-    if(/^[-*]\s+/.test(t)){ out+=`<div style="margin-left:16px">• ${escHtml(t.replace(/^[-*]\s+/,""))}</div>`; continue; }
-    out+=`<div>${escHtml(ln)}</div>`;
+  let i=0;
+  while (i < lines.length) {
+    const ln = lines[i];
+    const tl=ln.trim();
+    // Blocs clôturés ```lang (non fermé ⇒ tout le reste en code) :
+    // en-tête (langage + copier) + coloration maison sur tokens échappés.
+    const fence = /^```(\w*)\s*$/.exec(tl);
+    if (fence) {
+      const lang = (fence[1] || "text").toLowerCase().replace(/[^a-z0-9+-]/g, "") || "text";
+      const buf: string[] = [];
+      i++;
+      while (i < lines.length && !/^```\s*$/.test(lines[i].trim())) { buf.push(lines[i]); i++; }
+      if (i < lines.length) i++;
+      const code = buf.join("\n");
+      out += `<div class="md-codeblock"><div class="md-codehead"><span class="md-codelang">${escHtml(lang)}</span>` +
+        `<button type="button" class="md-copybtn" data-copy="code">${escHtml(t("lesson.copy"))}</button></div>` +
+        `<pre class="md-code"><code class="language-${lang}" data-lang="${lang}">${highlightCode(code, lang)}</code></pre></div>`;
+      continue;
+    }
+    // Citations « > » groupées (avant les tableaux : un tableau cité reste
+    // une citation, au mieux).
+    if (/^\s*>\s?/.test(ln)) {
+      const buf: string[] = [];
+      while (i < lines.length) {
+        const m = /^\s*>\s?(.*)$/.exec(lines[i]);
+        if (!m) break;
+        buf.push(m[1]);
+        i++;
+      }
+      out += `<blockquote class="md-quote">${buf.map((l) =>
+        l.trim() ? `<div>${renderInline(l)}</div>` : `<div style="height:6px"></div>`).join("")}</blockquote>`;
+      continue;
+    }
+    // Tableaux GFM : en-tête + séparateur |---|:---:| puis lignes.
+    if (tl.includes("|") && i + 1 < lines.length) {
+      const sep = splitTableRow(lines[i + 1]);
+      const head = splitTableRow(tl);
+      const isSep = sep.length === head.length && sep.length > 0 &&
+        sep.every((c) => /^:?-+:?$/.test(c));
+      if (isSep) {
+        const aligns = sep.map((c) =>
+          c.startsWith(":") && c.endsWith(":") && c.length > 2 ? "center"
+          : c.endsWith(":") ? "right" : "left");
+        const alignAttr = (a: string) => (a === "left" ? "" : ` align="${a}"`);
+        out += `<div class="md-tablewrap"><div class="md-tablebar"><span class="md-tabletitle">${escHtml(t("lesson.table"))}</span>` +
+          `<button type="button" class="md-copybtn" data-copy="table">${escHtml(t("lesson.copy"))}</button></div>` +
+          `<div class="md-tablescroll"><table class="md-table"><thead><tr>${head.map((c, k) =>
+          `<th${alignAttr(aligns[k])}>${renderInline(c)}</th>`).join("")}</tr></thead><tbody>`;
+        i += 2;
+        while (i < lines.length && lines[i].includes("|") && lines[i].trim()) {
+          const cells = splitTableRow(lines[i]);
+          out += `<tr>${head.map((_, k) =>
+            `<td${alignAttr(aligns[k])}>${renderInline(cells[k] ?? "")}</td>`).join("")}</tr>`;
+          i++;
+        }
+        out += `</tbody></table></div></div>`;
+        continue;
+      }
+    }
+    if(!tl){ out+='<div style="height:6px"></div>'; i++; continue; }
+    const hm = /^(#{1,3})\s+(.*)$/.exec(tl);
+    if(hm){ out+=`<div class="md-h md-h${hm[1].length}">${renderInline(hm[2])}</div>`; i++; continue; }
+    const ol = /^(\d+)[.)]\s+(.*)$/.exec(tl);
+    if(ol){ out+=`<div style="margin-left:16px">${escHtml(ol[1])}. ${renderInline(ol[2])}</div>`; i++; continue; }
+    if(/^[-*]\s+/.test(tl)){ out+=`<div style="margin-left:16px">• ${renderInline(tl.replace(/^[-*]\s+/,""))}</div>`; i++; continue; }
+    out+=`<div>${renderInline(ln)}</div>`; i++;
   }
   return out;
 }
@@ -579,7 +792,7 @@ function goBack() { router.push("/parcours"); }
               <span class="capture-kind">{{ t("lesson.course") }}</span>
               <StatusPill tone="indigo">{{ t("lesson.live") }} · {{ formatElapsed(courseElapsed) }}</StatusPill>
             </div>
-            <div class="notebook-output-body" v-html="renderMarkdown(courseStreamText)"></div>
+            <div class="notebook-output-body" v-html="renderMarkdown(courseStreamText)" @click="onMarkdownClick"></div>
           </article>
           <article
             v-for="c in courseContents"
@@ -606,7 +819,7 @@ function goBack() { router.push("/parcours"); }
                 </button>
               </span>
             </div>
-            <div class="notebook-output-body" v-html="renderMarkdown(c.content)"></div>
+            <div class="notebook-output-body" v-html="renderMarkdown(c.content)" @click="onMarkdownClick"></div>
             <div v-if="c.sources && c.sources.length" class="notebook-output-src">Sources : {{ c.sources.map(s => (s.book_id||s.book||'?') + (s.chapter ? ' · ' + s.chapter : '')).join(', ') }}</div>
             <div v-if="c.confidence!=null" class="notebook-output-src">Confiance : {{ Number(c.confidence).toFixed(2) }}</div>
             <details v-if="codeCheck(c) && codeCheck(c)!.failures.length" class="code-check-details">
@@ -650,7 +863,7 @@ function goBack() { router.push("/parcours"); }
                 </button>
               </span>
             </div>
-            <div class="notebook-output-body" v-html="renderMarkdown(c.content)"></div>
+            <div class="notebook-output-body" v-html="renderMarkdown(c.content)" @click="onMarkdownClick"></div>
             <div v-if="c.sources && c.sources.length" class="notebook-output-src">Sources : {{ c.sources.map(s => (s.book_id||s.book||'?') + (s.chapter ? ' · ' + s.chapter : '')).join(', ') }}</div>
             <div v-if="c.confidence!=null" class="notebook-output-src">Confiance : {{ Number(c.confidence).toFixed(2) }}</div>
           </article>
@@ -850,6 +1063,37 @@ export default { name: "LessonView" };
 .notebook-output-body :deep(.md-h2) { font-size: 15px; }
 .notebook-output-body :deep(.md-h3) { font-size: 13.5px; }
 .notebook-output-src { margin-top: 8px; color: var(--muted); font-size: 11.5px; }
+/* Rendu markdown (v-html) : TOUT passe par :deep() — le contenu injecté
+   ne porte pas l'attribut scopé, les règles nues ne s'appliqueraient JAMAIS. */
+.notebook-output-body :deep(.md-table) { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 13px; }
+.notebook-output-body :deep(.md-table th), .notebook-output-body :deep(.md-table td) { border: 1px solid var(--line); padding: 6px 10px; text-align: left; overflow-wrap: anywhere; }
+.notebook-output-body :deep(.md-table thead th) { background: var(--panel-soft); font-weight: 700; }
+.notebook-output-body :deep(.md-tablewrap) { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin: 10px 0; }
+.notebook-output-body :deep(.md-tablewrap .md-table) { margin: 0; border: 0; }
+.notebook-output-body :deep(.md-tablewrap .md-table thead th) { border-top: 0; }
+.notebook-output-body :deep(.md-tablewrap .md-table th:first-child), .notebook-output-body :deep(.md-tablewrap .md-table td:first-child) { border-left: 0; }
+.notebook-output-body :deep(.md-tablewrap .md-table th:last-child), .notebook-output-body :deep(.md-tablewrap .md-table td:last-child) { border-right: 0; }
+.notebook-output-body :deep(.md-tablewrap .md-table tr:last-child td) { border-bottom: 0; }
+.notebook-output-body :deep(.md-tablebar) { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 12px; background: var(--panel-soft); border-bottom: 1px solid var(--line); }
+.notebook-output-body :deep(.md-tabletitle) { font-size: 11px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.notebook-output-body :deep(.md-tablescroll) { overflow-x: auto; }
+.notebook-output-body :deep(.md-codeblock) { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin: 10px 0; }
+.notebook-output-body :deep(.md-codehead) { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 12px; background: var(--panel-soft); border-bottom: 1px solid var(--line); }
+.notebook-output-body :deep(.md-codelang) { font-size: 11px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.notebook-output-body :deep(.md-copybtn) { font-size: 11px; font-weight: 700; color: var(--indigo-deep); background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; cursor: pointer; white-space: nowrap; }
+.notebook-output-body :deep(.md-copybtn:hover) { background: var(--indigo-soft); }
+.notebook-output-body :deep(.md-codeblock .md-code) { border: 0; border-radius: 0; margin: 0; }
+.notebook-output-body :deep(.md-tok-kw) { color: var(--indigo-deep); font-weight: 700; }
+.notebook-output-body :deep(.md-tok-bi) { color: var(--indigo); font-weight: 700; }
+.notebook-output-body :deep(.md-tok-fn) { color: var(--indigo); }
+.notebook-output-body :deep(.md-tok-str) { color: var(--green); }
+.notebook-output-body :deep(.md-tok-com) { color: var(--muted); font-style: italic; }
+.notebook-output-body :deep(.md-tok-num) { color: var(--orange-deep); }
+.notebook-output-body :deep(.md-quote) { margin: 10px 0; padding: 8px 12px; border-left: 3px solid var(--indigo); background: var(--panel-soft); border-radius: 0 8px 8px 0; color: var(--ink-2); font-style: italic; }
+.notebook-output-body :deep(.md-code) { background: var(--panel-soft); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; overflow-x: auto; font-size: 12px; line-height: 1.55; }
+.notebook-output-body :deep(.md-code code) { font-family: ui-monospace, Menlo, Consolas, monospace; white-space: pre; }
+.notebook-output-body :deep(.md-code-inline) { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .9em; background: var(--panel-soft); border: 1px solid var(--line); border-radius: 6px; padding: 1px 5px; }
+.notebook-output-body :deep(.md-link) { color: var(--indigo); text-decoration: underline; }
 .code-check-details { margin-top: 8px; font-size: 12px; color: var(--muted); }
 .code-check-details summary { cursor: pointer; font-weight: 700; }
 .code-check-details summary:hover { color: var(--orange-deep); }
