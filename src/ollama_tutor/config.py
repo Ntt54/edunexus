@@ -11,6 +11,16 @@ from typing import Any
 from .models import OllamaOptions, Preset
 
 
+def _mask_api_key(key: str) -> str:
+    """Masque une clé API : "" si vide, sinon "****" + 4 derniers caractères."""
+    if not key:
+        return ""
+    key = str(key)
+    if len(key) <= 4:
+        return "****"
+    return "****" + key[-4:]
+
+
 def _valid_hhmm(value: str, fallback: str) -> str:
     try:
         hour, minute = (int(part) for part in str(value).split(":", 1))
@@ -572,6 +582,47 @@ class Config:
         self._schedule_save()
 
     # ------------------------------------------------------------------
+    # Pleias RAG (700M/1B) — reranker local
+    # ------------------------------------------------------------------
+
+    @property
+    def tutor_pleias_model(self) -> str:
+        return self._data.get("tutor", {}).get(
+            "pleias_model", "hf.co/brendanddev/Pleias-RAG-1B-Q4_K_M-GGUF:Q4_K_M"
+        )
+
+    @tutor_pleias_model.setter
+    def tutor_pleias_model(self, value: str) -> None:
+        self._data.setdefault("tutor", {})["pleias_model"] = str(value)
+        self._schedule_save()
+
+    @property
+    def tutor_pleias_enabled(self) -> bool:
+        return bool(self._data.get("tutor", {}).get("pleias_enabled", False))
+
+    @tutor_pleias_enabled.setter
+    def tutor_pleias_enabled(self, value: bool) -> None:
+        self._data.setdefault("tutor", {})["pleias_enabled"] = bool(value)
+        self._schedule_save()
+
+    @property
+    def tutor_pleias_ctx(self) -> int:
+        raw = self._data.get("tutor", {}).get("pleias_ctx", 10000)
+        try:
+            return max(4000, min(10000, int(raw)))
+        except (TypeError, ValueError):
+            return 10000
+
+    @tutor_pleias_ctx.setter
+    def tutor_pleias_ctx(self, value: int) -> None:
+        try:
+            clamped = max(4000, min(10000, int(value)))
+        except (TypeError, ValueError):
+            clamped = 10000
+        self._data.setdefault("tutor", {})["pleias_ctx"] = clamped
+        self._schedule_save()
+
+    # ------------------------------------------------------------------
     # Embedding batch/parallelism (Feature 006)
     # ------------------------------------------------------------------
 
@@ -662,6 +713,8 @@ class Config:
 
     def get_tutor_config_snapshot(self) -> dict[str, Any]:
         """Get a snapshot of the current tutor config for session recording."""
+        _raw_key = self.llm_api_key
+        _masked = _mask_api_key(_raw_key)
         return {
             "enabled": self.tutor_enabled,
             "embedding_model": self.tutor_embedding_model,
@@ -672,7 +725,9 @@ class Config:
             "top_k": self.tutor_top_k,
             "llm_provider": self.llm_provider,
             "llm_base_url": self.llm_base_url,
-            "llm_api_key": self.llm_api_key,
+            "llm_api_key": _masked,
+            "llm_api_key_masked": _masked,
+            "has_llm_api_key": bool(_raw_key),
             "whisper_binary": self.tutor_whisper_binary,
             "whisper_model": self.tutor_whisper_model,
             "llama_bin": self.tutor_llama_bin,
@@ -696,4 +751,7 @@ class Config:
             "reranking_enabled": self.tutor_reranking_enabled,
             "pgvector_enabled": self.pgvector_enabled,
             "pgvector_dsn": self.pgvector_dsn,
+            "pleias_model": self.tutor_pleias_model,
+            "pleias_enabled": self.tutor_pleias_enabled,
+            "pleias_ctx": self.tutor_pleias_ctx,
         }

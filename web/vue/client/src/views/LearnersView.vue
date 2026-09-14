@@ -1,17 +1,11 @@
 <!-- EduNexus UI direction: Atelier de progression — la gestion des apprenants rend l'activité collective visible et simple. -->
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { Check, LoaderCircle, Plus, Trash2, User } from "lucide-vue-next";
-import { useLearningStore } from "@/stores/learning";
+import { tutorApi, invalidateSubjectCaches } from "@/services/api";
 import { usePreferences } from "@/stores/preferences";
 
-const { state: learningState } = useLearningStore();
-const { t } = usePreferences();
-
-/** ID de la matière active depuis le store partagé */
-const subjectId = computed(() => learningState.data?.subject?.id ?? null);
-
-/* ── Types ──────────────────────────────────────────────────────────── */
+const { t, activeSubjectId, activeLearnerId, setActiveLearnerId } = usePreferences();
 
 interface Learner {
   id: string;
@@ -21,89 +15,132 @@ interface Learner {
   is_active?: boolean;
 }
 
-/* ── État local ─────────────────────────────────────────────────────── */
-
 const learners = ref<Learner[]>([]);
 const loading = ref(false);
 const creating = ref(false);
 const error = ref<string | null>(null);
 const newName = ref("");
+const subjectName = ref("");
+let learnersGen = 0;
 
-const apiBase = import.meta.env.VITE_EDUNEXUS_API_BASE ?? "/api/tutor";
+// Confirm delete modal (reuse pattern AppShell)
+const showDelete = ref(false);
+const deleteTarget = ref<Learner | null>(null);
 
-/* ── Appels API ─────────────────────────────────────────────────────── */
+const activeSubject = computed(() => activeSubjectId.value || localStorage.getItem("edunexus.space") || localStorage.getItem("edunexus:subject") || "");
+const activeLearner = computed(() => activeLearnerId.value || localStorage.getItem("edunexus.learner") || "");
 
-async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiBase}${path}`, {
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-    ...init,
-  });
-  if (!response.ok) throw new Error(`Erreur API ${response.status}`);
-  if (response.status === 204) return null as T;
-  return response.json() as Promise<T>;
-}
-
-/** Charge la liste des apprenants */
 async function fetchLearners() {
+  const sid = activeSubject.value;
+  const gen = ++learnersGen;
+  // No-flash: clear immediately on subject switch
+  learners.value = [];
   loading.value = true;
   error.value = null;
   try {
-    const data = await apiRequest<{ learners: Learner[] }>("/learners");
-    learners.value = data.learners ?? [];
+    const [data, subjRes] = await Promise.all([
+      sid ? tutorApi.getLearnersFiltered(sid) : tutorApi.getLearnersFiltered(null),
+      tutorApi.getSubjects().catch(() => ({ subjects: [] as Array<{ id: string; name: string }>, active_id: null })),
+    ]);
+    if (gen !== learnersGen) return;
+    const list = (data.learners ?? []) as unknown as Learner[];
+    // mark active
+    const al = activeLearner.value;
+    learners.value = list.map(l => ({ ...l, is_active: l.id === al }));
+    const found = (subjRes.subjects || []).find(s => s.id === sid);
+    subjectName.value = found?.name || "";
   } catch (e) {
+    if (gen !== learnersGen) return;
     error.value = e instanceof Error ? e.message : "Impossible de charger les apprenants.";
   } finally {
-    loading.value = false;
+    if (gen === learnersGen) loading.value = false;
   }
 }
 
-/** Crée un nouvel apprenant */
 async function createLearner() {
   const name = newName.value.trim();
-  if (!name) return;
+  if (!name) { error.value = "Nom requis (1..32 caractères)"; return; }
+  if (name.length < 1 || name.length > 32) { error.value = "Nom invalide : 1 à 32 caractères"; return; }
+  if (!activeSubject.value) { error.value = "Aucune matière active"; return; }
   creating.value = true;
   error.value = null;
   try {
-    const created = await apiRequest<Learner>("/learners", {
-      method: "POST",
-      body: JSON.stringify({ name }),
-    });
-    if (created) learners.value.push(created);
+    await tutorApi.createLearner(name);
+    // backend does not auto-scope by subject_id for create, but list filtered will show if coupled via paths; for 011 spec, create is for active subject
     newName.value = "";
+    invalidateSubjectCaches();
+    await fetchLearners();
   } catch (e) {
-    error.value = e instanceof Error ? e.message : "Impossible de créer l'apprenant.";
-  } finally {
-    creating.value = false;
-  }
+    const st = (e as { status?: number }).status;
+    const msg = e instanceof Error ? e.message : String(e);
+    if (st === 400 || msg.includes("déjà utilisé") || msg.includes("existe")) error.value = "Nom déjà utilisé ou invalide (1..32)";
+    else error.value = msg || "Impossible de créer l'apprenant.";
+  } finally { creating.value = false; }
 }
 
-/** Active un apprenant */
 async function activateLearner(learnerId: string) {
   error.value = null;
   try {
-    await apiRequest(`/learners/${learnerId}/activate`, { method: "POST" });
-    /* Met à jour localement le statut actif */
+    await tutorApi.activateLearner(learnerId);
+    setActiveLearnerId(learnerId);
     for (const l of learners.value) l.is_active = l.id === learnerId;
+    invalidateSubjectCaches();
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Impossible d'activer l'apprenant.";
   }
 }
 
-/** Supprime un apprenant */
-async function deleteLearner(learnerId: string) {
+function askDelete(learner: Learner) {
+  deleteTarget.value = learner;
+  showDelete.value = true;
+}
+async function confirmDelete() {
+  if (!deleteTarget.value) return;
+  const id = deleteTarget.value.id;
+  const wasActive = deleteTarget.value.is_active;
   error.value = null;
   try {
-    await apiRequest(`/learners/${learnerId}`, { method: "DELETE" });
-    learners.value = learners.value.filter((l) => l.id !== learnerId);
+    await tutorApi.deleteLearner(id);
+    learners.value = learners.value.filter(l => l.id !== id);
+    if (wasActive) {
+      const next = learners.value[0];
+      if (next) {
+        setActiveLearnerId(next.id);
+        for (const l of learners.value) l.is_active = l.id === next.id;
+      } else {
+        setActiveLearnerId("");
+      }
+    }
+    invalidateSubjectCaches();
+    showDelete.value = false;
+    deleteTarget.value = null;
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Impossible de supprimer l'apprenant.";
+    showDelete.value = false;
   }
 }
 
-/* ── Cycle de vie ───────────────────────────────────────────────────── */
+function onSubjectChangeLearners() { void fetchLearners(); }
+function onLearnerChangeLearners() {
+  const al = activeLearner.value;
+  for (const l of learners.value) l.is_active = l.id === al;
+}
+
+watch(() => activeSubject.value, () => onSubjectChangeLearners());
+watch(() => activeLearner.value, () => onLearnerChangeLearners());
 
 onMounted(() => {
-  fetchLearners();
+  void fetchLearners();
+  window.addEventListener("edunexus:subjectChange", onSubjectChangeLearners as EventListener);
+  window.addEventListener("subjectChange", onSubjectChangeLearners as EventListener);
+  window.addEventListener("edunexus:learnerChange", onLearnerChangeLearners as EventListener);
+  window.addEventListener("learnerChange", onLearnerChangeLearners as EventListener);
+});
+onUnmounted(() => {
+  window.removeEventListener("edunexus:subjectChange", onSubjectChangeLearners as EventListener);
+  window.removeEventListener("subjectChange", onSubjectChangeLearners as EventListener);
+  window.removeEventListener("edunexus:learnerChange", onLearnerChangeLearners as EventListener);
+  window.removeEventListener("learnerChange", onLearnerChangeLearners as EventListener);
 });
 </script>
 
@@ -115,16 +152,14 @@ onMounted(() => {
         <h1>{{ t('learners.title') }}</h1>
         <p>{{ t('learners.context') }}</p>
       </div>
-      <div class="subject-token" v-if="subjectId">
+      <div class="subject-token">
         <span>{{ t('subject.active') }}</span>
-        <strong>{{ learningState.data?.subject?.name ?? '' }}</strong>
+        <strong>{{ subjectName || '—' }}</strong>
       </div>
     </header>
 
-    <!-- Message d'erreur -->
     <p v-if="error" class="error-notice">{{ error }}</p>
 
-    <!-- Formulaire de création -->
     <article class="content-panel create-learner-panel">
       <div class="panel-heading">
         <div>
@@ -138,6 +173,7 @@ onMounted(() => {
           <input
             v-model="newName"
             type="text"
+            maxlength="32"
             :placeholder="t('learners.namePlaceholder')"
             :aria-label="t('learners.namePlaceholder')"
             :disabled="creating"
@@ -148,9 +184,9 @@ onMounted(() => {
           {{ creating ? t('learners.creating') : t('learners.addButton') }}
         </button>
       </form>
+      <p style="margin:8px 0 0;color:var(--faint);font-size:11px">1 à 32 caractères — matière active : {{ subjectName || '—' }}</p>
     </article>
 
-    <!-- Liste des apprenants -->
     <section class="content-panel learner-list">
       <div class="panel-heading">
         <div>
@@ -160,16 +196,13 @@ onMounted(() => {
         <LoaderCircle v-if="loading" :size="18" class="spin" aria-hidden="true" />
       </div>
 
-      <!-- État de chargement -->
       <div v-if="loading" class="loading-inline">
         <LoaderCircle :size="18" class="spin" aria-hidden="true" />
         <span>{{ t('learners.loading') }}</span>
       </div>
 
-      <!-- État vide -->
       <p v-else-if="!learners.length" class="empty-copy">{{ t('learners.empty') }}</p>
 
-      <!-- Cartes apprenants -->
       <div v-else class="learner-grid">
         <article
           v-for="learner in learners"
@@ -202,7 +235,7 @@ onMounted(() => {
               type="button"
               class="text-button danger"
               :aria-label="t('learners.deleteAria', { name: learner.name })"
-              @click="deleteLearner(learner.id)"
+              @click="askDelete(learner)"
             >
               <Trash2 :size="16" aria-hidden="true" />
             </button>
@@ -210,5 +243,23 @@ onMounted(() => {
         </article>
       </div>
     </section>
+
+    <!-- Confirm delete (FR-005) -->
+    <div v-if="showDelete" class="modal-overlay" @click.self="showDelete=false" role="dialog" aria-modal="true">
+      <div class="modal-panel content-panel" style="width:min(420px,92vw);padding:22px">
+        <h3 style="margin:0 0 8px">Supprimer l'apprenant ?</h3>
+        <p style="margin:0 0 12px;color:var(--muted)">« {{ deleteTarget?.name }} » sera supprimé.</p>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button class="secondary-action" @click="showDelete=false">Annuler</button>
+          <button class="primary-action" style="background:#b42318" @click="confirmDelete">Supprimer</button>
+        </div>
+      </div>
+    </div>
   </section>
 </template>
+
+<style scoped>
+.modal-overlay{position:fixed;inset:0;z-index:100;display:grid;place-items:center;background:rgba(15,15,25,.45);backdrop-filter:blur(4px)}
+.modal-panel{border-radius:16px;background:#fff;box-shadow:0 24px 80px rgba(0,0,0,.18)}
+.error-notice{margin:12px 0;color:#b42318;background:#fef3f2;border:1px solid #fecaca;border-radius:10px;padding:8px 12px;font-size:13px}
+</style>

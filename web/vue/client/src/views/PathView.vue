@@ -1,6 +1,6 @@
 <!-- EduNexus UI direction: Atelier de progression — éditeur de parcours avec sidebar, création, drag-and-drop et gestion des étapes. -->
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { useRouter } from "vue-router";
 import {
   ArrowRight,
@@ -22,12 +22,12 @@ import {
 import ProgressRing from "@/components/ProgressRing.vue";
 import StatusPill from "@/components/StatusPill.vue";
 import { useLearningStore } from "@/stores/learning";
-import { tutorApi } from "@/services/api";
+import { tutorApi, invalidateSubjectCaches } from "@/services/api";
 import type { ActivityType } from "@/types";
 import { usePreferences } from "@/stores/preferences";
 
 const { state, hydrate } = useLearningStore();
-const { t } = usePreferences();
+const { t, activeSubjectId, activeLearnerId } = usePreferences();
 const router = useRouter();
 
 /* ── Local types ──────────────────────────────────────────────── */
@@ -87,14 +87,23 @@ const bookGoal = ref("");
 /* Drag state */
 const draggedStepIndex = ref<number | null>(null);
 
-/* Active subject — fall back to API if dashboard hasn't loaded */
-const subjectId = ref("");
+/* Active subject — via preferences store (persisted), sinon API */
+const subjectId = computed(() =>
+  activeSubjectId.value || state.data?.subject.id || localStorage.getItem("edunexus.space") || localStorage.getItem("edunexus:subject") || ""
+);
+const learnerIdRef = computed(() =>
+  activeLearnerId.value || localStorage.getItem("edunexus.learner") || localStorage.getItem("edunexus:learner") || ""
+);
 async function resolveSubjectId() {
-  if (state.data?.subject.id) { subjectId.value = state.data.subject.id; return; }
+  // compat: hydrater le store puis le ref preferences si vide
+  if (subjectId.value) return;
   try {
     const resp = await tutorApi.getSubjects();
-    subjectId.value = resp.active_id || resp.subjects[0]?.id || "";
-  } catch { subjectId.value = ""; }
+    const id = resp.active_id || resp.subjects[0]?.id || "";
+    if (id && !activeSubjectId.value) {
+      try { localStorage.setItem("edunexus.space", id); } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
 }
 
 /* Icon mapping */
@@ -154,25 +163,40 @@ const completedCount = computed(
   () => selectedPath.value?.steps.filter((s) => s.status === "completed").length ?? 0,
 );
 const totalCount = computed(() => selectedPath.value?.steps.length ?? 0);
+// Étape courante : première non terminée (ordre existant inchangé).
+const currentStep = computed(() =>
+  selectedPath.value?.steps.find((s) => s.status !== "completed") ?? null,
+);
 // Cible de remplissage : le parcours sélectionné s'il est vide.
 const fillTarget = computed(() =>
   selectedPath.value && selectedPath.value.steps.length === 0 ? selectedPath.value : null,
 );
 
 /* ── Data loading ─────────────────────────────────────────────── */
+let pathsGen = 0;
 async function loadPaths() {
-  if (!subjectId.value) return;
+  const sid = subjectId.value;
+  const lid = learnerIdRef.value;
+  const gen = ++pathsGen;
+  if (!sid) { paths.value = []; selectedPath.value = null; return; }
+  // No-flash (FR-009): clear immediately on matière switch
+  paths.value = [];
+  selectedPath.value = null;
   loadingPaths.value = true;
   error.value = null;
   try {
-    const data = await tutorApi.getPaths(subjectId.value);
+    const data = lid ? await tutorApi.getPathsFiltered(sid, lid) : await tutorApi.getPaths(sid, lid || undefined);
+    if (gen !== pathsGen) return;
     paths.value = data.paths;
   } catch (e) {
+    if (gen !== pathsGen) return;
     error.value = e instanceof Error ? e.message : "Erreur de chargement";
   } finally {
-    loadingPaths.value = false;
+    if (gen === pathsGen) loadingPaths.value = false;
   }
 }
+function onSubjectChangePath() { invalidateSubjectCaches(); void loadPaths(); }
+function onLearnerChangePath() { invalidateSubjectCaches(); void loadPaths(); }
 
 async function selectPath(pathId: string) {
   loadingPath.value = true;
@@ -310,14 +334,13 @@ async function onDrop(targetIndex: number) {
 
 /* ── Open personal lesson discussion ──────────────────────────── */
 const openingStepId = ref<string | null>(null);
-function activeLearnerId(): string {
+function resolveActiveLearnerId(): string {
+  const v = learnerIdRef.value;
+  if (v) return v;
   try {
-    const v =
-      localStorage.getItem("edunexus.learner") ||
-      localStorage.getItem("edunexus:learner") ||
-      "";
-    if (v) return v;
-  } catch { /* storage unavailable */ }
+    const s = localStorage.getItem("edunexus.learner") || localStorage.getItem("edunexus:learner") || "";
+    if (s) return s;
+  } catch { /* ignore */ }
   return "default";
 }
 async function openLesson(stepId: string) {
@@ -327,7 +350,7 @@ async function openLesson(stepId: string) {
   try {
     const created = (await tutorApi.createLessonDiscussion(
       stepId,
-      activeLearnerId(),
+      resolveActiveLearnerId(),
     )) as unknown as { discussion: { id: string } };
     const discussionId = created?.discussion?.id;
     if (!discussionId) throw new Error(t("path.lessonError"));
@@ -339,11 +362,23 @@ async function openLesson(stepId: string) {
   }
 }
 
-/* ── Init ─────────────────────────────────────────────────────── */
+/* ── Init + watchers matière/apprenant (FR-001/009) ───────────── */
+watch(() => subjectId.value, () => { onSubjectChangePath(); });
+watch(() => learnerIdRef.value, () => { onLearnerChangePath(); });
 onMounted(async () => {
   await hydrate();
   await resolveSubjectId();
   await loadPaths();
+  window.addEventListener("edunexus:subjectChange", onSubjectChangePath as EventListener);
+  window.addEventListener("subjectChange", onSubjectChangePath as EventListener);
+  window.addEventListener("edunexus:learnerChange", onLearnerChangePath as EventListener);
+  window.addEventListener("learnerChange", onLearnerChangePath as EventListener);
+});
+onUnmounted(() => {
+  window.removeEventListener("edunexus:subjectChange", onSubjectChangePath as EventListener);
+  window.removeEventListener("subjectChange", onSubjectChangePath as EventListener);
+  window.removeEventListener("edunexus:learnerChange", onLearnerChangePath as EventListener);
+  window.removeEventListener("learnerChange", onLearnerChangePath as EventListener);
 });
 
 /* ── Generate from books ─────────────────────────────────────── */
@@ -572,6 +607,7 @@ async function generateFromBooks() {
               v-for="(step, index) in selectedPath.steps"
               :key="step.id"
               class="step-row"
+              :class="{ current: currentStep?.id === step.id, done: step.status === 'completed' }"
               draggable="true"
               @dragstart="onDragStart(index, $event)"
               @dragover="onDragOver"
@@ -581,9 +617,9 @@ async function generateFromBooks() {
                 <GripVertical :size="16" aria-hidden="true" />
               </div>
 
-              <div class="step-timeline-node">
+              <div class="step-timeline-node" :aria-label="`${t('dashboard.stepNumber', { current: index + 1, total: selectedPath.steps.length })}`">
                 <Check v-if="step.status === 'completed'" :size="14" aria-hidden="true" />
-                <Circle v-else :size="14" aria-hidden="true" />
+                <span v-else class="step-num">{{ index + 1 }}</span>
               </div>
 
               <button
@@ -630,6 +666,16 @@ async function generateFromBooks() {
                   >
                     <CheckCircle2 :size="14" aria-hidden="true" />
                     {{ t("path.markComplete") }}
+                  </button>
+                  <button
+                    v-if="currentStep?.id === step.id"
+                    type="button"
+                    class="primary-action step-cta-btn"
+                    :disabled="openingStepId === step.id"
+                    @click="openLesson(step.id)"
+                  >
+                    <Play :size="14" aria-hidden="true" />
+                    {{ t("path.open") }}
                   </button>
                   <button
                     class="step-delete-btn"
@@ -958,6 +1004,20 @@ async function generateFromBooks() {
 .step-row:hover .step-timeline-node {
   border-color: #c8cdf1;
   color: var(--indigo);
+}
+.step-num { font-size: 12px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.step-row.done .step-timeline-node { border-color: #b9e9d0; color: var(--green); background: var(--green-soft); }
+.step-row.current { border-color: var(--indigo); background: var(--indigo-soft); box-shadow: 0 8px 22px rgba(79, 70, 229, .12); }
+.step-row.current .step-timeline-node { border-color: var(--indigo); color: #fff; background: var(--indigo); }
+.step-row.current .step-timeline-node .step-num { color: #fff; }
+.step-cta-btn { min-height: 30px; padding: 5px 12px; font-size: 12px; }
+@media (max-width: 800px) {
+  .step-row { gap: 8px; padding: 8px 10px; }
+  .step-timeline-node { width: 24px; height: 24px; }
+  .step-num { font-size: 11px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .step-row, .step-row:active, .step-icon-btn { transition: none; transform: none; }
 }
 .step-icon {
   display: grid;

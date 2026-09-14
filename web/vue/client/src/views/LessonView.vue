@@ -44,7 +44,7 @@ function learnerId(): string {
 /* ── Types ────────────────────────────────────────────────── */
 interface LessonDiscussion { id: string; notion_id?: string; path_step_id?: string; learner_id?: string; subject_id?: string; }
 interface LessonContent { id: string; kind: string; content: string; sources?: Array<{ book_id?: string; book?: string; chapter?: string; confidence?: number }>; confidence?: number; created_at?: string; model?: string | null; fallback?: boolean; validation?: { blocks?: Array<{ index?: unknown; ok?: unknown; error?: unknown }>; checked_at?: string } | null; }
-interface LessonMsg { id: string; role: string; content: string; sources?: unknown[]; created_at?: string; }
+interface LessonMsg { id: string; role: string; content: string; sources?: unknown[]; created_at?: string; thinking?: string | null; thinkMs?: number | null; streaming?: boolean; }
 interface ExerciseQuestion { id: string; type: string; statement: string; options?: string[]; answer?: string; }
 interface ExerciseAttempt { id: string; questions: ExerciseQuestion[]; score?: number; passed?: boolean; per_question?: Array<{ statement?: string; question_id?: string; given?: string; expected?: string; correct?: boolean; explanation?: string }>; correct_count?: number; total?: number; feedback?: string; }
 
@@ -86,6 +86,8 @@ function stopCourseTimer() {
 onUnmounted(() => {
   stopCourseTimer();
   courseAbort?.abort();
+  askAbort?.abort();
+  askRunId++;
 });
 
 /* ── Helpers ──────────────────────────────────────────────── */
@@ -159,6 +161,41 @@ const hasNoSources = computed(() => {
   if (contents.value.length>0 && contents.value.every(c => Number((c as unknown as { confidence?: number }).confidence || 0)===0)) return true;
   return false;
 });
+
+// ── Sources assainies (jamais d'id brut) ───────────────────────────
+// Miroir du fix ask : titre du livre d'abord (champ `book` ou table des
+// livres chargée), puis chapitre seul ; entrée sans titre ni chapitre
+// ignorée. La ligne est masquée quand il ne reste rien d'affichable.
+const bookTitles = ref(new Map<string, string>());
+
+async function loadBookTitles(): Promise<void> {
+  try {
+    const data = await tutorApi.getBooks() as unknown as { books?: Array<{ id?: unknown; title?: unknown }> };
+    const m = new Map<string, string>();
+    for (const b of data.books ?? []) {
+      const id = String(b?.id ?? "");
+      const title = String(b?.title ?? "").trim();
+      if (id && title) m.set(id, title);
+    }
+    bookTitles.value = m;
+  } catch { /* repli : titres du payload, sinon entrées ignorées */ }
+}
+
+interface ContentSource { book_id?: unknown; book?: unknown; chapter?: unknown; }
+
+function sourcesLabel(sources: unknown): string {
+  if (!Array.isArray(sources)) return "";
+  const parts: string[] = [];
+  for (const raw of sources) {
+    const s = (raw ?? {}) as ContentSource;
+    const title = String(s.book ?? "").trim() || bookTitles.value.get(String(s.book_id ?? "")) || "";
+    const chap = String(s.chapter ?? "").trim();
+    if (title) parts.push(title + (chap ? " · " + chap : ""));
+    else if (chap) parts.push(chap);
+    // Sinon : entrée ignorée (jamais d'id brut type chunk affiché).
+  }
+  return parts.join(", ");
+}
 
 /* ── Mini-markdown maison (sans dépendance) ────────────────────────
    SÉCURITÉ : tout texte interpolé passe par escHtml (jamais de HTML brut
@@ -403,6 +440,7 @@ async function loadDiscussion() {
   const id = routeId.value;
   if (!id) { error.value = t("lesson.badId"); loading.value=false; return; }
   const lid = learnerId();
+  void loadBookTitles();
   // Try as discussionId first
   try {
     const payload = await tutorApi.getLessonDiscussion(id) as unknown as { discussion: LessonDiscussion; messages: LessonMsg[]; generated_contents: LessonContent[]; exercise_attempts: ExerciseAttempt[] };
@@ -653,40 +691,167 @@ function scrollThreadToBottom() {
     el?.lastElementChild?.scrollIntoView({ behavior: "smooth", block: "end" });
   });
 }
+// Libellé « Réflexion [pendant Xs] » — Xs mesuré côté client (round-trip),
+// absent pour les messages persistés : simple « Réflexion ».
+function thinkLabel(m: LessonMsg): string {
+  if (typeof m.thinkMs === "number" && m.thinkMs >= 0) {
+    const s = (Math.round(m.thinkMs / 100) / 10).toString().replace(".", ",");
+    return t("lesson.thinkingTime", { s }) as string;
+  }
+  return t("lesson.thinking") as string;
+}
+
+/* ── Composer : stream SSE d'abord, repli one-shot sinon ──────────
+   À l'envoi : bulle assistant vide + ThinkBox ouvert qui se remplit
+   (« Réflexion pendant Xs »), deltas accumulés en markdown incrémental
+   (les fences non fermés se rendent en code, sans casse). À `done` : la
+   réponse est figée + sources (pas de re-sync qui effacerait le thinking).
+   `error`/coupure : erreur honnête puis repli POST classique. */
+let askAbort: AbortController | null = null;
+let askRunId = 0;
+
 async function sendLessonMessage() {
   const text = composerText.value.trim();
   if (!text || !discussionId.value || answering.value || isDeleted.value) return;
   composerText.value = "";
   error.value = null;
   const lid = learnerId();
+  const runId = ++askRunId;
+  askAbort?.abort();
+  askAbort = new AbortController();
   messages.value = [...messages.value, { id: "local-" + Date.now(), role: "user", content: text }];
   scrollThreadToBottom();
   answering.value = true;
+  const t0 = Date.now();
+  try {
+    const streamed = await tryStreamAnswer(text, lid, t0, runId);
+    if (runId !== askRunId) return; // supplanté / démonté : silence
+    if (!streamed) await oneShotAnswer(text, lid, t0);
+  } finally {
+    if (runId === askRunId) {
+      answering.value = false;
+      scrollThreadToBottom();
+    }
+  }
+}
+
+async function tryStreamAnswer(text: string, lid: string, t0: number, runId: number): Promise<boolean> {
+  const streamId = "assistant-stream-" + t0;
+  messages.value = [...messages.value, { id: streamId, role: "assistant", content: "", sources: [], thinking: null, thinkMs: null, streaming: true }];
+  scrollThreadToBottom();
+  const baselineLen = messages.value.length;
+  const patch = (p: Partial<LessonMsg>) => {
+    const i = messages.value.findIndex((m) => m.id === streamId);
+    if (i >= 0) messages.value[i] = { ...messages.value[i], ...p };
+  };
+  const drop = () => { messages.value = messages.value.filter((m) => m.id !== streamId); };
+  const url = tutorApi.askStreamUrl(discussionId.value, lid, text);
+  const body = askAbort ? await openEventStream(url, askAbort.signal) : null;
+  // Pas de stream (404 / non-SSE / réseau / supplanté) ⇒ repli one-shot.
+  if (!body || runId !== askRunId) {
+    if (runId === askRunId) drop();
+    return false;
+  }
+  let answerAcc = "";
+  let thinkAcc = "";
+  let doneThinking: string | null = null;
+  let doneSources: unknown[] = [];
+  let finished = false;
+  let streamError: string | null = null;
+  let lastScroll = 0;
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const fed = feedSSE(buf);
+      buf = fed.rest;
+      for (const ev of fed.events) {
+        if (ev.type === "thinking") {
+          thinkAcc += ev.text;
+          patch({ thinking: thinkAcc, thinkMs: Date.now() - t0 });
+        } else if (ev.type === "delta") {
+          answerAcc += ev.text;
+          patch({ content: answerAcc, thinkMs: Date.now() - t0 });
+        } else if (ev.type === "done") {
+          finished = true;
+          doneThinking = ev.thinking ?? null;
+          doneSources = Array.isArray(ev.sources) ? ev.sources : [];
+        } else if (ev.type === "error") {
+          streamError = ev.message;
+        }
+      }
+      const now = Date.now();
+      if (now - lastScroll > 800) { lastScroll = now; scrollThreadToBottom(); }
+      if (finished || streamError) break;
+    }
+  } catch {
+    // Coupure : gérée ci-dessous (re-sync puis éventuel repli).
+  } finally {
+    try { reader.releaseLock(); } catch { /* ignore */ }
+  }
+  if (runId !== askRunId) return true; // supplanté : ne rien tenter d'autre
+  if (finished) {
+    patch({
+      content: answerAcc,
+      thinking: doneThinking ?? (thinkAcc || null),
+      thinkMs: Date.now() - t0,
+      streaming: false,
+      sources: doneSources,
+    });
+    return true;
+  }
+  if (streamError) {
+    drop();
+    error.value = streamError; // erreur explicite du serveur…
+    return false; // …suivie du repli one-shot
+  }
+  // Coupure sans done : re-sync — si le serveur a persisté une réponse on
+  // l'adopte, sinon repli one-shot (aucun doublon possible : rien de figé).
+  drop();
+  try {
+    const payload = await tutorApi.getLessonDiscussion(discussionId.value) as unknown as { messages: LessonMsg[] };
+    if (runId !== askRunId) return true;
+    if (Array.isArray(payload.messages) && payload.messages.length > baselineLen) {
+      messages.value = payload.messages;
+      return true;
+    }
+  } catch { /* repli ci-dessous */ }
+  return false;
+}
+
+async function oneShotAnswer(text: string, lid: string, t0: number) {
+  // Chemin classique (POST …/ask) : comportement d'origine préservé.
   try {
     const r = await tutorApi.askLessonQuestion(discussionId.value, text, lid);
     const answer = String((r as { answer?: unknown }).answer ?? "");
     const sources = Array.isArray((r as { sources?: unknown }).sources)
       ? (r as { sources?: unknown[] }).sources ?? []
       : [];
+    // Champ thinking branché sans changer le contrat : affiché uniquement
+    // s'il est présent (string non vide), ignoré sinon.
+    const rawThinking = (r as { thinking?: unknown }).thinking;
+    const thinking = typeof rawThinking === "string" && rawThinking.trim() ? rawThinking : null;
     if (answer) {
       messages.value = [
         ...messages.value,
-        { id: "assistant-" + Date.now(), role: "assistant", content: answer, sources },
+        { id: "assistant-" + Date.now(), role: "assistant", content: answer, sources, thinking, thinkMs: thinking ? Date.now() - t0 : null },
       ];
+      error.value = null;
     } else {
       // Empty answer: re-sync from server (messages are persisted there)
       const payload = await tutorApi.getLessonDiscussion(discussionId.value) as unknown as { messages: LessonMsg[] };
       if (Array.isArray(payload.messages)) messages.value = payload.messages;
     }
   } catch (e) {
-    error.value = e instanceof Error ? e.message : t("lesson.askError");
+    if (!error.value) error.value = e instanceof Error ? e.message : t("lesson.askError");
     try {
       const payload = await tutorApi.getLessonDiscussion(discussionId.value) as unknown as { messages: LessonMsg[] };
       if (Array.isArray(payload.messages) && payload.messages.length) messages.value = payload.messages;
     } catch { /* keep optimistic user message */ }
-  } finally {
-    answering.value = false;
-    scrollThreadToBottom();
   }
 }
 
@@ -820,7 +985,7 @@ function goBack() { router.push("/parcours"); }
               </span>
             </div>
             <div class="notebook-output-body" v-html="renderMarkdown(c.content)" @click="onMarkdownClick"></div>
-            <div v-if="c.sources && c.sources.length" class="notebook-output-src">Sources : {{ c.sources.map(s => (s.book_id||s.book||'?') + (s.chapter ? ' · ' + s.chapter : '')).join(', ') }}</div>
+            <div v-if="sourcesLabel(c.sources)" class="notebook-output-src">Sources : {{ sourcesLabel(c.sources) }}</div>
             <div v-if="c.confidence!=null" class="notebook-output-src">Confiance : {{ Number(c.confidence).toFixed(2) }}</div>
             <details v-if="codeCheck(c) && codeCheck(c)!.failures.length" class="code-check-details">
               <summary>{{ t("lesson.codeFailures", { count: codeCheck(c)!.failures.length }) }}</summary>
@@ -864,7 +1029,7 @@ function goBack() { router.push("/parcours"); }
               </span>
             </div>
             <div class="notebook-output-body" v-html="renderMarkdown(c.content)" @click="onMarkdownClick"></div>
-            <div v-if="c.sources && c.sources.length" class="notebook-output-src">Sources : {{ c.sources.map(s => (s.book_id||s.book||'?') + (s.chapter ? ' · ' + s.chapter : '')).join(', ') }}</div>
+            <div v-if="sourcesLabel(c.sources)" class="notebook-output-src">Sources : {{ sourcesLabel(c.sources) }}</div>
             <div v-if="c.confidence!=null" class="notebook-output-src">Confiance : {{ Number(c.confidence).toFixed(2) }}</div>
           </article>
           <div v-if="!summaryContents.length" class="tab-empty">
@@ -962,7 +1127,15 @@ function goBack() { router.push("/parcours"); }
         <div class="lecon-thread" role="log" aria-live="polite" :aria-label="t('lesson.discussion')">
           <div v-if="messages.length || answering" class="thread-list">
             <div v-for="m in messages" :key="m.id" class="msg-row" :class="m.role==='user' ? 'from-student' : 'from-tutor'">
-              <div :class="m.role==='user' ? 'bubble-student' : 'bubble-tutor'">{{ m.content }}</div>
+              <div v-if="m.role==='user'" class="bubble-student">{{ m.content }}</div>
+              <div v-else class="bubble-tutor">
+                <details v-if="m.thinking || m.streaming" class="thinkbox" :open="m.streaming ? true : undefined">
+                  <summary>{{ thinkLabel(m) }}</summary>
+                  <div v-if="m.thinking" class="thinkbox-body">{{ m.thinking }}</div>
+                </details>
+                <span v-if="m.streaming && !m.content && !m.thinking" class="stream-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                <div v-if="m.content" class="bubble-md" v-html="renderMarkdown(m.content)" @click="onMarkdownClick"></div>
+              </div>
             </div>
             <div v-if="answering" class="msg-row from-tutor">
               <div class="bubble-tutor answering"><Loader2 :size="13" class="spin" aria-hidden="true" /> {{ t("lesson.answering") }}</div>
@@ -1015,6 +1188,20 @@ export default { name: "LessonView" };
 @keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
 
 .lecon-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.thinkbox { margin: 0 0 8px; border: 1px dashed var(--line); border-radius: 10px; background: var(--panel-soft); font-size: 12.5px; }
+.thinkbox summary { cursor: pointer; padding: 6px 10px; font-weight: 700; color: var(--muted); list-style: none; display: flex; align-items: center; gap: 6px; }
+.thinkbox summary::-webkit-details-marker { display: none; }
+.thinkbox summary::before { content: "▸"; color: var(--indigo); font-size: 11px; }
+.thinkbox[open] summary::before { content: "▾"; }
+.thinkbox-body { padding: 0 10px 8px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); line-height: 1.55; }
+.bubble-md > div:first-child { margin-top: 0; }
+.stream-dots { display: inline-flex; gap: 4px; padding: 4px 2px; }
+.stream-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--indigo); animation: stream-blink 1s infinite; }
+.stream-dots i:nth-child(2) { animation-delay: .2s; }
+.stream-dots i:nth-child(3) { animation-delay: .4s; }
+@keyframes stream-blink { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .stream-dots i { animation: none; opacity: .7; } }
+@media (prefers-reduced-motion: reduce) { .thinkbox summary::before { content: "•"; } .thinkbox[open] summary::before { content: "•"; } }
 
 .lecon-tabs { display: flex; gap: 6px; flex-wrap: wrap; padding: 4px; border: 1px solid var(--line-soft); border-radius: 12px; background: var(--panel-soft); }
 .lecon-tabs button { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 7px 12px; border-radius: 9px; color: var(--muted); font-size: 13px; font-weight: 750; background: transparent; cursor: pointer; transition: background .15s, color .15s; }
@@ -1136,7 +1323,7 @@ export default { name: "LessonView" };
 .msg-row.from-student { justify-self: end; margin-left: auto; }
 .msg-row.from-tutor { justify-self: start; }
 .bubble-student { padding: 10px 14px; border-radius: 16px 16px 4px 16px; background: linear-gradient(135deg, #eef0ff, #e3e0f8); border: 1px solid #cfcaf1; font-size: 13.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
-.bubble-tutor { padding: 10px 14px; border-radius: 4px 16px 16px 16px; background: #fff; border: 1px solid var(--line); box-shadow: var(--shadow-soft); font-size: 13.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.bubble-tutor { padding: 10px 14px; border-radius: 4px 16px 16px 16px; background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow-soft); font-size: 13.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
 .empty-copy { text-align: center; color: var(--muted); font-size: 13px; padding: 12px; }
 
 .lecon-composer { display: flex; gap: 8px; align-items: flex-end; padding: 12px; border: 1px solid var(--line-soft); border-radius: 14px; background: #fbfcff; }

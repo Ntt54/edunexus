@@ -17,7 +17,8 @@ import type { EngineInfo, ModelInfo, ModelSources, SubjectInfo, LearnerProfile }
 const { state, dismissNotice } = useLearningStore();
 const brandMark = "/manus-storage/edunexus-nexus-mark_e91945cc.png";
 const markUnavailable = ref(false);
-const { t } = usePreferences();
+const { t, activeSubjectId: prefSubjectId, activeLearnerId: prefLearnerId, setActiveSubjectId, setActiveLearnerId } = usePreferences();
+import { invalidateSubjectCaches } from "@/services/api";
 
 // ── Engine badge ──────────────────────────────────────────────────
 const engineLabel = ref("détection…");
@@ -36,11 +37,18 @@ const favModels = ref<string[]>([]);
 
 // ── Subjects ──────────────────────────────────────────────────────
 const subjects = ref<SubjectInfo[]>([]);
-const activeSubjectId = ref("");
+const activeSubjectId = prefSubjectId;
+// ── 011 rename/delete modals (FR-002) ────────────────────────────
+const showRename = ref(false);
+const renameInput = ref("");
+const renameLoading = ref(false);
+const renameError = ref("");
+const showDeleteConfirm = ref(false);
+const deleteTargetName = ref("");
 
 // ── Learners ──────────────────────────────────────────────────────
 const learners = ref<LearnerProfile[]>([]);
-const activeLearnerId = ref("");
+const activeLearnerId = prefLearnerId;
 
 // ── Status ────────────────────────────────────────────────────────
 const statusText = ref("prêt");
@@ -242,15 +250,14 @@ async function loadSubjects() {
   try {
     const data = await tutorApi.getSubjects();
     subjects.value = data.subjects || [];
-    const remembered = localStorage.getItem("edunexus.space");
+    const remembered = prefSubjectId.value || localStorage.getItem("edunexus.space") || localStorage.getItem("edunexus:subject") || "";
     if (subjects.value.some(s => s.id === remembered)) {
-      activeSubjectId.value = remembered!;
+      setActiveSubjectId(remembered);
     } else if (data.active_id && subjects.value.some(s => s.id === data.active_id)) {
-      activeSubjectId.value = data.active_id;
+      setActiveSubjectId(data.active_id);
     } else if (subjects.value.length) {
-      activeSubjectId.value = subjects.value[0].id;
+      setActiveSubjectId(subjects.value[0].id);
     }
-    if (activeSubjectId.value) localStorage.setItem("edunexus.space", activeSubjectId.value);
   } catch {
     subjects.value = [];
   }
@@ -258,8 +265,8 @@ async function loadSubjects() {
 
 function onSubjectChange(event: Event) {
   const value = (event.target as HTMLSelectElement).value;
-  activeSubjectId.value = value;
-  localStorage.setItem("edunexus.space", value);
+  setActiveSubjectId(value);
+  invalidateSubjectCaches();
 }
 
 async function createSubject() {
@@ -272,15 +279,75 @@ async function createSubject() {
   try {
     const created = await tutorApi.createSubject(name.trim());
     await loadSubjects();
-    // La matière créée devient la matière active (sélecteur + persistance ;
-    // les vues scopent déjà leurs appels par subject_id).
-    activeSubjectId.value = created.id;
-    localStorage.setItem("edunexus.space", created.id);
+    setActiveSubjectId(created.id);
+    invalidateSubjectCaches();
     setStatus(t("subject.created", { name: created.name }));
   } catch (e) {
     const st = (e as { status?: number }).status;
     const detail = e instanceof Error ? e.message : "";
     setStatus(st === 409 ? t("subject.exists") : st === 400 ? t("subject.nameEmpty") : detail || t("subject.createFailed"));
+  }
+}
+
+// ── 011 Rename / Delete (FR-002, same UX for Non classé) ──────────
+function openRename() {
+  const cur = subjects.value.find(s => s.id === activeSubjectId.value);
+  renameInput.value = cur?.name || "";
+  renameError.value = "";
+  showRename.value = true;
+}
+async function confirmRename() {
+  const name = renameInput.value.trim();
+  if (!name) { renameError.value = t("subject.nameEmpty"); return; }
+  if (name.length > 64) { renameError.value = "Nom trop long (64 max)"; return; }
+  renameLoading.value = true;
+  renameError.value = "";
+  try {
+    await tutorApi.renameSubject(activeSubjectId.value, name);
+    await loadSubjects();
+    // keep active id same, name updated everywhere via subjects ref + dashboard
+    showRename.value = false;
+    setStatus("Matière renommée : " + name);
+    window.dispatchEvent(new CustomEvent("edunexus:subjects-changed"));
+    invalidateSubjectCaches();
+  } catch (e) {
+    const st = (e as { status?: number }).status;
+    const detail = e instanceof Error ? e.message : "";
+    if (st === 400 || detail.includes("déjà utilisé") || detail.includes("Nom déjà")) renameError.value = t("subject.exists");
+    else if (st === 409) renameError.value = t("subject.exists");
+    else renameError.value = detail || "Renommage impossible";
+  } finally { renameLoading.value = false; }
+}
+function openDelete() {
+  const cur = subjects.value.find(s => s.id === activeSubjectId.value);
+  deleteTargetName.value = cur?.name || "";
+  showDeleteConfirm.value = true;
+}
+async function confirmDelete() {
+  const id = activeSubjectId.value;
+  if (!id) return;
+  try {
+    const res = await tutorApi.deleteSubject(id) as unknown as { deleted: string; fallbackSubjectId?: string | null };
+    showDeleteConfirm.value = false;
+    await loadSubjects();
+    const fallback = (res as unknown as { fallbackSubjectId?: string | null })?.fallbackSubjectId;
+    if (fallback && subjects.value.some(s => s.id === fallback)) {
+      setActiveSubjectId(fallback);
+    } else if (subjects.value.length) {
+      setActiveSubjectId(subjects.value[0].id);
+    } else {
+      setActiveSubjectId("");
+    }
+    invalidateSubjectCaches();
+    setStatus("Matière supprimée");
+    window.dispatchEvent(new CustomEvent("edunexus:subjects-changed"));
+  } catch (e) {
+    const st = (e as { status?: number }).status;
+    const detail = e instanceof Error ? e.message : "";
+    showDeleteConfirm.value = false;
+    if (st === 409) setStatus("Suppression impossible : matière requise");
+    else if (st === 400) setStatus(detail || "Suppression impossible");
+    else setStatus(detail || "Suppression impossible");
   }
 }
 
@@ -294,13 +361,12 @@ async function loadLearners() {
   try {
     const data = await tutorApi.getLearners();
     learners.value = data.learners || [];
-    const remembered = localStorage.getItem("edunexus.learner");
+    const remembered = prefLearnerId.value || localStorage.getItem("edunexus.learner") || localStorage.getItem("edunexus:learner") || "";
     if (learners.value.some(l => l.id === remembered)) {
-      activeLearnerId.value = remembered!;
+      setActiveLearnerId(remembered);
     } else if (learners.value.length) {
-      activeLearnerId.value = learners.value[0].id;
+      setActiveLearnerId(learners.value[0].id);
     }
-    if (activeLearnerId.value) localStorage.setItem("edunexus.learner", activeLearnerId.value);
   } catch {
     learners.value = [];
   }
@@ -309,8 +375,8 @@ async function loadLearners() {
 async function onLearnerChange(event: Event) {
   const lid = (event.target as HTMLSelectElement).value;
   if (!lid) return;
-  activeLearnerId.value = lid;
-  localStorage.setItem("edunexus.learner", lid);
+  setActiveLearnerId(lid);
+  invalidateSubjectCaches();
   try {
     await tutorApi.activateLearner(lid);
     setStatus("Apprenant actif : " + (activeLearnerName.value || "—"));
@@ -337,6 +403,10 @@ function handleSubjectsChanged() {
   // sans polling ; la sélection active est préservée si elle existe.
   loadSubjects();
 }
+function handleModelsChanged() {
+  // Sauvegarde / test Réglages : les sélecteurs suivent le fournisseur.
+  loadModels();
+}
 onMounted(() => {
   favModels.value = loadFavModels();
   loadEngine();
@@ -344,9 +414,11 @@ onMounted(() => {
   loadSubjects();
   loadLearners();
   window.addEventListener("edunexus:subjects-changed", handleSubjectsChanged);
+  window.addEventListener("edunexus:models-changed", handleModelsChanged);
 });
 onUnmounted(() => {
   window.removeEventListener("edunexus:subjects-changed", handleSubjectsChanged);
+  window.removeEventListener("edunexus:models-changed", handleModelsChanged);
 });
 </script>
 
@@ -415,6 +487,26 @@ onUnmounted(() => {
             @click="createSubject"
           >
             <Plus :size="14" aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            class="topbar-icon-btn"
+            title="Renommer la matière"
+            aria-label="Renommer la matière"
+            :disabled="!activeSubjectId"
+            @click="openRename"
+          >
+            ✎
+          </button>
+          <button
+            type="button"
+            class="topbar-icon-btn"
+            title="Supprimer la matière"
+            aria-label="Supprimer la matière"
+            :disabled="!activeSubjectId"
+            @click="openDelete"
+          >
+            🗑
           </button>
         </div>
 
@@ -541,6 +633,30 @@ onUnmounted(() => {
         <RouterView />
       </main>
     </section>
+
+    <!-- 011 Rename modal (FR-002) — même UX pour Non classé -->
+    <div v-if="showRename" class="modal-overlay" @click.self="showRename = false" role="dialog" aria-modal="true" aria-label="Renommer la matière">
+      <div class="modal-panel content-panel" style="width:min(420px,92vw);padding:22px">
+        <h3 style="margin:0 0 8px">Renommer la matière</h3>
+        <p v-if="renameError" style="color:#b42318;font-size:13px;margin:0 0 8px">{{ renameError }}</p>
+        <input v-model="renameInput" type="text" maxlength="64" placeholder="Nouveau nom" style="width:100%;margin-bottom:12px" @keydown.enter="confirmRename" @keydown.escape="showRename=false" />
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button class="secondary-action" @click="showRename=false">Annuler</button>
+          <button class="primary-action" :disabled="renameLoading" @click="confirmRename">{{ renameLoading ? '…' : 'Renommer' }}</button>
+        </div>
+      </div>
+    </div>
+    <!-- 011 Delete confirm (FR-002) — ConfirmDialog-like -->
+    <div v-if="showDeleteConfirm" class="modal-overlay" @click.self="showDeleteConfirm=false" role="dialog" aria-modal="true" aria-label="Supprimer la matière">
+      <div class="modal-panel content-panel" style="width:min(420px,92vw);padding:22px">
+        <h3 style="margin:0 0 8px">Supprimer la matière ?</h3>
+        <p style="margin:0 0 12px;color:var(--muted)">« {{ deleteTargetName }} » sera supprimée. Les documents seront conservés, les parcours liés supprimés. Cette action est irréversible.</p>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button class="secondary-action" @click="showDeleteConfirm=false">Annuler</button>
+          <button class="primary-action" style="background:#b42318" @click="confirmDelete">Supprimer</button>
+        </div>
+      </div>
+    </div>
 
     <Transition name="toast">
       <div v-if="state.notice" class="toast" role="status" aria-live="polite">
@@ -861,4 +977,6 @@ onUnmounted(() => {
     display: none;
   }
 }
+.modal-overlay{position:fixed;inset:0;z-index:100;display:grid;place-items:center;background:rgba(15,15,25,.45);backdrop-filter:blur(4px)}
+.modal-panel{border-radius:16px;background:#fff;box-shadow:0 24px 80px rgba(0,0,0,.18)}
 </style>

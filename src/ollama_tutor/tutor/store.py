@@ -1307,21 +1307,43 @@ class LibraryStore:
 
     def rename_subject(self, subject_id: str, name: str) -> Subject:
         if not isinstance(name, str) or not name.strip():
-            raise ValueError("Subject name must be a non-empty string")
+            raise ValueError("Nom requis")
         name = name.strip()
         if "<" in name or ">" in name:
             raise ValueError("Caractères <> interdits")
-        if len(name) > _SUBJECT_NAME_MAX:
-            raise ValueError(
-                f"Subject name exceeds {_SUBJECT_NAME_MAX} chars: {len(name)}"
-            )
+        if len(name) > 64:
+            raise ValueError("Nom déjà utilisé")
         subject = self._get_subject(subject_id)  # KeyError if unknown
-        clash = self._conn.execute(
-            "SELECT id FROM subjects WHERE name = ? AND id != ?",
-            (name, subject_id),
+        # Per-learner uniqueness, case-insensitive (Q2, FR-002, FR-008)
+        row = self._conn.execute(
+            "SELECT learner_id FROM subjects WHERE id = ?", (subject_id,)
         ).fetchone()
+        learner_id = row["learner_id"] if row is not None else None
+        # Normalize: empty string treated as NULL
+        if learner_id == "":
+            learner_id = None
+        if learner_id is not None:
+            clash = self._conn.execute(
+                "SELECT id FROM subjects WHERE name = ? COLLATE NOCASE AND id != ? AND learner_id = ?",
+                (name, subject_id, learner_id),
+            ).fetchone()
+        else:
+            clash = self._conn.execute(
+                "SELECT id FROM subjects WHERE name = ? COLLATE NOCASE AND id != ? AND (learner_id IS NULL OR learner_id = '')",
+                (name, subject_id),
+            ).fetchone()
+            if clash is None:
+                # Global fallback for DBs with UNIQUE(name) without learner scope
+                tmp = self._conn.execute(
+                    "SELECT id, learner_id FROM subjects WHERE name = ? COLLATE NOCASE AND id != ?",
+                    (name, subject_id),
+                ).fetchone()
+                if tmp is not None:
+                    other_learner = tmp["learner_id"]
+                    if other_learner in (None, ""):
+                        clash = tmp
         if clash is not None:
-            raise ValueError(f"Subject already exists: {name}")
+            raise ValueError("Nom déjà utilisé")
         self._conn.execute(
             "UPDATE subjects SET name = ? WHERE id = ?", (name, subject_id)
         )
@@ -3747,8 +3769,8 @@ class LibraryStore:
     # Learning paths (Feature 006 — adaptive learning)
     # ------------------------------------------------------------------
 
-    def create_learning_path(self, subject_id: str, title: str, description: str = "") -> LearningPath:
-        """Create a new learning path for a subject."""
+    def create_learning_path(self, subject_id: str, title: str, description: str = "", learner_id: str | None = None) -> LearningPath:
+        """Create a new learning path for a subject, optionally scoped to a learner (couple)."""
         path = LearningPath(
             id=_uid(),
             subject_id=subject_id,
@@ -3757,11 +3779,20 @@ class LibraryStore:
             created_at=_now_iso(),
             updated_at=_now_iso(),
         )
-        self._conn.execute(
-            "INSERT INTO learning_paths (id, subject_id, title, description, status, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (path.id, path.subject_id, path.title, path.description, path.status, path.created_at, path.updated_at),
-        )
+        # Store learner_id when column exists (migration 008 added it)
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(learning_paths)")}
+        if "learner_id" in cols:
+            self._conn.execute(
+                "INSERT INTO learning_paths (id, subject_id, learner_id, title, description, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (path.id, path.subject_id, learner_id, path.title, path.description, path.status, path.created_at, path.updated_at),
+            )
+        else:
+            self._conn.execute(
+                "INSERT INTO learning_paths (id, subject_id, title, description, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (path.id, path.subject_id, path.title, path.description, path.status, path.created_at, path.updated_at),
+            )
         self._conn.commit()
         return path
 
@@ -3769,10 +3800,23 @@ class LibraryStore:
         row = self._conn.execute("SELECT * FROM learning_paths WHERE id = ?", (path_id,)).fetchone()
         return LearningPath.from_dict(dict(row)) if row is not None else None
 
-    def list_learning_paths(self, subject_id: str) -> list[LearningPath]:
-        rows = self._conn.execute(
-            "SELECT * FROM learning_paths WHERE subject_id = ? ORDER BY created_at DESC", (subject_id,)
-        ).fetchall()
+    def list_learning_paths(self, subject_id: str, learner_id: str | None = None) -> list[LearningPath]:
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(learning_paths)")}
+        if learner_id is not None and "learner_id" in cols:
+            # Backward compat: legacy paths with NULL learner_id are visible for any learner
+            # New paths are strictly isolated by couple; the OR clause keeps old data accessible
+            rows = self._conn.execute(
+                "SELECT * FROM learning_paths WHERE subject_id = ? AND (learner_id = ? OR learner_id IS NULL OR learner_id = '') ORDER BY created_at DESC",
+                (subject_id, learner_id),
+            ).fetchall()
+        elif learner_id is not None and "learner_id" not in cols:
+            rows = self._conn.execute(
+                "SELECT * FROM learning_paths WHERE subject_id = ? ORDER BY created_at DESC", (subject_id,)
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM learning_paths WHERE subject_id = ? ORDER BY created_at DESC", (subject_id,)
+            ).fetchall()
         return [LearningPath.from_dict(dict(r)) for r in rows]
 
     def update_learning_path(self, path_id: str, *, title: str | None = None, description: str | None = None, status: str | None = None) -> None:
@@ -4032,6 +4076,26 @@ class LibraryStore:
             "DELETE FROM learner_profiles WHERE id = ?", (learner_id,)
         )
         self._conn.commit()
+
+    def list_learners_by_subject(self, subject_id: str) -> list[LearnerProfile]:
+        """Learners having at least one (subject_id, learner_id) couple data (Q3=B, FR-005).
+
+        Derived via EXISTS on learning_paths OR lesson_discussions.
+        """
+        # Ensure tables exist before querying (migration may not have run for learner_id cols)
+        rows = self._conn.execute(
+            """
+            SELECT lp.* FROM learner_profiles lp
+            WHERE EXISTS (
+                SELECT 1 FROM learning_paths path WHERE path.subject_id = ? AND path.learner_id = lp.id
+            ) OR EXISTS (
+                SELECT 1 FROM lesson_discussions disc WHERE disc.subject_id = ? AND disc.learner_id = lp.id
+            )
+            ORDER BY lp.created_at
+            """,
+            (subject_id, subject_id),
+        ).fetchall()
+        return [LearnerProfile.from_dict(dict(r)) for r in rows]
 
     # --- Subject profiles (US1) ---
 

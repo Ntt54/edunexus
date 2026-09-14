@@ -34,5 +34,12 @@ export const router = createRouter({
     { path: "/capture", name: "capture", component: CaptureView },
     { path: "/profil", name: "profile", component: ProfileView },
     { path: "/apprenants", name: "learners", component: LearnersView },
+    // Explorer & Leçon — manquants (migration totale tutor.html → Vue)
+    { path: "/explorer", name: "explorer", component: () => import("@/views/ExplorerView.vue") },
+    { path: "/lecon/:id", name: "lecon", component: () => import("@/views/LessonView.vue"), props: true },
+    // Rétro-compat hash aliases
+    { path: "/conversations", redirect: "/tuteur" },
+    { path: "/bibliotheque", redirect: "/sources" },
+    { path: "/apprentissage", redirect: "/reviser" },
   ],
 });

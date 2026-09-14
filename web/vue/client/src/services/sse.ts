@@ -1,9 +1,12 @@
 /**
- * Minimal SSE incremental reader (no dependencies) for the future course
- * stream contract:
+ * Minimal SSE incremental reader (no dependencies) for the lesson stream
+ * contracts:
  *   GET /api/tutor/lesson-discussions/{id}/course/stream?learner_id=…
  *   → `text/event-stream`, `data: {"delta":"…"}` … then
  *     `data: {"done":true,"fallback":bool}` or `data: {"error":"…"}`.
+ *   GET /api/tutor/lesson-discussions/{id}/ask/stream?learner_id=…&question=…
+ *   → idem plus `data: {"thinking":"…"}`* (bloque Réflexion progressif)
+ *     et un `done` enrichi (`thinking`, `sources`).
  *
  * `openEventStream` resolves the contract strictly: any non-2xx status,
  * non-SSE content-type or missing body yields `null` so callers fall back
@@ -12,7 +15,8 @@
 
 export type SSEStreamEvent =
   | { type: "delta"; text: string }
-  | { type: "done"; fallback: boolean }
+  | { type: "thinking"; text: string }
+  | { type: "done"; fallback: boolean; thinking?: string | null; sources?: unknown[] }
   | { type: "error"; message: string };
 
 export interface SSEFeed {
@@ -42,8 +46,15 @@ export function feedSSE(buffer: string): SSEFeed {
     const obj = data as Record<string, unknown>;
     if (typeof obj.delta === "string" && obj.delta) {
       events.push({ type: "delta", text: obj.delta });
+    } else if (typeof obj.thinking === "string" && obj.thinking && obj.done !== true) {
+      events.push({ type: "thinking", text: obj.thinking });
     } else if (obj.done === true) {
-      events.push({ type: "done", fallback: obj.fallback === true });
+      events.push({
+        type: "done",
+        fallback: obj.fallback === true,
+        thinking: typeof obj.thinking === "string" ? obj.thinking : null,
+        sources: Array.isArray(obj.sources) ? obj.sources : [],
+      });
     } else if (typeof obj.error === "string" && obj.error) {
       events.push({ type: "error", message: obj.error });
     }

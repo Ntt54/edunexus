@@ -56,7 +56,7 @@ const statusType = ref<"ok" | "error" | "">("");
 
 // Connection test
 const testingConnection = ref(false);
-const connectionResult = ref<{ ok: boolean; message: string } | null>(null);
+const connectionResult = ref<{ ok: boolean; message: string; models?: string[] } | null>(null);
 
 // Nightly status
 const nightlyStatus = ref("");
@@ -64,6 +64,9 @@ const nightlyLoading = ref(false);
 
 // Maintenance
 const maintenanceRunning = ref(false);
+
+// API key placeholder (masked) — never show raw key
+const llmApiKeyPlaceholder = ref("sk-…");
 
 // Restart
 const restarting = ref(false);
@@ -90,7 +93,17 @@ onMounted(async () => {
     tutor.top_k = (tt.top_k as number) ?? null;
     tutor.llm_provider = (tt.llm_provider as string) || "ollama";
     tutor.llm_base_url = (tt.llm_base_url as string) || "";
-    tutor.llm_api_key = (tt.llm_api_key as string) || "";
+    // Ne jamais pré-remplir la clé brute : champ vide + placeholder masqué
+    tutor.llm_api_key = "";
+    if (tt.has_llm_api_key && tt.llm_api_key_masked) {
+      llmApiKeyPlaceholder.value = tt.llm_api_key_masked as string;
+    } else if (tt.llm_api_key && String(tt.llm_api_key).includes("****")) {
+      llmApiKeyPlaceholder.value = tt.llm_api_key as string;
+    } else if (tt.llm_api_key_masked) {
+      llmApiKeyPlaceholder.value = tt.llm_api_key_masked as string;
+    } else {
+      llmApiKeyPlaceholder.value = "sk-…";
+    }
     tutor.embed_batch_size = (tt.embed_batch_size as number) ?? null;
     tutor.max_parallel_embed = (tt.max_parallel_embed as number) ?? null;
     tutor.nightly_enabled = !!tt.nightly_enabled;
@@ -152,7 +165,7 @@ async function saveAllSettings() {
       top_k: tutor.top_k,
       llm_provider: tutor.llm_provider,
       llm_base_url: tutor.llm_base_url,
-      llm_api_key: tutor.llm_api_key,
+      llm_api_key: tutor.llm_api_key && tutor.llm_api_key.trim() ? tutor.llm_api_key.trim() : null,
       embed_batch_size: tutor.embed_batch_size,
       max_parallel_embed: tutor.max_parallel_embed,
       nightly_enabled: tutor.nightly_enabled,
@@ -166,6 +179,10 @@ async function saveAllSettings() {
     statusMessage.value = "✓ Enregistré";
     statusType.value = "ok";
     saved.value = true;
+    // Les listes de modèles (sélecteurs topbar) suivent le fournisseur
+    // configuré : rechargement immédiat, sans recharger la page.
+    notifyModelsChanged();
+    statusMessage.value = "✓ Enregistré — " + t("settings.modelsReloaded");
     setTimeout(() => {
       saved.value = false;
       statusMessage.value = "";
@@ -179,6 +196,11 @@ async function saveAllSettings() {
 }
 
 /* ── Test connection ─────────────────────────────────────────────── */
+function notifyModelsChanged() {
+  // Les sélecteurs de modèles (AppShell) se rechargent, sans polling.
+  window.dispatchEvent(new CustomEvent("edunexus:models-changed"));
+}
+
 async function testConnection() {
   testingConnection.value = true;
   connectionResult.value = null;
@@ -190,6 +212,13 @@ async function testConnection() {
   } finally {
     testingConnection.value = false;
   }
+}
+
+async function useTestedModels() {
+  // Recharge les listes depuis le fournisseur testé (config enregistrée).
+  notifyModelsChanged();
+  statusMessage.value = "✓ " + t("settings.modelsReloaded");
+  statusType.value = "ok";
 }
 
 /* ── Maintenance ─────────────────────────────────────────────────── */
@@ -278,7 +307,7 @@ async function restartServer() {
                 <input
                   v-model="tutor.llm_api_key"
                   type="password"
-                  placeholder="sk-…"
+                  :placeholder="llmApiKeyPlaceholder"
                 />
               </label>
             </div>
@@ -299,7 +328,16 @@ async function restartServer() {
               >
                 {{ connectionResult.ok ? '✓' : '✗' }} {{ connectionResult.message }}
               </span>
+              <button
+                v-if="connectionResult?.ok && (connectionResult.models?.length ?? 0) > 0"
+                type="button"
+                class="btn btn-sm"
+                @click="useTestedModels"
+              >
+                {{ t('settings.useTestedModels') }} ({{ t('settings.modelsFound', { count: connectionResult.models?.length ?? 0 }) }})
+              </button>
             </div>
+            <p style="margin: 6px 0 0; color: var(--muted); font-size: 12px;">{{ t('settings.testSavedOnly') }}</p>
           </div>
 
           <!-- ═══════════════ Section 2: Paramètres d'inférence ═══════════════ -->

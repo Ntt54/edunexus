@@ -28,12 +28,51 @@ class LearnerService:
     def create(self, name: str, avatar: str = "") -> dict[str, Any]:
         name = name.strip()
         if not name:
-            raise ValueError("Learner name must be non-empty")
+            raise ValueError("Nom requis")
+        if len(name) > 32:
+            raise ValueError("Nom trop long")
+        # Uniqueness case-insensitive (FR-008)
+        if any(l.name.lower() == name.lower() for l in self.store.list_learners()):
+            raise ValueError("Nom déjà utilisé")
         learner = self.store.create_learner(name, avatar=avatar)
         return learner.to_dict()
 
     def list(self) -> dict[str, Any]:
         return {"learners": [l.to_dict() for l in self.store.list_learners()]}
+
+    def list_filtered(self, subject_id: str | None = None) -> dict[str, Any]:
+        """List learners filtered by subject via existence of couple (subject_id, learner_id).
+
+        Q3=B: learners for a matière are those with at least one learning_path
+        or lesson_discussion for that (subject_id, learner_id). Without subject_id,
+        returns all learners (compat).
+        """
+        if not subject_id:
+            return self.list()
+        # Delegate to store helper if present, else compute via SQL here.
+        try:
+            learners = self.store.list_learners_by_subject(subject_id)  # type: ignore[attr-defined]
+            return {"learners": [l.to_dict() for l in learners]}
+        except Exception:
+            # Fallback inline query
+            cur = self.store._conn  # type: ignore[attr-defined]
+            # Use EXISTS via UNION distinct learner_ids
+            rows = cur.execute(
+                """
+                SELECT DISTINCT lp.id as id, lp.name as name, lp.avatar as avatar, lp.created_at as created_at, lp.updated_at as updated_at
+                FROM learner_profiles lp
+                WHERE EXISTS (
+                    SELECT 1 FROM learning_paths path WHERE path.subject_id = ? AND path.learner_id = lp.id
+                    UNION
+                    SELECT 1 FROM lesson_discussions disc WHERE disc.subject_id = ? AND disc.learner_id = lp.id
+                )
+                ORDER BY lp.created_at
+                """,
+                (subject_id, subject_id),
+            ).fetchall()
+            from .models import LearnerProfile as _LP
+            out = [_LP.from_dict(dict(r)).to_dict() for r in rows]
+            return {"learners": out}
 
     def get(self, learner_id: str) -> dict[str, Any]:
         learner = self.store.get_learner(learner_id)

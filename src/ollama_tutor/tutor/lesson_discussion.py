@@ -498,25 +498,96 @@ class LessonDiscussionService:
 
         notion = self._resolve_notion(disc)
         # Try the sync LLM hook first (short targeted answer grounded in the
-        # filtered excerpts); on failure/None ONLY, keep the deterministic
-        # echo as the offline fallback (existing format preserved).
-        answer = self._try_llm_text(
+        # filtered excerpts, plus provider thinking when supplied); on
+        # failure/None ONLY, keep the deterministic echo as the offline
+        # fallback (existing format preserved, thinking "").
+        answer, thinking = self._try_llm_text_with_thinking(
             "lesson_answer", notion, chunks, question=question.strip()
         )
         is_fallback = False
         if not answer:
             is_fallback = True
+            thinking = ""
             answer = f"Réponse sur « {notion} » : {question.strip()}"
             if sources:
                 # Readable source (book title via store), never a raw id.
                 source_title = self._book_title(sources[0].book_id)
                 if source_title:
                     answer += f"\n\nSource : {source_title}"
+        if not isinstance(thinking, str):
+            thinking = ""
         self.store.add_lesson_message(discussion_id, "assistant", answer, sources=sources)
         return {
             "answer": answer,
             "sources": [s.to_dict() for s in sources],
             "fallback": is_fallback,
+            "thinking": thinking,
+        }
+
+    def iter_ask_tokens(
+        self, discussion_id: str, question: str, learner_id: str | None = None
+    ):
+        """Sync generator yielding front-ready SSE dicts for a lesson ask.
+
+        Order: ``{"thinking": ...}``* (when supplied), ``{"delta": ...}``*,
+        then ``{"done": {"done": True, "fallback": False, ...}}``. Provider
+        failure yields ``{"error": ...}`` (explicit, never silent) and
+        persists nothing — like :meth:`stream_course`. Invalid discussion
+        / learner / question also yields ``{"error"}`` (the route runs its
+        404/403/400 pre-flight first). Persists user + assistant messages
+        exactly like :meth:`ask_notion` on success. Sync generator — never
+        touches asyncio, zero fastapi in tutor/.
+        """
+        disc = self.store.get_lesson_discussion(discussion_id)
+        if disc is None:
+            yield {"error": "Discussion inconnue"}
+            return
+        if learner_id is not None and disc.learner_id != learner_id:
+            yield {"error": "learner_id mismatch"}
+            return
+        if not (question or "").strip():
+            yield {"error": "question requise"}
+            return
+        question = question.strip()
+        keywords = self._notion_keywords(disc.path_step_id)
+        chunks = self._filtered_chunks(disc.subject_id, keywords)
+        sources = self._sources_from_chunks(chunks)
+        notion = self._resolve_notion(disc)
+        self.store.add_lesson_message(discussion_id, "user", question, sources=[])
+        hook: Any = (
+            getattr(self.tutor_service, "generate_lesson_text_stream", None)
+            if self.tutor_service is not None
+            else None
+        )
+        if not callable(hook):
+            yield {"error": "LLM indisponible pour la réponse"}
+            return
+        excerpts = [(c.get("text") or "")[:500] for c in chunks[:6]]
+        parts: list[str] = []
+        thinkings: list[str] = []
+        try:
+            for kind, text in hook("lesson_answer", notion, excerpts, question=question):
+                if kind == "thinking":
+                    if isinstance(text, str) and text.strip():
+                        thinkings.append(text)
+                        yield {"thinking": text}
+                elif kind == "token":
+                    if isinstance(text, str) and text:
+                        parts.append(text)
+                        yield {"delta": text}
+        except Exception as exc:
+            yield {"error": str(exc) or "Génération de la réponse impossible"}
+            return
+        answer = "".join(parts)
+        if not answer.strip():
+            yield {"error": "Réponse vide du modèle"}
+            return
+        self.store.add_lesson_message(discussion_id, "assistant", answer, sources=sources)
+        yield {
+            "done": True,
+            "fallback": False,
+            "thinking": "".join(thinkings),
+            "sources": [s.to_dict() for s in sources],
         }
 
     # ------------------------------------------------------------------
@@ -825,6 +896,57 @@ class LessonDiscussionService:
         if isinstance(result, str) and result.strip():
             return result
         return None
+
+    def _try_llm_text_with_thinking(
+        self,
+        kind: str,
+        notion: str,
+        chunks: list[dict[str, Any]],
+        question: str | None = None,
+    ) -> tuple[str | None, str]:
+        """Best-effort sync LLM call returning ``(text, thinking)``.
+
+        Same hook as :meth:`_try_llm_text` but requests provider reasoning
+        via ``return_thinking=True``. Hooks ignoring that kwarg (TypeError)
+        fall back to the plain call with ``""`` thinking. Any failure →
+        ``(None, "")`` (caller uses the honest offline fallback).
+        """
+        if self.tutor_service is None:
+            return None, ""
+        fn = getattr(self.tutor_service, "generate_lesson_text", None)
+        if not callable(fn):
+            return None, ""
+        try:
+            excerpts = [(c.get("text") or "")[:500] for c in chunks[:6]]
+            if question is None:
+                result = fn(kind, notion, excerpts, return_thinking=True)
+            else:
+                result = fn(kind, notion, excerpts, question=question, return_thinking=True)
+        except TypeError:
+            # Legacy/custom hook without the kwarg: plain call, no thinking.
+            try:
+                plain_excerpts = [(c.get("text") or "")[:500] for c in chunks[:6]]
+                if question is None:
+                    result = fn(kind, notion, plain_excerpts)
+                else:
+                    result = fn(kind, notion, plain_excerpts, question=question)
+            except Exception:
+                return None, ""
+            if isinstance(result, str) and result.strip():
+                return result, ""
+            if isinstance(result, tuple) and result and isinstance(result[0], str) and result[0].strip():
+                return result[0], ""
+            return None, ""
+        except Exception:
+            return None, ""
+        if isinstance(result, tuple) and len(result) >= 1:
+            text, thinking = result[0], (result[1] if len(result) > 1 else "")
+            if isinstance(text, str) and text.strip():
+                return text, (thinking if isinstance(thinking, str) else "")
+            return None, ""
+        if isinstance(result, str) and result.strip():
+            return result, ""
+        return None, ""
 
     def _try_llm_course(self, notion: str, chunks: list[dict[str, Any]]) -> str | None:
         # Best-effort sync LLM call if tutor_service exposes the sync hook.

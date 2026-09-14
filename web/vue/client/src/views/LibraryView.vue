@@ -19,7 +19,8 @@ import { useLearningStore } from "@/stores/learning";
 import { usePreferences } from "@/stores/preferences";
 
 const { state, toggleQueue } = useLearningStore();
-const { t, locale } = usePreferences();
+const { t, locale, activeSubjectId, showAllSources, setShowAllSources } = usePreferences();
+import { invalidateSubjectCaches } from "@/services/api";
 
 // ── State ──────────────────────────────────────────────────────
 const categories = ref<LibraryCategory[]>([]);
@@ -101,6 +102,15 @@ function catsOf(bookId: string): number[] {
   return bookCategories.value.get(bookId) ?? [];
 }
 
+// ── 011 · Toggle "Toutes" persistant + filtrage par matière ───────
+const activeLibrarySubjectId = computed(() => activeSubjectId.value || localStorage.getItem("edunexus.space") || localStorage.getItem("edunexus:subject") || "");
+function onToggleAll(checked: boolean) {
+  setShowAllSources(checked);
+  invalidateSubjectCaches();
+  void refreshBooks();
+}
+function onLibrarySubjectChange() { if (!showAllSources.value) { invalidateSubjectCaches(); void refreshBooks(); } }
+
 // ── Data loading ───────────────────────────────────────────────
 // Swap atomique anti-clignotement : on construit une Map LOCALE puis on
 // l'assigne d'un bloc. Un compteur de génération ignore les réponses
@@ -122,19 +132,32 @@ async function loadAll() {
     queue.value = queueRes;
     await refreshJobs();
 
-    // Load subjects and books
+    // Load subjects and books (filtrée par défaut par matière active, toggle Toutes)
     try {
       const subjectsRes = await tutorApi.getSubjects();
       if (gen !== booksGeneration) return;
       const nextSubjects = subjectsRes.subjects ?? [];
       const next = new Map<string, SourceBook[]>();
-      for (const sub of nextSubjects) {
-        const booksRes = await tutorApi.getBooks(sub.name).catch(() => ({ books: [] as SourceBook[] }));
+      const sid = activeLibrarySubjectId.value;
+      if (showAllSources.value) {
+        // Toutes : charge chaque domaine (compat historique) + tous sans filtre
+        for (const sub of nextSubjects) {
+          const booksRes = await tutorApi.getBooksFiltered(sub.id, false).catch(() => tutorApi.getBooks(sub.name).catch(() => ({ books: [] as SourceBook[] })));
+          if (gen !== booksGeneration) return;
+          next.set(sub.id, (booksRes as { books: SourceBook[] }).books ?? []);
+        }
+      } else if (sid) {
+        const booksRes = await tutorApi.getBooksFiltered(sid, false).catch(() => ({ books: [] as SourceBook[] }));
         if (gen !== booksGeneration) return;
-        next.set(sub.id, booksRes.books ?? []);
+        next.set(sid, (booksRes as { books: SourceBook[] }).books ?? []);
+        // keep other subjects empty (filtered out) but ensure map has entry for active only
+      } else if (nextSubjects.length) {
+        const booksRes = await tutorApi.getBooksFiltered(nextSubjects[0].id, false).catch(() => ({ books: [] as SourceBook[] }));
+        if (gen !== booksGeneration) return;
+        next.set(nextSubjects[0].id, (booksRes as { books: SourceBook[] }).books ?? []);
       }
-      // Tous les livres sans filtre : base du calcul des orphelins.
-      const unfiltered = (await tutorApi.getBooks().catch(() => ({ books: [] as SourceBook[] }))).books ?? [];
+      // Tous les livres sans filtre : base du calcul des orphelins (toujours global)
+      const unfiltered = (await tutorApi.getBooksFiltered(null, true).catch(() => tutorApi.getBooks().catch(() => ({ books: [] as SourceBook[] })))).books ?? [];
       if (gen !== booksGeneration) return;
       subjects.value = nextSubjects;
       booksBySubject.value = next;
@@ -279,15 +302,24 @@ async function refreshBooks() {
     const subjectsRes = await tutorApi.getSubjects();
     if (gen !== booksGeneration) return;
     const nextSubjects = subjectsRes.subjects ?? [];
-    // Reconstruction complète dans une Map LOCALE : un domaine supprimé
-    // disparaît de la liste, sans jamais exposer un état vide intermédiaire.
     const next = new Map<string, SourceBook[]>();
-    for (const sub of nextSubjects) {
-      const booksRes = await tutorApi.getBooks(sub.name).catch(() => ({ books: [] as SourceBook[] }));
+    const sid = activeLibrarySubjectId.value;
+    if (showAllSources.value) {
+      for (const sub of nextSubjects) {
+        const booksRes = await tutorApi.getBooksFiltered(sub.id, false).catch(() => tutorApi.getBooks(sub.name).catch(() => ({ books: [] as SourceBook[] })));
+        if (gen !== booksGeneration) return;
+        next.set(sub.id, (booksRes as { books: SourceBook[] }).books ?? []);
+      }
+    } else if (sid) {
+      const booksRes = await tutorApi.getBooksFiltered(sid, false).catch(() => ({ books: [] as SourceBook[] }));
       if (gen !== booksGeneration) return;
-      next.set(sub.id, booksRes.books ?? []);
+      next.set(sid, (booksRes as { books: SourceBook[] }).books ?? []);
+    } else if (nextSubjects.length) {
+      const booksRes = await tutorApi.getBooksFiltered(nextSubjects[0].id, false).catch(() => ({ books: [] as SourceBook[] }));
+      if (gen !== booksGeneration) return;
+      next.set(nextSubjects[0].id, (booksRes as { books: SourceBook[] }).books ?? []);
     }
-    const unfiltered = (await tutorApi.getBooks().catch(() => ({ books: [] as SourceBook[] }))).books ?? [];
+    const unfiltered = (await tutorApi.getBooksFiltered(null, true).catch(() => tutorApi.getBooks().catch(() => ({ books: [] as SourceBook[] })))).books ?? [];
     if (gen !== booksGeneration) return;
     subjects.value = nextSubjects;
     booksBySubject.value = next;
@@ -469,11 +501,17 @@ onMounted(() => {
   loadAll().then(() => {
     if (hasActiveWork()) startPolling();
   });
+  window.addEventListener("edunexus:subjectChange", onLibrarySubjectChange as EventListener);
+  window.addEventListener("subjectChange", onLibrarySubjectChange as EventListener);
 });
 onUnmounted(() => {
   stopPolling();
   clearOutcome();
+  window.removeEventListener("edunexus:subjectChange", onLibrarySubjectChange as EventListener);
+  window.removeEventListener("subjectChange", onLibrarySubjectChange as EventListener);
 });
+watch(() => activeLibrarySubjectId.value, () => { if (!showAllSources.value) void refreshBooks(); });
+watch(() => showAllSources.value, () => { void refreshBooks(); });
 
 // Start polling when queue becomes active
 watch(
@@ -831,6 +869,10 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
     <section class="content-panel lib-toolbar">
       <div class="lib-head-tools">
         <span class="count-chip">{{ t('library.documents', { count: selectedBooksCount }) }}</span>
+        <label class="ghost-btn" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" :checked="showAllSources" @change="onToggleAll(($event.target as HTMLInputElement).checked)" />
+          Toutes
+        </label>
         <button type="button" class="primary-action" @click="showImport = !showImport">
           <FolderPlus :size="16" aria-hidden="true" />
           {{ t('library.add') }}

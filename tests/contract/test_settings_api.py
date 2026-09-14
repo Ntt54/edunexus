@@ -6,6 +6,7 @@ réglages pédagogiques, persistance immédiate et inter-restarts.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import httpx
@@ -52,9 +53,14 @@ def test_get_settings_shape(client):
     assert data["tutor"]["nightly_only_on_ac"] is True
     assert data["tutor"]["nightly_max_runtime_minutes"] == 420
     assert data["tutor"]["nightly_prepare_enabled"] is False
+    # llm_api_key ne doit plus exposer la clé brute — masquée + has_*
+    assert data["tutor"]["llm_api_key"] == ""
+    assert data["tutor"]["llm_api_key_masked"] == ""
+    assert data["tutor"]["has_llm_api_key"] is False
     assert set(data["tutor"]) == {
         "think", "socratic", "level", "top_k",
         "llm_provider", "llm_base_url", "llm_api_key",
+        "llm_api_key_masked", "has_llm_api_key",
         "embed_batch_size", "max_parallel_embed",
         "nightly_enabled", "nightly_start_at", "nightly_stop_at",
         "nightly_only_on_ac", "nightly_max_runtime_minutes",

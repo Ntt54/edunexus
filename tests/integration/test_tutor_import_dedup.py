@@ -24,12 +24,28 @@ def _make_counting_embed_transport(dim: int = 4):
     state = {"calls": 0}
 
     async def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        inputs = body.get("input", [])
-        n = len(inputs)
-        state["calls"] += 1
-        vecs = [[float((i * 3 + j) % 5) / 5 for j in range(dim)] for i in range(n)]
-        return httpx.Response(200, json={"embeddings": vecs}, request=request)
+        # Only count embedding calls; classify may issue chat requests which
+        # should not inflate the embed counter. Provide a minimal chat NDJSON
+        # response so auto-classify best-effort succeeds without extra embed
+        # batches.
+        url = str(request.url)
+        if "/api/embed" in url or "api/embed" in url:
+            body = json.loads(request.content) if request.content else {}
+            inputs = body.get("input", [])
+            n = len(inputs)
+            state["calls"] += 1
+            vecs = [[float((i * 3 + j) % 5) / 5 for j in range(dim)] for i in range(n)]
+            return httpx.Response(200, json={"embeddings": vecs}, request=request)
+        # Chat / classify endpoint — return a valid NDJSON stream so
+        # classify_subject succeeds (rules fallback may trigger LLM).
+        ndjson = json.dumps({"message": {"content": '{"domaine": "mathematiques"}'}, "done": False}) + "\n"
+        ndjson += json.dumps({"done": True}) + "\n"
+        return httpx.Response(
+            200,
+            content=ndjson.encode("utf-8"),
+            headers={"content-type": "application/x-ndjson"},
+            request=request,
+        )
 
     return httpx.MockTransport(handler), state
 

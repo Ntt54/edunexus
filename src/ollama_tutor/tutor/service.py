@@ -279,10 +279,20 @@ def _build_lesson_prompts(
     else:
         system = (
             "Tu es un tuteur pédagogique francophone. Tu rédiges un cours "
-            "complet et structuré, fidèle aux extraits fournis, en français, "
-            "en texte libre (titres Markdown autorisés : définition, "
-            "explications, exemples détaillés, cas d'usage, erreurs courantes, "
-            "points clés). Longueur stricte : 800 à 1200 mots. Ne cite jamais "
+            "complet et structuré, fidèle aux extraits fournis, en français. "
+            "Structure IMPOSÉE, dans cet ordre exact : "
+            "1. Titre du cours puis « Objectif du cours » (1-2 phrases). "
+            "2. Sections numérotées (1., 1.1, 1.2, …) : définitions, "
+            "explications, exemples détaillés. "
+            "3. Exemples de code en blocs ```python (syntaxe valide). "
+            "4. Tableau « Points clés à retenir ». "
+            "5. « Cas d'usage concrets » (Cas 1, Cas 2, …). "
+            "6. « Erreurs fréquentes à éviter », chaque item préfixé ❌. "
+            "7. « Conclusion ». "
+            "8. « Mots-clés » (liste). "
+            "Longueur stricte : 800 à 1200 mots. "
+            "INTERDIT : méta-remarques (« Mot total : … », redite des "
+            "contraintes) et ids bruts dans le corps. Ne cite jamais "
             "d'identifiants techniques, uniquement des titres lisibles."
             + _LESSON_GROUNDING_RULES
         )
@@ -1627,31 +1637,146 @@ class TutorService:
                     return str(base).rstrip("/")
         return DEFAULT_BASE_URL
 
-    def generate_lesson_text(
+    def _sync_route_context(self) -> Any:
+        """Live-config sync routing coordinates (no network at build)."""
+        from .providers.routing import SyncRouteContext
+
+        cfg = self.config
+        is_openai = getattr(cfg, "llm_provider", "ollama") == "openai"
+        return SyncRouteContext(
+            ollama_base_url=self._lesson_ollama_base_url(),
+            cloud_base_url=(
+                cfg.llm_base_url or None if is_openai else None
+            ),
+            cloud_api_key=(
+                getattr(cfg, "llm_api_key", "") or None if is_openai else None
+            ),
+            transport=self.lesson_http_transport,
+        )
+
+    def generate_lesson_text_stream(
         self, kind: str, notion: str, excerpts: list[str], question: str | None = None
-    ) -> str:
-        """Generate lesson text synchronously via Ollama ``/api/chat``.
+    ):
+        """Sync generator yielding ``("thinking"|"token", text)``, routed by model.
+
+        Streaming twin of :meth:`generate_lesson_text` (same prompts,
+        model, per-kind timeouts). Sync generator — never touches asyncio.
+        """
+        from .providers.routing import RoutingLLMClient
+
+        if kind not in ("lesson_course", "lesson_summary", "lesson_answer"):
+            raise ValueError(f"Invalid lesson kind: {kind!r}")
+        system, user = _build_lesson_prompts(
+            kind, notion or "notion", excerpts or [], question=question
+        )
+        router = (
+            self._llm_client
+            if isinstance(self._llm_client, RoutingLLMClient)
+            else None
+        )
+        if router is None:
+            raise RuntimeError("streaming lesson indisponible (pas de routeur)")
+        timeout = (
+            LESSON_COURSE_TIMEOUT_S
+            if kind == "lesson_course"
+            else LESSON_LLM_TIMEOUT_S
+        )
+        yield from router.iter_chat_tokens(
+            [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            self.config.tutor_model,
+            sync=self._sync_route_context(),
+            timeout=timeout,
+            extra={"think": False, "keep_alive": DEFAULT_KEEP_ALIVE},
+        )
+
+    def generate_lesson_text(
+        self, kind: str, notion: str, excerpts: list[str], question: str | None = None,
+        return_thinking: bool = False,
+    ) -> str | tuple[str, str]:
+        """Generate lesson text synchronously, routed by model.
 
         Hook consumed by ``LessonDiscussionService._try_llm_text``: ``kind``
         is ``lesson_course`` (structured course, 800–1200 words),
         ``lesson_summary`` (150–250 words) or ``lesson_answer`` (short
         targeted answer to the learner's ``question``, 100–200 words);
         ``notion`` is the sanitized lesson topic; ``excerpts`` are the
-        grounding source passages.
+        grounding source passages. With ``return_thinking=True`` returns
+        ``(text, thinking)`` — provider reasoning when supplied (Ollama
+        ``thinking``, cloud ``reasoning_content``/``reasoning``), else
+        ``""``; default returns just the text (hook 3-args preserved).
 
         Purely synchronous (``httpx.Client``, ``stream: False``) — the
         calling path is sync and must never touch asyncio. Uses
-        ``config.tutor_model`` with a bounded timeout (slow CPU). Raises on
-        any failure (connection, timeout, HTTP error, invalid/empty
-        response): the caller falls back to the honest offline content.
+        ``config.tutor_model`` with a bounded timeout (slow CPU); the model
+        picks the backend (Ollama name ⇒ Ollama, else configured cloud,
+        unknown ⇒ explicit error). Raises on any failure (connection,
+        timeout, HTTP error, invalid/empty response): the caller falls back
+        to the honest offline content.
         """
         if kind not in ("lesson_course", "lesson_summary", "lesson_answer"):
             raise ValueError(f"Invalid lesson kind: {kind!r}")
         system, user = _build_lesson_prompts(
             kind, notion or "notion", excerpts or [], question=question
         )
+        model = self.config.tutor_model
+        timeout = (
+            LESSON_COURSE_TIMEOUT_S
+            if kind == "lesson_course"
+            else LESSON_LLM_TIMEOUT_S
+        )
+        from .providers.routing import (
+            LLMRoutingError,
+            RoutingLLMClient,
+            SyncChatHTTPError,
+        )
+
+        router = (
+            self._llm_client
+            if isinstance(self._llm_client, RoutingLLMClient)
+            else None
+        )
+        if router is not None:
+            ctx = self._sync_route_context()
+            try:
+                text, thinking = router.chat_sync_with_thinking(
+                    [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    model,
+                    sync=ctx,
+                    timeout=timeout,
+                    extra={
+                        "think": False,
+                        "keep_alive": DEFAULT_KEEP_ALIVE,
+                    },
+                )
+            except LLMRoutingError as exc:
+                raise OllamaAPIError(400, str(exc)) from exc
+            except SyncChatHTTPError as exc:
+                raise OllamaAPIError(exc.status, exc.text) from exc
+            except httpx.ConnectError as exc:
+                raise OllamaConnectionError(
+                    f"Cannot connect to Ollama for lesson text: {exc}"
+                ) from exc
+            except httpx.TimeoutException as exc:
+                raise OllamaConnectionError(
+                    f"Ollama lesson request timed out: {exc}"
+                ) from exc
+            except Exception as exc:
+                raise OllamaConnectionError(
+                    f"Unexpected lesson HTTP error: {exc}"
+                ) from exc
+            if not isinstance(text, str) or not text.strip():
+                raise OllamaAPIError(200, "empty lesson content")
+            if return_thinking:
+                return text, (thinking if isinstance(thinking, str) else "")
+            return text
         payload: dict[str, Any] = {
-            "model": self.config.tutor_model,
+            "model": model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -1663,11 +1788,7 @@ class TutorService:
         try:
             with httpx.Client(
                 base_url=self._lesson_ollama_base_url(),
-                timeout=httpx.Timeout(
-                    LESSON_COURSE_TIMEOUT_S
-                    if kind == "lesson_course"
-                    else LESSON_LLM_TIMEOUT_S
-                ),
+                timeout=httpx.Timeout(timeout),
                 transport=self.lesson_http_transport,
             ) as http:
                 resp = http.post("/api/chat", json=payload)
@@ -1693,6 +1814,9 @@ class TutorService:
         text = message.get("content", "") if isinstance(message, dict) else ""
         if not isinstance(text, str) or not text.strip():
             raise OllamaAPIError(resp.status_code, "empty lesson content")
+        if return_thinking:
+            thinking = message.get("thinking", "") if isinstance(message, dict) else ""
+            return text, (thinking if isinstance(thinking, str) else "")
         return text
 
     async def stream_lesson_text(
@@ -3792,14 +3916,67 @@ class TutorService:
     # Learning paths (Feature 006 — adaptive learning)
     # ------------------------------------------------------------------
 
-    def create_path(self, subject_id: str, title: str, description: str = "") -> dict:
-        """Create a learning path and return it as a dict."""
-        path = self.store.create_learning_path(subject_id, title, description)
+    def create_path(self, subject_id: str, title: str, description: str = "", learner_id: str | None = None) -> dict:
+        """Create a learning path and return it as a dict (optionally scoped to learner)."""
+        path = self.store.create_learning_path(subject_id, title, description, learner_id=learner_id)
         return path.to_dict()
 
-    def list_paths(self, subject_id: str) -> list[dict]:
-        """List all learning paths for a subject."""
-        return [p.to_dict() for p in self.store.list_learning_paths(subject_id)]
+    def list_paths(self, subject_id: str, learner_id: str | None = None) -> list[dict]:
+        """List learning paths filtered by couple (subject_id, learner_id) (FR-001/006)."""
+        # When learner_id is None, return all for subject (compat); when set, filter couple.
+        return [p.to_dict() for p in self.store.list_learning_paths(subject_id, learner_id=learner_id)]
+
+    def get_dashboard(self, subject_id: str, learner_id: str | None = None) -> dict[str, Any]:
+        """Dashboard stats filtered by couple with empty state nextStep:null (FR-001/007).
+
+        Returns {"nextStep": {...}|None, "counts": {"sources":int,"notions":int}, "paths": [...], "progress": ...}
+        When no path for the couple, nextStep is None (explicit empty state, never fallback to another matière).
+        """
+        # Validate subject exists? caller handles 404; here return empty if unknown -> nextStep null
+        try:
+            self.store.require_subject(subject_id)
+        except KeyError:
+            return {"nextStep": None, "counts": {"sources": 0, "notions": 0}, "paths": []}
+        paths = self.store.list_learning_paths(subject_id, learner_id=learner_id) if learner_id else self.store.list_learning_paths(subject_id)
+        # counts: sources = books for subject, notions = concepts for subject
+        try:
+            books = self.store.list_books(subject_id)
+            sources_cnt = len(books)
+        except Exception:
+            sources_cnt = 0
+        try:
+            concepts = self.store.list_concepts(subject_id)
+            notions_cnt = len(concepts)
+        except Exception:
+            notions_cnt = 0
+        if not paths:
+            return {"nextStep": None, "counts": {"sources": sources_cnt, "notions": notions_cnt}, "paths": []}
+        # Pick first active or first path; find next not_completed step
+        # For dashboard we enrich with steps to find nextStep
+        next_step = None
+        chosen_path = None
+        for p in paths:
+            steps = self.store.list_path_steps(p.id)
+            if not steps:
+                continue
+            # Find first not completed
+            for s in steps:
+                if s.status != "completed":
+                    next_step = {"id": s.id, "title": s.title, "path_id": p.id, "notion": s.activity_id}
+                    chosen_path = p
+                    break
+            if next_step:
+                break
+        if next_step is None:
+            # All completed -> no next step but still have paths
+            # Return last path's last step as completed? spec wants nextStep null only when empty; when completed, return None as well? keep null
+            return {"nextStep": None, "counts": {"sources": sources_cnt, "notions": notions_cnt}, "paths": [p.to_dict() for p in paths]}
+        progress = 0.0
+        if chosen_path is not None:
+            steps = self.store.list_path_steps(chosen_path.id)
+            completed = sum(1 for s in steps if s.status == "completed")
+            progress = round(completed / len(steps) * 100, 1) if steps else 0.0
+        return {"nextStep": {**next_step, "progress": progress}, "counts": {"sources": sources_cnt, "notions": notions_cnt}, "paths": [p.to_dict() for p in paths]}
 
     def get_path(self, path_id: str) -> dict | None:
         """Get a learning path with its steps and progress."""

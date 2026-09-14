@@ -39,6 +39,35 @@ const apiBase = import.meta.env.VITE_EDUNEXUS_API_BASE ?? "/api/tutor";
 // qui sert le dist (port 9215) ; aucun hôte inventé.
 const apiRoot = apiBase.replace(/\/api\/tutor\/?$/, "");
 
+// ── 011 · Invalidation + cache-bust (FR-009) ───────────────────────
+let subjectCacheVersion = 0;
+export function invalidateSubjectCaches() {
+  subjectCacheVersion++;
+}
+function cacheBust(path: string): string {
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}_v=${subjectCacheVersion}&_t=${Date.now()}`;
+}
+function qs(params: Record<string, string | undefined | null>): string {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v) p.set(k, v);
+  const s = p.toString();
+  return s ? `?${s}` : "";
+}
+export function buildPathsUrl(subjectId?: string | null, learnerId?: string | null): string {
+  return `/paths${qs({ subject_id: subjectId || undefined, learner_id: learnerId || undefined })}`;
+}
+export function buildDashboardUrl(subjectId?: string | null, learnerId?: string | null): string {
+  return `/dashboard${qs({ subject_id: subjectId || undefined, learner_id: learnerId || undefined })}`;
+}
+export function buildBooksUrl(subjectId?: string | null, all?: boolean): string {
+  if (all) return "/books?all=true";
+  return subjectId ? `/books?subject_id=${encodeURIComponent(subjectId)}` : "/books";
+}
+export function buildLearnersUrl(subjectId?: string | null): string {
+  return subjectId ? `/learners?subject_id=${encodeURIComponent(subjectId)}` : "/learners";
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, {
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
@@ -145,8 +174,8 @@ export const tutorApi = {
   async getSubjects(): Promise<SubjectsResponse> {
     return request<SubjectsResponse>("/subjects");
   },
-  async deleteSubject(id: string): Promise<{ deleted: boolean }> {
-    return request<{ deleted: boolean }>(`/subjects/${encodeURIComponent(id)}`, { method: "DELETE" });
+  async deleteSubject(id: string): Promise<{ deleted: string; fallbackSubjectId?: string | null } | { deleted: boolean }> {
+    return request<{ deleted: string; fallbackSubjectId?: string | null }>(`/subjects/${encodeURIComponent(id)}`, { method: "DELETE" });
   },
   async createSubject(name: string): Promise<{ id: string; name: string }> {
     return request<{ id: string; name: string }>("/subjects", {
@@ -168,6 +197,24 @@ export const tutorApi = {
       method: "POST",
       body: JSON.stringify({ book_id: bookId }),
     });
+  },
+
+  // ── 011 · Helpers filtrés (FR-001/006) ──────────────────────────
+  async getDashboardFiltered(subjectId: string, learnerId?: string | null): Promise<{ nextStep: { id: string; title: string; progress: number; notion?: string } | null; counts: { sources: number; notions: number }; paths: unknown[] }> {
+    const url = cacheBust(buildDashboardUrl(subjectId, learnerId || undefined));
+    return request(url);
+  },
+  async getPathsFiltered(subjectId: string, learnerId?: string | null): Promise<{ paths: Array<{ id: string; title: string; description: string; status: string; progress?: number }> }> {
+    const url = cacheBust(buildPathsUrl(subjectId, learnerId || undefined));
+    return request(url);
+  },
+  async getLearnersFiltered(subjectId?: string | null): Promise<{ learners: LearnerProfile[] }> {
+    const url = cacheBust(buildLearnersUrl(subjectId || undefined));
+    return request(url);
+  },
+  async getBooksFiltered(subjectId?: string | null, all?: boolean): Promise<{ books: SourceBook[] }> {
+    const url = cacheBust(buildBooksUrl(subjectId || undefined, !!all));
+    return request(url);
   },
 
   // ── Dashboard existant ─────────────────────────────────────────
@@ -222,8 +269,9 @@ export const tutorApi = {
   },
 
   // ── Feature 008 — Multi-utilisateur familial (US9) ─────────────
-  async getLearners(): Promise<{ learners: LearnerProfile[] }> {
-    return request<{ learners: LearnerProfile[] }>("/learners");
+  async getLearners(subjectId?: string | null): Promise<{ learners: LearnerProfile[] }> {
+    const url = subjectId ? cacheBust(`/learners?subject_id=${encodeURIComponent(subjectId)}`) : cacheBust("/learners");
+    return request<{ learners: LearnerProfile[] }>(url);
   },
   async createLearner(name: string, avatar = ""): Promise<LearnerProfile> {
     return request("/learners", { method: "POST", body: JSON.stringify({ name, avatar }) });
@@ -421,9 +469,18 @@ export const tutorApi = {
       body: JSON.stringify({}),
     });
   },
-  async getBooks(subject?: string): Promise<{ books: SourceBook[] }> {
-    const qs = subject ? `?subject=${encodeURIComponent(subject)}` : "";
-    return request<{ books: SourceBook[] }>(`/books${qs}`);
+  async getBooks(subject?: string, opts?: { all?: boolean; byId?: boolean }): Promise<{ books: SourceBook[] }> {
+    let qs = "";
+    if (opts?.all) qs = "?all=true";
+    else if (subject) {
+      // Legacy: `subject` can be a subject_id (011) or a legacy name;
+      // the backend supports both `subject_id` and `subject`. We send `subject_id`
+      // when it looks like an id (hex/uuid) else fall back to `subject`.
+      const looksLikeId = /^[0-9a-f-]{8,}$/i.test(subject) || subject.includes("-") || subject.length > 20;
+      const key = opts?.byId || looksLikeId ? "subject_id" : "subject";
+      qs = `?${key}=${encodeURIComponent(subject)}`;
+    }
+    return request<{ books: SourceBook[] }>(cacheBust(`/books${qs}`));
   },
   async importDocument(file: File, subject: string, fmt?: string, queue = true): Promise<{ book_id: string }> {
     const fd = new FormData();
@@ -484,8 +541,9 @@ export const tutorApi = {
   },
 
   // ── Learning paths CRUD ──────────────────────────────────────────
-  async getPaths(subjectId: string): Promise<{ paths: Array<{ id: string; title: string; description: string; status: string; progress?: number }> }> {
-    return request(`/paths?subject_id=${encodeURIComponent(subjectId)}`);
+  async getPaths(subjectId: string, learnerId?: string | null): Promise<{ paths: Array<{ id: string; title: string; description: string; status: string; progress?: number }> }> {
+    const url = cacheBust(`/paths${qs({ subject_id: subjectId, learner_id: learnerId || undefined })}`);
+    return request(url);
   },
   async createPath(subjectId: string, title: string, description = ""): Promise<{ id: string; title: string; description: string; status: string }> {
     return request("/paths", { method: "POST", body: JSON.stringify({ subject_id: subjectId, title, description }) });
@@ -694,6 +752,10 @@ export const tutorApi = {
       headers: { "X-Learner-Id": learnerId },
       body: JSON.stringify({ question }),
     });
+  },
+  /** Ask SSE progressif : thinking* puis delta* puis done(error?) — voir sse.ts. */
+  askStreamUrl(discussionId: string, learnerId: string, question: string): string {
+    return `${apiBase}/lesson-discussions/${encodeURIComponent(discussionId)}/ask/stream?learner_id=${encodeURIComponent(learnerId)}&question=${encodeURIComponent(question)}`;
   },
   async deleteLessonContent(discussionId: string, contentId: string): Promise<{ deleted: boolean }> {
     return request(`/lesson-discussions/${encodeURIComponent(discussionId)}/contents/${encodeURIComponent(contentId)}`, {

@@ -3,6 +3,9 @@
  *
  * Manages a single persistent connection to /ws/tutor with automatic
  * reconnection, and exposes reactive state for streaming messages.
+ * Handles all 12 WS frames: start, sources, thinking_delta/content_delta,
+ * reasoning, stats, definition, citation_warnings, error, end, cancelled,
+ * transcript, pleias_sections — plus session_id persistence (tutor.html#4266).
  */
 import { reactive, ref, onUnmounted } from "vue";
 
@@ -27,6 +30,7 @@ export interface TutorStats {
   tokens_per_sec?: number;
   generated_tokens?: number;
   tok_s?: number;
+  prompt_tokens?: number;
 }
 
 export interface ChatMessage {
@@ -41,6 +45,13 @@ export interface ChatMessage {
   kind?: "answer" | "hint";
 }
 
+export interface CitationWarning {
+  message?: string;
+  detail?: string;
+  index?: number;
+  [key: string]: unknown;
+}
+
 export interface AskFrame {
   type: "ask";
   question: string;
@@ -53,11 +64,40 @@ export interface AskFrame {
   session_id?: string;
 }
 
+const SESSION_IDS_KEY = "edunexus:sessionIds";
+
+function loadSessionIds(): Record<string, string> {
+  try {
+    const raw = typeof localStorage !== "undefined" ? localStorage.getItem(SESSION_IDS_KEY) : null;
+    if (raw) {
+      const parsed = JSON.parse(raw) as Record<string, string>;
+      if (parsed && typeof parsed === "object") return parsed;
+    }
+  } catch {
+    /* ignore */
+  }
+  return {};
+}
+
+function persistSessionIds(map: Record<string, string>) {
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(SESSION_IDS_KEY, JSON.stringify(map));
+    }
+  } catch {
+    /* ignore quota */
+  }
+}
+
 export function useTutorSocket() {
   let ws: WebSocket | null = null;
   let pendingAsk: AskFrame | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   const RECONNECT_DELAY = 2000;
+
+  // Remember last ask subject to associate session_id on end (tutor.html S.activeId)
+  let lastAskSubjectId: string | null = null;
+  let lastAskConversationId: string | null = null;
 
   /* ── Reactive state ─────────────────────────────────────────── */
   const connected = ref(false);
@@ -69,6 +109,14 @@ export function useTutorSocket() {
   const currentStats = ref<TutorStats | null>(null);
   const status = ref("prêt");
   const error = ref<string | null>(null);
+
+  // ── Missing frames state ──
+  const transcript = ref("");
+  const citationWarnings = ref<CitationWarning[]>([]);
+  const validCitations = ref<unknown[]>([]);
+  const pleiasSections = ref<Record<string, unknown>>({});
+  const currentSessionId = ref<string | null>(null);
+  const sessionIds = reactive<Record<string, string>>(loadSessionIds());
 
   /* ── Callbacks ──────────────────────────────────────────────── */
   type FrameHandler = (frame: TutorFrame) => void;
@@ -151,7 +199,15 @@ export function useTutorSocket() {
         currentThinking.value = "";
         currentSources.value = [];
         currentStats.value = null;
+        citationWarnings.value = [];
+        validCitations.value = [];
+        pleiasSections.value = {};
+        // transcript persists until next transcript frame; do not clear here
         status.value = "génération…";
+        // capture session_id if echoed on start (some server impl)
+        if (typeof f.session_id === "string" && f.session_id) {
+          currentSessionId.value = f.session_id as string;
+        }
         break;
 
       case "sources":
@@ -159,10 +215,12 @@ export function useTutorSocket() {
         break;
 
       case "thinking_delta":
+      case "reasoning":
         currentThinking.value += (f.content as string) ?? (f.text as string) ?? "";
         break;
 
       case "content_delta":
+      case "delta":
         currentContent.value += (f.content as string) ?? (f.text as string) ?? "";
         break;
 
@@ -180,22 +238,68 @@ export function useTutorSocket() {
         currentStats.value = f as unknown as TutorStats;
         break;
 
+      case "citation_warnings": {
+        const warnings = (f.warnings as CitationWarning[]) ?? [];
+        const valid = (f.valid_citations as unknown[]) ?? (f.validCitations as unknown[]) ?? [];
+        citationWarnings.value = Array.isArray(warnings) ? warnings : [];
+        validCitations.value = Array.isArray(valid) ? valid : [];
+        // Also surface as warning on the streaming bubble for UI visibility
+        const lastTutorW = [...messages].reverse().find((m) => m.role === "tutor" && m.id === "_streaming");
+        if (lastTutorW && warnings.length) {
+          const first = warnings[0] as CitationWarning;
+          lastTutorW.warning = (first.message as string) ?? (first.detail as string) ?? "Citation invalide";
+        }
+        break;
+      }
+
+      case "pleias_sections": {
+        const sections = (f.sections as Record<string, unknown>) ?? {};
+        pleiasSections.value = sections && typeof sections === "object" ? (sections as Record<string, unknown>) : {};
+        break;
+      }
+
+      case "transcript": {
+        const text = (f.text as string) ?? (f.transcript as string) ?? "";
+        transcript.value = text;
+        status.value = "transcription reçue — vérifiez puis envoyez";
+        break;
+      }
+
       case "end": {
         streaming.value = false;
         status.value = (f.status as string) === "stopped" ? "annulé" : "prêt";
+        // Persist session_id (tutor.html:4266 S.sessionIds[S.activeId]=sid) — only for quick sessions (no conversation)
+        const sid = f.session_id as string | undefined;
+        if (sid && typeof sid === "string" && sid) {
+          currentSessionId.value = sid;
+          // Persist per-subject if we know the subject and there was no conversation scope
+          const shouldPersistPerSubject = !lastAskConversationId;
+          if (shouldPersistPerSubject && lastAskSubjectId) {
+            sessionIds[lastAskSubjectId] = sid;
+            persistSessionIds(sessionIds as unknown as Record<string, string>);
+          } else if (!lastAskSubjectId) {
+            // Fallback generic key when subject unknown
+            sessionIds["_last"] = sid;
+            persistSessionIds(sessionIds as unknown as Record<string, string>);
+          }
+        }
+        // Also handle echoed think/socratic/level on end frame (D10)
         // Commit the accumulated content to the last tutor message
         const lastTutor = [...messages].reverse().find((m) => m.role === "tutor" && m.id === "_streaming");
-        if (lastTutor && currentContent.value) {
-          lastTutor.content = currentContent.value;
-          lastTutor.thinking = currentThinking.value || undefined;
-          lastTutor.sources = currentSources.value.length ? [...currentSources.value] : undefined;
-          lastTutor.stats = currentStats.value ?? undefined;
+        if (lastTutor) {
+          if (currentContent.value) lastTutor.content = currentContent.value;
+          if (currentThinking.value) lastTutor.thinking = currentThinking.value || undefined;
+          if (currentSources.value.length) lastTutor.sources = [...currentSources.value];
+          if (currentStats.value) lastTutor.stats = currentStats.value ?? undefined;
+          if (citationWarnings.value.length) lastTutor.warning = (citationWarnings.value[0] as CitationWarning).message ?? lastTutor.warning;
+          // attach pleiasSections/citationWarnings as extra for consumers via onFrame
           lastTutor.id = "t-" + Date.now();
         }
         currentContent.value = "";
         currentThinking.value = "";
         currentSources.value = [];
         currentStats.value = null;
+        // keep citationWarnings/pleiasSections for inspection until next start
         break;
       }
 
@@ -242,6 +346,9 @@ export function useTutorSocket() {
   function sendRaw(frame: unknown) {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(frame));
+    } else if ((frame as Record<string, unknown>).type === "ask") {
+      pendingAsk = frame as AskFrame;
+      connect();
     }
   }
 
@@ -267,8 +374,19 @@ export function useTutorSocket() {
       think: opts.think ?? false,
     };
     if (opts.conversationId) frame.conversation_id = opts.conversationId;
-    if (opts.bookIds) frame.book_ids = opts.bookIds;
-    else if (opts.sessionId) frame.session_id = opts.sessionId;
+    if (opts.bookIds && opts.bookIds.length) {
+      frame.book_ids = opts.bookIds;
+    } else if (opts.sessionId) {
+      frame.session_id = opts.sessionId;
+    } else if (!opts.conversationId) {
+      // Quick session continuity: reuse stored session_id per subject (tutor.html buildAskFrame)
+      const stored = opts.subjectId ? (sessionIds[opts.subjectId] ?? null) : currentSessionId.value;
+      const fallback = stored ?? sessionIds["_last"] ?? null;
+      if (fallback) frame.session_id = fallback;
+    }
+
+    lastAskSubjectId = opts.subjectId ?? null;
+    lastAskConversationId = opts.conversationId ?? null;
 
     // Add user message
     messages.push({ id: "u-" + Date.now(), role: "user", content: question });
@@ -279,11 +397,46 @@ export function useTutorSocket() {
     status.value = "génération…";
     streaming.value = true;
 
-    sendRaw(frame);
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(frame));
+    } else {
+      pendingAsk = frame;
+      connect();
+    }
   }
 
   function cancel() {
     sendRaw({ type: "cancel" });
+  }
+
+  function transcribe(audioB64: string) {
+    sendRaw({ type: "transcribe", audio: audioB64 });
+  }
+
+  function clearTranscript() {
+    transcript.value = "";
+  }
+
+  function getSessionId(subjectId?: string): string | null {
+    if (subjectId) return sessionIds[subjectId] ?? null;
+    return currentSessionId.value ?? sessionIds["_last"] ?? null;
+  }
+
+  function setSessionId(subjectId: string, sid: string) {
+    if (!subjectId || !sid) return;
+    sessionIds[subjectId] = sid;
+    currentSessionId.value = sid;
+    persistSessionIds(sessionIds as unknown as Record<string, string>);
+  }
+
+  function clearSessionId(subjectId?: string) {
+    if (subjectId) {
+      delete sessionIds[subjectId];
+    } else {
+      currentSessionId.value = null;
+      delete sessionIds["_last"];
+    }
+    persistSessionIds(sessionIds as unknown as Record<string, string>);
   }
 
   /* ── Cleanup ───────────────────────────────────────────────── */
@@ -301,11 +454,23 @@ export function useTutorSocket() {
     currentStats,
     status,
     error,
+    // new reactive state for missing frames
+    transcript,
+    citationWarnings,
+    validCitations,
+    pleiasSections,
+    currentSessionId,
+    sessionIds,
     connect,
     disconnect,
     sendRaw,
     ask,
     cancel,
+    transcribe,
+    clearTranscript,
+    getSessionId,
+    setSessionId,
+    clearSessionId,
     onFrame,
   };
 }

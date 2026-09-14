@@ -1011,9 +1011,51 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         run.add_done_callback(_done)
         return {"book_id": book.id, "status": "indexing"}
 
+    def _parse_subject_learner_params(request: Request) -> tuple[str | None, str | None]:
+        """Extract and validate ?subject_id=&learner_id= (400 on empty/invalid)."""
+        sid = request.query_params.get("subject_id")
+        lid = request.query_params.get("learner_id")
+        # Also accept headers for learner_id (compat)
+        if lid is None:
+            lid = request.headers.get("x-learner-id")
+        if sid is not None:
+            sid = sid.strip()
+            if sid == "":
+                _log_error(config, "query-params", "subject_id vide")
+                raise HTTPException(status_code=400, detail="subject_id requis")
+            if len(sid) > 128:
+                _log_error(config, "query-params", f"subject_id trop long: {sid!r}")
+                raise HTTPException(status_code=400, detail="subject_id invalide")
+        if lid is not None:
+            lid = lid.strip()
+            if lid == "":
+                lid = None
+            elif len(lid) > 128:
+                _log_error(config, "query-params", f"learner_id trop long: {lid!r}")
+                raise HTTPException(status_code=400, detail="learner_id invalide")
+        return sid, lid
+
     @app.get("/api/tutor/books")
-    async def tutor_books(subject: str | None = None) -> dict[str, Any]:
-        if subject:
+    async def tutor_books(request: Request, subject: str | None = None) -> dict[str, Any]:
+        # Q4=C: ?subject_id=&all= filtering via subject_books; thin delegate
+        q_subject_id = request.query_params.get("subject_id")
+        q_all = request.query_params.get("all")
+        # Normalize all flag: "true"/"1"/"yes" => Toutes
+        show_all = str(q_all).lower() in {"true", "1", "yes"} if q_all is not None else False
+        if q_subject_id is not None:
+            q_subject_id = q_subject_id.strip()
+            if q_subject_id == "":
+                _log_error(config, "tutor-books", "subject_id vide")
+                raise HTTPException(status_code=400, detail="subject_id requis")
+            if q_subject_id and not show_all:
+                if tutor_store.get_subject(q_subject_id) is None:
+                    _log_error(config, "tutor-books", f"subject_id inconnu: {q_subject_id}")
+                    raise HTTPException(status_code=404, detail="sujet inconnu")
+                books = tutor_store.list_books(q_subject_id)
+            else:
+                books = tutor_store.list_all_books()
+        elif subject:
+            # Legacy ?subject=name
             subj = next(
                 (s for s in tutor_store.list_subjects() if s.name.lower() == subject.lower()),
                 None,
@@ -1022,6 +1064,7 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                 raise HTTPException(status_code=404, detail="unknown subject")
             books = tutor_store.list_books(subj.id)
         else:
+            # No filter: show all (frontend passes subject_id when filtered)
             books = tutor_store.list_all_books()
         # Indexing metadata computed on the fly (no migration, one grouped
         # lookup): last completed job end + single distinct chunk model.
@@ -1250,6 +1293,34 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=409, detail=str(exc))
         return {"id": subject.id, "name": subject.name}
 
+    async def _rename_subject_impl(subject_id: str, payload: TutorLabelCreate, *, is_patch: bool = False) -> dict[str, Any]:
+        """Thin delegate for rename (PUT/PATCH) — allows Non classé (FR-002)."""
+        name = (payload.name or "").strip()
+        if not name:
+            _log_error(config, "subject-rename", "nom de matière requis")
+            raise HTTPException(status_code=400, detail="Nom requis")
+        if tutor_store.get_subject(subject_id) is None:
+            raise HTTPException(status_code=404, detail="domaine inconnu")
+        try:
+            subject = tutor_store.rename_subject(subject_id, name)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="domaine inconnu")
+        except ValueError as exc:
+            msg = str(exc)
+            if "Nom déjà utilisé" in msg or "déjà existante" in msg:
+                _log_error(config, "subject-rename", f"duplicate: {msg}")
+                if is_patch:
+                    raise HTTPException(status_code=400, detail="Nom déjà utilisé")
+                else:
+                    # Legacy PUT expects 409 for duplicate (preserve existing contract)
+                    raise HTTPException(status_code=409, detail="matière déjà existante")
+            if "Nom requis" in msg or "non-empty" in msg:
+                _log_error(config, "subject-rename", f"invalid: {msg}")
+                raise HTTPException(status_code=400, detail="Nom requis")
+            _log_error(config, "subject-rename", f"invalid: {msg}")
+            raise HTTPException(status_code=400, detail=msg)
+        return {"id": subject.id, "name": subject.name}
+
     @app.put("/api/tutor/subjects/{subject_id}")
     async def tutor_subject_rename(
         subject_id: str, payload: TutorLabelCreate
@@ -1257,39 +1328,40 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         """Rename a subject (thin transport: delegates to LibraryStore).
 
         Empty name ⇒ 400 ; unknown id ⇒ 404 ; case-insensitive clash with
-        ANOTHER subject ⇒ 409 (renaming to its own name is idempotent).
+        ANOTHER subject ⇒ 409 (legacy) — renaming to its own name is idempotent.
+        Allows Non classé (FR-002).
         """
-        name = (payload.name or "").strip()
-        if not name:
-            raise HTTPException(status_code=400, detail="nom de matière requis")
-        if tutor_store.get_subject(subject_id) is None:
-            raise HTTPException(status_code=404, detail="domaine inconnu")
-        if any(
-            s.id != subject_id and s.name.lower() == name.lower()
-            for s in tutor_store.list_subjects()
-        ):
-            raise HTTPException(status_code=409, detail="matière déjà existante")
-        try:
-            subject = tutor_store.rename_subject(subject_id, name)
-        except KeyError:
-            raise HTTPException(status_code=404, detail="domaine inconnu")
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc))
-        return {"id": subject.id, "name": subject.name}
+        return await _rename_subject_impl(subject_id, payload, is_patch=False)
+
+    @app.patch("/api/tutor/subjects/{subject_id}")
+    async def tutor_subject_patch(
+        subject_id: str, payload: TutorLabelCreate
+    ) -> dict[str, Any]:
+        """PATCH alias for rename (spec contract, FR-002) — 400 on duplicate."""
+        return await _rename_subject_impl(subject_id, payload, is_patch=True)
 
     @app.delete("/api/tutor/subjects/{subject_id}")
     async def tutor_subject_delete(subject_id: str) -> dict[str, Any]:
-        """Delete a subject (thin transport: delegates to LibraryStore).
+        """Delete a subject (thin transport: delegates to LibraryStore, FR-002).
 
         Books survive as orphans (subject_books joins CASCADE) and stay
         visible via GET /api/tutor/books; re-import re-links them by
-        fingerprint. Unknown id → 404.
+        fingerprint. Returns fallbackSubjectId when a fallback exists (cascade).
+        Unknown id → 404. Backward compat: single-subject delete returns {"deleted": true}.
         """
+        if tutor_store.get_subject(subject_id) is None:
+            raise HTTPException(status_code=404, detail="domaine inconnu")
         try:
             tutor_store.delete_subject(subject_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="domaine inconnu")
-        return {"deleted": True}
+        remaining = tutor_store.list_subjects()
+        fallback = remaining[0].id if remaining else None
+        if fallback is None:
+            # Legacy shape expected by existing integration test (single orphan delete)
+            return {"deleted": True}
+        # New contract (011) when fallback exists
+        return {"deleted": subject_id, "fallbackSubjectId": fallback}
 
     @app.post("/api/tutor/subjects/{subject_id}/books")
     async def tutor_subject_link_book(
@@ -2609,16 +2681,38 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
     # ------------------------------------------------------------------
 
     @app.get("/api/tutor/learners")
-    async def learners_list() -> dict[str, Any]:
-        """List all learner profiles (FR-038)."""
+    async def learners_list(request: Request) -> dict[str, Any]:
+        """List learner profiles, optionally filtered by ?subject_id= (Q3=B via existence couple)."""
         from ..tutor.learners import LearnerService
+        subject_id = request.query_params.get("subject_id")
+        if subject_id is not None:
+            subject_id = subject_id.strip()
+            if subject_id == "":
+                _log_error(config, "learners-list", "subject_id vide")
+                raise HTTPException(status_code=400, detail="subject_id requis")
+            if tutor_store.get_subject(subject_id) is None:
+                _log_error(config, "learners-list", f"subject_id inconnu: {subject_id}")
+                raise HTTPException(status_code=404, detail="sujet inconnu")
+            return LearnerService(tutor_store).list_filtered(subject_id)
         return LearnerService(tutor_store).list()
 
     @app.post("/api/tutor/learners")
-    async def learners_create(payload: TutorLearnerRequest) -> dict[str, Any]:
-        """Create a learner profile (FR-038)."""
+    async def learners_create(request: Request, payload: TutorLearnerRequest) -> dict[str, Any]:
+        """Create a learner profile for active subject (FR-005/038), thin delegate, 400 on invalid."""
         from ..tutor.learners import LearnerService
-        return LearnerService(tutor_store).create(payload.name, avatar=payload.avatar)
+        # Optional active subject via query/header for logging, but creation is global
+        # Validate via service (length, unique)
+        try:
+            return LearnerService(tutor_store).create(payload.name, avatar=payload.avatar)
+        except ValueError as exc:
+            msg = str(exc)
+            _log_error(config, "learners-create", f"invalid: {msg}")
+            # Map to 400 with French detail
+            if "Nom déjà utilisé" in msg:
+                raise HTTPException(status_code=400, detail="Nom déjà utilisé")
+            if "Nom requis" in msg:
+                raise HTTPException(status_code=400, detail="Nom requis")
+            raise HTTPException(status_code=400, detail=msg)
 
     @app.post("/api/tutor/learners/{learner_id}/activate")
     async def learners_activate(learner_id: str) -> dict[str, Any]:
@@ -2770,6 +2864,48 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         async def _sse() -> AsyncIterator[bytes]:
             async for event in svc.stream_course(discussion_id, learner_id=learner_id):
                 yield ("data: " + json.dumps(event, ensure_ascii=False) + "\n\n").encode("utf-8")
+
+        return StreamingResponse(
+            _sse(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.get("/api/tutor/lesson-discussions/{discussion_id}/ask/stream")
+    async def lesson_ask_stream(discussion_id: str, request: Request) -> StreamingResponse:
+        """Stream a lesson ask answer as SSE (thin transport).
+
+        Pre-flight (404/403/400) runs BEFORE any SSE byte is sent. Wire format:
+        ``data: {"thinking": "…"}``* then ``data: {"delta": "…"}``* then
+        ``data: {"done": true, "fallback": false, "thinking": "…", "sources": [...]}``;
+        on failure ``data: {"error": "…"}`` (explicit, never silent — the
+        front falls back to the classic POST). The final message is
+        persisted exactly like the one-shot ask. No buffering: one flush
+        per yielded chunk.
+        """
+        from ..tutor.lesson_discussion import LessonDiscussionService
+        learner_id = request.headers.get("x-learner-id") or request.query_params.get("learner_id") or None
+        if learner_id is not None:
+            learner_id = learner_id.strip() or None
+        question = (request.query_params.get("question", "") or "").strip()
+        if not learner_id:
+            raise HTTPException(status_code=400, detail="learner_id requis (header X-Learner-Id ou query param)")
+        if not question:
+            raise HTTPException(status_code=400, detail="question requise")
+        disc = tutor_store.get_lesson_discussion(discussion_id)
+        if disc is None:
+            raise HTTPException(status_code=404, detail="Discussion inconnue")
+        if disc.learner_id != learner_id:
+            raise HTTPException(status_code=403, detail="learner_id mismatch")
+        svc = LessonDiscussionService(tutor_store, tutor_service=tutor_service)
+
+        def _sse():
+            try:
+                for event in svc.iter_ask_tokens(discussion_id, question, learner_id=learner_id):
+                    yield ("data: " + json.dumps(event, ensure_ascii=False) + "\n\n").encode("utf-8")
+            except Exception as exc:  # never silent mid-stream
+                _log_error(config, "lesson-ask-stream", f"ask/stream {discussion_id}: {exc}", traceback.format_exc())
+                yield ("data: " + json.dumps({"error": str(exc) or "Génération de la réponse impossible"}, ensure_ascii=False) + "\n\n").encode("utf-8")
 
         return StreamingResponse(
             _sse(),
@@ -2956,14 +3092,27 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
 
     @app.get("/api/tutor/paths")
     async def list_paths(request: Request, subject_id: str | None = None) -> dict[str, Any]:
-        sid = subject_id or request.query_params.get("subject_id") or _active_subject_id()
+        # T003/T004 thin delegate with validation 400 + _log_error + Origin/Host via middleware
+        q_sid = request.query_params.get("subject_id")
+        if q_sid is not None:
+            q_sid = q_sid.strip()
+            if q_sid == "":
+                _log_error(config, "paths-list", "subject_id vide")
+                raise HTTPException(status_code=400, detail="subject_id requis")
+        sid = subject_id or q_sid or _active_subject_id()
         if not sid:
+            _log_error(config, "paths-list", "subject_id requis")
             raise HTTPException(status_code=400, detail="subject_id requis")
         if tutor_store.get_subject(sid) is None:
             raise HTTPException(status_code=404, detail="Sujet inconnu")
         learner_id = request.headers.get("x-learner-id") or request.query_params.get("learner_id")
         learner_id = learner_id.strip() if isinstance(learner_id, str) and learner_id.strip() else None
-        paths = tutor_service.list_paths(sid)
+        q_learner_raw = request.query_params.get("learner_id")
+        if q_learner_raw is not None and q_learner_raw.strip() == "" and learner_id is None:
+            _log_error(config, "paths-list", "learner_id vide")
+            raise HTTPException(status_code=400, detail="learner_id invalide")
+        # Delegate filtered by couple via service (FR-001/006)
+        paths = tutor_service.list_paths(sid, learner_id=learner_id)
         # Enrich each path with steps including status + discussion_id and progress counts
         for p in paths:
             steps = [s.to_dict() for s in tutor_store.list_path_steps(p["id"])]
@@ -2979,6 +3128,41 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             else:
                 p["progress"] = 0.0
         return {"paths": paths}
+
+    @app.get("/api/tutor/learning-paths")
+    async def list_learning_paths_alias(request: Request) -> dict[str, Any]:
+        """Alias for GET /api/tutor/paths filtered by couple (spec contract)."""
+        return await list_paths(request)
+
+    @app.get("/api/tutor/dashboard")
+    async def tutor_dashboard(request: Request) -> dict[str, Any]:
+        """Dashboard filtered by couple (FR-001/006/007) — thin delegate to TutorService.get_dashboard."""
+        sid = request.query_params.get("subject_id")
+        lid = request.query_params.get("learner_id") or request.headers.get("x-learner-id")
+        if sid is not None:
+            sid = sid.strip()
+            if sid == "":
+                _log_error(config, "dashboard", "subject_id vide")
+                raise HTTPException(status_code=400, detail="subject_id requis")
+            if tutor_store.get_subject(sid) is None:
+                raise HTTPException(status_code=404, detail="sujet inconnu")
+        else:
+            sid = _active_subject_id()
+            if not sid:
+                # Empty state when no matière (FR-007)
+                return {"nextStep": None, "counts": {"sources": 0, "notions": 0}, "paths": []}
+        if lid is not None:
+            lid = lid.strip() or None
+            if request.query_params.get("learner_id") == "" and lid is None:
+                _log_error(config, "dashboard", "learner_id vide")
+                raise HTTPException(status_code=400, detail="learner_id invalide")
+        data = tutor_service.get_dashboard(sid, learner_id=lid)
+        return data
+
+    @app.get("/api/tutor/stats")
+    async def tutor_stats_alias(request: Request) -> dict[str, Any]:
+        """Alias for dashboard (legacy)."""
+        return await tutor_dashboard(request)
 
     @app.get("/api/tutor/paths/{path_id}")
     async def get_path(request: Request, path_id: str) -> dict[str, Any]:

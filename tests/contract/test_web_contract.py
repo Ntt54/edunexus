@@ -133,6 +133,14 @@ IGNORED_ROUTES: set[tuple[str, str]] = {
     ("PUT", "/api/tutor/subjects/{}"),
     ("DELETE", "/api/tutor/subjects/{}/books/{}"),
     ("PUT", "/api/tutor/books/{}/subject"),
+    # --- Ask stream leçon (rendu progressif = lane front séparé ; le
+    # front actuel ne le fetche pas — couvert par test_lesson_ask_stream) ---
+    ("GET", "/api/tutor/lesson-discussions/{}/ask/stream"),
+    # --- 011 Subject & Learner Context (SPA Vue filtered views, pas tutor.html legacy) ---
+    ("GET", "/api/tutor/learning-paths"),
+    ("GET", "/api/tutor/dashboard"),
+    ("GET", "/api/tutor/stats"),
+    ("PATCH", "/api/tutor/subjects/{}"),
 }
 
 # Motifs legacy interdits dans le front (adapté de FORBIDDEN_PATTERNS :
