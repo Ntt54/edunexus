@@ -50,6 +50,7 @@ from ..tutor.providers.gguf_embedding import (
     get_default_manager,
 )
 from ..tutor.providers.hybrid_parser import HybridDocumentParser
+from ..tutor.retrieval import _keyword_score, _tokenize
 from ..tutor.conversations import ConversationService
 from ..tutor.errors import AppError, NotFoundError
 from ..tutor.service import (
@@ -577,6 +578,8 @@ class SettingsUpdate(BaseModel):
     pleias_model: str | None = None
     pleias_enabled: bool | None = None
     pleias_ctx: int | None = None
+    # Header EMB dropdown — disabled sentinel persisted via config.
+    embedding_model: str | None = None
 
 
 class PleiasAskRequest(BaseModel):
@@ -1097,6 +1100,28 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         )
         if subj is None:
             raise HTTPException(status_code=404, detail="unknown subject")
+        if tutor_service.is_embedding_disabled:
+            # Embeddings désactivés (sentinelles "" / "disabled" / "none" / "off") :
+            # aucun appel client.embed (sinon 404 Ollama) — repli scoring par
+            # mots-clés pur sur TOUS les chunks du sujet (locate/rank offline).
+            terms = _tokenize(payload.query)
+            rows = tutor_store.get_subject_chunks(subj.id)
+            results: list[dict[str, Any]] = []
+            for r in rows:
+                score = _keyword_score(r.get("text", ""), terms)
+                if score <= 0.0:
+                    continue
+                results.append({
+                    "id": r["id"],
+                    "book_id": r["book_id"],
+                    "text": r["text"],
+                    "chapter": r.get("chapter"),
+                    "section": r.get("section"),
+                    "page": r.get("page"),
+                    "score": round(float(score), 4),
+                })
+            results.sort(key=lambda x: x["score"], reverse=True)
+            return {"results": results[: payload.k]}
         vectors = await client.embed(tutor_service.model, [payload.query])
         if not vectors:
             return {"results": []}
@@ -2261,7 +2286,9 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         # lister les modèles locaux.
         ollama_names: list[str] = []
         try:
-            from ..client import OllamaClient
+            # Module-level OllamaClient : respecte la couture d'injection
+            # (monkeypatch web_server.OllamaClient dans les tests) au lieu d'un
+            # import local qui court-circuite le mock vers un vrai démon.
             ollama = OllamaClient()
             try:
                 ollama_names = [m.name for m in await ollama.list_models()]
@@ -2306,15 +2333,32 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
     async def tutor_models_get() -> dict[str, Any]:
         return await _tutor_models_payload()
 
+    _EMB_DISABLED_SENTINELS = {"", "disabled", "none", "off"}
+
     @app.put("/api/tutor/models")
     async def tutor_models_put(payload: TutorModelsUpdate) -> dict[str, Any]:
         if payload.embedding is not None:
-            if not isinstance(payload.embedding, str) or not payload.embedding.strip():
+            if not isinstance(payload.embedding, str):
                 raise HTTPException(
-                    status_code=400, detail="embedding doit être une chaîne non vide"
+                    status_code=400, detail="embedding doit être une chaîne"
                 )
-            config.tutor_embedding_model = payload.embedding.strip()
-            tutor_service.set_embedding_model(config.tutor_embedding_model)
+            raw = payload.embedding.strip()
+            low = raw.lower()
+            # Allow disabled sentinels ("" / "disabled" / "none" / "off") — no 400,
+            # persisted, reloaded with client recreation (already has hot-reload).
+            if raw == "" or low in _EMB_DISABLED_SENTINELS:
+                config.tutor_embedding_model = payload.embedding
+                tutor_service.set_embedding_model(config.tutor_embedding_model)
+                config.save()
+            else:
+                if not raw:
+                    raise HTTPException(
+                        status_code=400, detail="embedding doit être une chaîne non vide"
+                    )
+                config.tutor_embedding_model = raw
+                tutor_service.set_embedding_model(config.tutor_embedding_model)
+                config.save()
+            # also persist via save (config setter already schedules save)
         if payload.llm is not None:
             if not isinstance(payload.llm, str) or not payload.llm.strip():
                 raise HTTPException(
@@ -2322,6 +2366,16 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                 )
             config.tutor_model = payload.llm.strip()
         return await _tutor_models_payload()
+
+    _FLAT_CATEGORY_MSG = "Sous-catégories désactivées — catégories à plat uniquement"
+
+    def _reject_flat_category_payload(payload: dict[str, Any]) -> None:
+        """Reject any attempt to create a subcategory (flat-only enforcement)."""
+        for key in ("parent_id", "parentId"):
+            if key in payload:
+                val = payload.get(key)
+                if val is not None and str(val).strip() != "" and str(val).strip().lower() not in ("null", "none"):
+                    raise HTTPException(status_code=400, detail=_FLAT_CATEGORY_MSG)
 
     def _category_rows() -> list[dict[str, Any]]:
         rows = []
@@ -2348,9 +2402,35 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         return {"categories": _category_rows()}
 
     @app.post("/api/tutor/categories")
-    async def tutor_categories_create(payload: TutorLabelCreate) -> dict[str, Any]:
+    async def tutor_categories_create(request: Request) -> dict[str, Any]:
         try:
-            cat = tutor_store.create_category(payload.name)
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        _reject_flat_category_payload(payload)
+        name = (payload.get("name") or "").strip() if isinstance(payload.get("name"), str) else str(payload.get("name") or "").strip()
+        # also support TutorLabelCreate style validation via store
+        try:
+            cat = tutor_store.create_category(name)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return {"category": {"id": cat["id"], "name": cat["name"]}}
+
+    @app.put("/api/tutor/categories")
+    async def tutor_categories_create_put(request: Request) -> dict[str, Any]:
+        # Flat enforcement for PUT variant (creation/update)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        _reject_flat_category_payload(payload)
+        name = (payload.get("name") or "").strip() if isinstance(payload.get("name"), str) else str(payload.get("name") or "").strip()
+        try:
+            cat = tutor_store.create_category(name)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         return {"category": {"id": cat["id"], "name": cat["name"]}}
@@ -2386,15 +2466,63 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
 
     @app.post("/api/tutor/categories/{category_id}/rename")
     async def tutor_categories_rename(
-        category_id: int, payload: TutorLabelRename
+        category_id: int, request: Request
     ) -> dict[str, Any]:
         try:
-            cat = tutor_store.rename_category(category_id, payload.name)
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        _reject_flat_category_payload(payload)
+        name = (payload.get("name") or "").strip() if isinstance(payload.get("name"), str) else str(payload.get("name") or "").strip()
+        try:
+            cat = tutor_store.rename_category(category_id, name)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         except KeyError:
             raise HTTPException(status_code=404, detail="catégorie inconnue")
         return {"category": {"id": cat["id"], "name": cat["name"]}}
+
+    @app.put("/api/tutor/categories/{category_id}")
+    async def tutor_categories_update(
+        category_id: int, request: Request
+    ) -> dict[str, Any]:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        _reject_flat_category_payload(payload)
+        # If payload contains a name, treat as rename; otherwise any parent attempt already rejected
+        if "name" in payload:
+            name = (payload.get("name") or "").strip() if isinstance(payload.get("name"), str) else str(payload.get("name") or "").strip()
+            try:
+                cat = tutor_store.rename_category(category_id, name)
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc))
+            except KeyError:
+                raise HTTPException(status_code=404, detail="catégorie inconnue")
+            return {"category": {"id": cat["id"], "name": cat["name"]}}
+        # No name but flat check already done; disallow empty update
+        raise HTTPException(status_code=400, detail="nom requis")
+
+    @app.post("/api/tutor/categories/{category_id}/move")
+    async def tutor_categories_move(
+        category_id: int, request: Request
+    ) -> dict[str, Any]:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        # Any move implying hierarchy is forbidden; if parent_id/parentId present with value -> 400
+        _reject_flat_category_payload(payload)
+        # Even without parent, move endpoint is flat-disabled: treat as subcategory operation
+        # If payload empty, still flat -> reject to prevent nesting logic
+        raise HTTPException(status_code=400, detail=_FLAT_CATEGORY_MSG)
 
     @app.delete("/api/tutor/categories/{category_id}")
     async def tutor_categories_delete(category_id: int) -> dict[str, Any]:
@@ -3529,6 +3657,22 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                 config.tutor_pleias_enabled = payload.pleias_enabled
             if payload.pleias_ctx is not None:
                 config.tutor_pleias_ctx = payload.pleias_ctx
+            if payload.embedding_model is not None:
+                # Header EMB disabled sentinel — persisted, hot-reload retriever.
+                # Allow "" / "disabled" / "none" / "off" as disabled; normal
+                # names persist verbatim. No 400 for disabled sentinels.
+                if not isinstance(payload.embedding_model, str):
+                    raise HTTPException(status_code=400, detail="embedding_model doit être une chaîne")
+                raw_emb = payload.embedding_model.strip()
+                low_emb = raw_emb.lower()
+                if raw_emb == "" or low_emb in {"disabled", "none", "off"}:
+                    config.tutor_embedding_model = payload.embedding_model
+                else:
+                    config.tutor_embedding_model = raw_emb
+                try:
+                    tutor_service.set_embedding_model(config.tutor_embedding_model)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         config.save()  # persistance immédiate (préférence utilisateur)

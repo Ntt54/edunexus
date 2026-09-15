@@ -35,23 +35,35 @@ const nextTitle = computed(() => filtered.value?.nextStep?.title ?? legacyNextSt
 const hasFiltered = computed(() => filtered.value !== null);
 
 async function loadFiltered() {
-  const sid = activeSubjectId.value || localStorage.getItem("edunexus.space") || localStorage.getItem("edunexus:subject") || "";
-  const lid = activeLearnerId.value || localStorage.getItem("edunexus.learner") || localStorage.getItem("edunexus:learner") || "";
+  const sid = (activeSubjectId.value || localStorage.getItem("edunexus.space") || localStorage.getItem("edunexus:subject") || "").trim();
+  const lid = (activeLearnerId.value || localStorage.getItem("edunexus.learner") || localStorage.getItem("edunexus:learner") || "").trim();
   const gen = ++dashGen;
-  // No-flash: clear previous matter data immediately, show loader
-  if (sid) {
-    filteredLoading.value = true;
-    filtered.value = null;
-    filteredError.value = null;
-  }
+  // garde anti-spam: si pas de matière, pas de fetch, état vide local immédiat (évite 400 loop + blink)
   if (!sid) {
     filteredLoading.value = false;
+    filtered.value = { nextStep: null, counts: { sources: 0, notions: 0 }, paths: [] };
     filteredSubjectName.value = "";
+    filteredError.value = null;
     return;
+  }
+  // No-flash: clear previous matter data immediately, show loader
+  filteredLoading.value = true;
+  filtered.value = null;
+  filteredError.value = null;
+  // helper tolerant: map 400/404 → vide sans boucle, single retry backoff sinon
+  async function fetchDashWithGuard(id: string, learner: string | undefined, retried = false): Promise<{ nextStep: { id: string; title: string; progress: number; notion?: string } | null; counts: { sources: number; notions: number }; paths: unknown[] }> {
+    try {
+      return await tutorApi.getDashboardFiltered(id, learner) as unknown as { nextStep: { id: string; title: string; progress: number; notion?: string } | null; counts: { sources: number; notions: number }; paths: unknown[] };
+    } catch (e) {
+      const st = (e as { status?: number }).status;
+      if (st === 400 || st === 404) return { nextStep: null, counts: { sources: 0, notions: 0 }, paths: [] };
+      if (!retried) { await new Promise(r => setTimeout(r, 700)); return fetchDashWithGuard(id, learner, true); }
+      throw e;
+    }
   }
   try {
     const [dash, subjRes] = await Promise.all([
-      tutorApi.getDashboardFiltered(sid, lid || undefined).catch(() => ({ nextStep: null, counts: { sources: 0, notions: 0 }, paths: [] })),
+      fetchDashWithGuard(sid, lid || undefined).catch(() => ({ nextStep: null, counts: { sources: 0, notions: 0 }, paths: [] } as unknown as { nextStep: null; counts: { sources: number; notions: number }; paths: unknown[] })),
       tutorApi.getSubjects().catch(() => ({ subjects: [] as Array<{ id: string; name: string }>, active_id: null })),
     ]);
     if (gen !== dashGen) return;
@@ -61,6 +73,8 @@ async function loadFiltered() {
   } catch (e) {
     if (gen !== dashGen) return;
     filteredError.value = e instanceof Error ? e.message : "Erreur";
+    // évite écran bloqué: fallback vide
+    filtered.value = { nextStep: null, counts: { sources: 0, notions: 0 }, paths: [] };
   } finally {
     if (gen === dashGen) filteredLoading.value = false;
   }

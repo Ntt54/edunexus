@@ -88,32 +88,47 @@ const activeSubjectId = ref<string>(readStored(ACTIVE_SUBJECT_KEYS));
 const activeLearnerId = ref<string>(readStored(ACTIVE_LEARNER_KEYS));
 const showAllSources = ref<boolean>(readShowAll());
 
+let lastEmitSubjectId: string | null = null;
+let lastEmitLearnerId: string | null = null;
 function emitSubjectChange(id: string) {
+  // déduplication: ne pas spammer si même id émis à la suite (évite boucle Dashboard blink)
+  if (lastEmitSubjectId === id) return;
+  lastEmitSubjectId = id;
   try {
     window.dispatchEvent(new CustomEvent("edunexus:subjectChange", { detail: id }));
+    // legacy compat mais une seule fois par tick
     window.dispatchEvent(new CustomEvent("subjectChange", { detail: id }));
     window.dispatchEvent(new CustomEvent("edunexus:subjects-changed"));
   } catch { /* ignore */ }
 }
 function emitLearnerChange(id: string) {
+  if (lastEmitLearnerId === id) return;
+  lastEmitLearnerId = id;
   try {
     window.dispatchEvent(new CustomEvent("edunexus:learnerChange", { detail: id }));
     window.dispatchEvent(new CustomEvent("learnerChange", { detail: id }));
   } catch { /* ignore */ }
 }
 function setActiveSubjectId(id: string) {
-  activeSubjectId.value = id;
+  const normalized = String(id || "").trim();
+  if (activeSubjectId.value === normalized && localStorage.getItem(ACTIVE_SUBJECT_KEYS[0]) === normalized) {
+    // même id déjà actif → pas d'emit redondant (évite retry loop)
+    return;
+  }
+  activeSubjectId.value = normalized;
   try {
-    for (const k of ACTIVE_SUBJECT_KEYS) localStorage.setItem(k, id);
+    for (const k of ACTIVE_SUBJECT_KEYS) localStorage.setItem(k, normalized);
   } catch { /* ignore */ }
-  emitSubjectChange(id);
+  emitSubjectChange(normalized);
 }
 function setActiveLearnerId(id: string) {
-  activeLearnerId.value = id;
+  const normalized = String(id || "").trim();
+  if (activeLearnerId.value === normalized) return;
+  activeLearnerId.value = normalized;
   try {
-    for (const k of ACTIVE_LEARNER_KEYS) localStorage.setItem(k, id);
+    for (const k of ACTIVE_LEARNER_KEYS) localStorage.setItem(k, normalized);
   } catch { /* ignore */ }
-  emitLearnerChange(id);
+  emitLearnerChange(normalized);
 }
 function setShowAllSources(v: boolean) {
   showAllSources.value = v;

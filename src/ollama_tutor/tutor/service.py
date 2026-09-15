@@ -21,6 +21,21 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Sentinel values for disabled embeddings (header dropdown: LLM alone).
+_EMB_DISABLED = {"", "disabled", "none", "off"}
+
+
+def _is_emb_disabled(model: str | None) -> bool:
+    return str(model or "").strip().lower() in _EMB_DISABLED
+
+
+def _normalize_emb_model(value: str | None) -> str:
+    raw = str(value or "").strip()
+    low = raw.lower()
+    if low in {"disabled", "none", "off"}:
+        return "disabled"
+    return raw
+
 
 # ---------------------------------------------------------------------------
 # Durcissement upload (010 P2-Robustesse, T041)
@@ -562,51 +577,84 @@ class TutorService:
         ))
 
     async def _run_index_queue(self) -> None:
-        """Consume all pending books sequentially until paused or exhausted."""
+        """Consume all queued ingestion jobs sequentially FIFO until paused or exhausted.
+
+        FIFO via ``ingestion_jobs`` (created_at ASC) — the single
+        llama-server invariant: exactly one job owns the local LLM at a time.
+        After each job completes (success/error) the next ``queued`` row is
+        automatically dequeued and started; no manual poll trigger needed.
+        Idempotent status transitions: ``queued`` → ``extracting``/``embedding``
+        → ``completed``/``failed`` (``failed`` reachable from any state) with
+        proper transaction handling. Legacy pending books without a job are
+        backfilled via :meth:`ensure_book_job`.
+        """
         stop = self._index_queue_stop
         try:
             while stop is not None and not stop.is_set():
-                books = [
-                    book for book in self.store.list_all_books()
-                    if book.status == "pending"
-                ]
-                if not books:
-                    break
-                book = books[0]
-                subject_id = self.store.get_book_subject_id(book.id)
-                if subject_id is None:
-                    self.store.set_book_error(book.id, "subject missing")
-                    self._index_queue_errors += 1
-                    continue
+                # 1) Prefer FIFO queued ingestion_jobs
+                queued = self.store.get_next_queued_job()
+                book: Any | None = None
+                subject_id: str | None = None
+                job: dict[str, Any] | None = None
+                if queued is not None:
+                    job = queued
+                    book = self.store.get_book(job["book_id"]) if job.get("book_id") else None
+                    if book is None:
+                        # Orphan job: fail it and continue to next
+                        try:
+                            self.store.update_ingestion_job(job["id"], status="failed", error_message="book missing")
+                        except Exception:
+                            pass
+                        self._index_queue_errors += 1
+                        continue
+                    subject_id = self.store.get_book_subject_id(book.id)
+                    if subject_id is None:
+                        msg = "subject missing"
+                        self.store.set_book_error(book.id, msg)
+                        try:
+                            self.store.update_ingestion_job(job["id"], status="failed", error_message=msg)
+                        except Exception:
+                            pass
+                        _log_error(self.config, "queue", f"job {job['id']} subject missing for book {book.id}")
+                        self._index_queue_errors += 1
+                        continue
+                    # Atomically claim queued → extracting (idempotent)
+                    claimed = self.store.claim_queued_job(job["id"])
+                    if claimed is None:
+                        # Race: already claimed by another trigger — pick next
+                        await asyncio.sleep(0.05)
+                        continue
+                    job = claimed
+                else:
+                    # 2) Fallback: pending books without a queued job (legacy/orphan backfill)
+                    pending_books = [
+                        b for b in self.store.list_all_books() if b.status == "pending"
+                    ]
+                    if not pending_books:
+                        break
+                    book = pending_books[0]
+                    subject_id = self.store.get_book_subject_id(book.id)
+                    if subject_id is None:
+                        self.store.set_book_error(book.id, "subject missing")
+                        _log_error(self.config, "queue", f"book {book.id} subject missing")
+                        self._index_queue_errors += 1
+                        continue
+                    try:
+                        job = self.ensure_book_job(book.id, subject_id, Path(book.source_path))
+                    except Exception as exc:
+                        logger.warning("queue job tracking unavailable for book %s: %s", book.id, exc)
+                        job = None
+                # At this point we have a book + subject + optional job
+                assert book is not None and subject_id is not None
                 self._index_queue_current = book.id
                 self._cancel_flags[book.id] = threading.Event()
-                # Tracked run: the worker drives the book's ingestion_jobs
-                # row through the phased pipeline (5→100) instead of the
-                # blind legacy path, so progress/ETA polling sees it.
-                job: dict[str, Any] | None = None
-                try:
-                    job = self.ensure_book_job(
-                        book.id, subject_id, Path(book.source_path)
-                    )
-                except Exception as exc:  # DB trouble: fall back to blind run
-                    logger.warning(
-                        "queue job tracking unavailable for book %s: %s",
-                        book.id,
-                        exc,
-                    )
                 try:
                     if job is not None:
                         await self._run_ingestion_job(
-                            job["id"],
-                            subject_id,
-                            book.id,
-                            Path(book.source_path),
-                            book.format,
+                            job["id"], subject_id, book.id, Path(book.source_path), book.format,
                         )
                     else:
-                        await self._run_index(
-                            subject_id, book, Path(book.source_path), book.format
-                        )
+                        await self._run_index(subject_id, book, Path(book.source_path), book.format)
                 finally:
                     self._index_queue_current = None
                 final = self.store.get_book(book.id)
@@ -616,11 +664,11 @@ class TutorService:
                     if self._retryable_index_error(final.error) and final.retry_count < 3:
                         self.store.retry_book(book.id)
                         if job is not None:
-                            # Same job id keeps polling continuity across retries.
                             self.store.requeue_ingestion_job(job["id"])
                         await asyncio.sleep(min(30, 2 ** final.retry_count))
                         continue
                     self._index_queue_errors += 1
+                # Loop continues immediately to next queued FIFO entry
         finally:
             self._index_queue_current = None
             self._index_queue_task = None
@@ -763,12 +811,35 @@ class TutorService:
         }
 
     def set_embedding_model(self, model: str) -> None:
-        """Switch the active embedding model and invalidate retrieval caches."""
-        model = model.strip()
-        if not model:
+        """Switch the active embedding model and invalidate retrieval caches.
+
+        Sentinel values ``""`` / ``"disabled"`` / ``"none"`` / ``"off"``
+        disable embeddings entirely (RAG off, direct LLM, no vectors, no
+        ``client.embed`` calls). Persisted via config, reloaded with client
+        recreation on hot-reload.
+        """
+        norm = _normalize_emb_model(model)
+        # Allow disabled sentinels (empty canonical "" or "disabled")
+        if not norm:
+            # bare empty is a valid disabled sentinel
+            self.model = norm
+            self.retriever.set_model(norm)
+            return
+        if norm.lower() in _EMB_DISABLED and norm != "":
+            self.model = norm
+            self.retriever.set_model(norm)
+            return
+        if not norm:
             raise ValueError("embedding model must be non-empty")
-        self.model = model
-        self.retriever.set_model(model)
+        self.model = norm
+        self.retriever.set_model(norm)
+
+    @property
+    def is_embedding_disabled(self) -> bool:
+        """True when embeddings are disabled via sentinel."""
+        return _is_emb_disabled(self.model) or _is_emb_disabled(
+            getattr(self.config, "tutor_embedding_model", "")
+        )
 
     def _generation_options(self) -> OllamaOptions:
         """Build inference options from persisted settings.
@@ -981,8 +1052,10 @@ class TutorService:
         # no sources frame, no citations, NO error frame). The tutor stays
         # usable with an empty library. Grounded mode is unchanged whenever
         # passages ARE retrieved.
+        # EMB disabled sentinel (header dropdown): skip retrieval entirely
+        # (no embed call, no vectors, direct LLM — no 400, no fallback echo).
         chunks: list[ScoredChunk] = []
-        if self.store.get_indexed_chunks(subject_id, model=self.model):
+        if not self.is_embedding_disabled and self.store.get_indexed_chunks(subject_id, model=self.model):
             # 1) Retrieve subject-scoped passages (périmètre conversation si
             # des sources actives sont définies — 005-platform-ui-library).
             chunks = await self.retriever.retrieve(
@@ -2983,6 +3056,9 @@ class TutorService:
         if not texts:
             return {"book_id": book_id, "reembedded": 0}
         model = self.config.tutor_embedding_model
+        if _is_emb_disabled(model):
+            # EMB disabled: keep chunks without vectors, report skipped
+            return {"book_id": book_id, "reembedded": 0, "model": model, "skipped": True}
         vectors = await self.client.embed(model, texts)
         n = self.store.update_chunks_embedding(book.id, vectors, model)
         self.retriever.invalidate(subject_id)
@@ -3116,6 +3192,14 @@ class TutorService:
         batch_size = max(1, int(getattr(self.config, "tutor_embed_batch_size", 16) or 16))
         total = len(texts)
         try:
+            if self.is_embedding_disabled or _is_emb_disabled(model):
+                # EMB disabled: no embed call, keep existing chunks without vectors
+                # but mark job completed as skipped (book stays ready)
+                self.store.update_ingestion_job(
+                    job_id, status="completed", progress_percent=100,
+                    embedding_status="skipped", nodes_created=len(texts),
+                )
+                return
             self.store.update_ingestion_job(
                 job_id, status="embedding", progress_percent=90,
                 embedding_status="running",
@@ -3335,7 +3419,17 @@ class TutorService:
             self._close_client()
 
     def _ingestion_skip_mode(self) -> bool:
-        """True when embeddings are disabled (P0-B ``skip`` mode)."""
+        """True when embeddings are disabled (P0-B ``skip`` mode or header disabled).
+
+        The header dropdown sentinel (``""`` / ``"disabled"`` / ``"none"`` / ``"off"``)
+        disables RAG purely via ``tutor_embedding_model`` — no ``client.embed``
+        call, no vectors, book marked ``ready`` without queue cost. This is
+        additive to the existing ``EMBEDDING_MODE=skip`` path.
+        """
+        if _is_emb_disabled(self.model) or _is_emb_disabled(
+            getattr(self.config, "tutor_embedding_model", "")
+        ):
+            return True
         try:
             from .providers import resolve_embedding_mode
 
@@ -3654,7 +3748,9 @@ class TutorService:
             max_concurrency = getattr(self.config, "tutor_max_parallel_embed", 1)
             self.store.update_index_progress(book_id, 0, len(chunk_texts))
 
-            if self.embedding_provider is not None:
+            if self._ingestion_skip_mode():
+                embeddings = [[] for _ in chunk_texts]
+            elif self.embedding_provider is not None:
                 embeddings = await self._embed_with_provider(
                     chunk_texts,
                     batch_size=batch_size,

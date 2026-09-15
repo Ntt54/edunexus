@@ -131,13 +131,21 @@ def test_models_put_round_trip_persists(client: TestClient) -> None:
     }
 
 
-def test_models_put_rejects_empty_strings(client: TestClient) -> None:
-    assert client.put("/api/tutor/models", json={"embedding": ""}).status_code == 400
-    assert client.put("/api/tutor/models", json={"embedding": "   "}).status_code == 400
+def test_models_put_sentinels_disable_embeddings(client: TestClient) -> None:
+    # Sentinelles embeddings désactivés : "" et "   " sont ACCEPTÉS (RAG off),
+    # jamais 400 — canonisés en "" (voir test_emb_disabled pour disabled/none).
+    r = client.put("/api/tutor/models", json={"embedding": ""})
+    assert r.status_code == 200
+    assert r.json()["current"]["embedding"] == ""
+    r = client.put("/api/tutor/models", json={"embedding": "   "})
+    assert r.status_code == 200
+    assert r.json()["current"]["embedding"] == ""
+    # LLM : chaîne vide/espaces toujours rejetés (400).
     assert client.put("/api/tutor/models", json={"llm": ""}).status_code == 400
-    # Partial update keeps the other field untouched.
+    assert client.put("/api/tutor/models", json={"llm": "   "}).status_code == 400
+    # Partial update keeps the (disabled) embedding field untouched.
     r = client.put("/api/tutor/models", json={"llm": "only-llm"})
-    assert r.json()["current"]["embedding"] == "embeddinggemma"
+    assert r.json()["current"]["embedding"] == ""
 
 
 # ---------------------------------------------------------------------------

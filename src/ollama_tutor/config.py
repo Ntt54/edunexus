@@ -328,14 +328,38 @@ class Config:
         self._data.setdefault("tutor", {})["enabled"] = value
         self._schedule_save()
 
+    # Sentinel values that mean "embeddings disabled" (header dropdown).
+    # Empty string, "disabled", "none", "off" all disable RAG (no embedding
+    # cost, direct LLM without extraits). Persisted as "disabled" (canonical)
+    # except bare empty which stays "" for compat.
+    _EMB_DISABLED_SENTINELS = {"", "disabled", "none", "off"}
+
+    @staticmethod
+    def _is_emb_disabled_value(value: str | None) -> bool:
+        return str(value or "").strip().lower() in Config._EMB_DISABLED_SENTINELS
+
+    @staticmethod
+    def _normalize_emb_model(value: str | None) -> str:
+        raw = str(value or "").strip()
+        low = raw.lower()
+        if low in {"disabled", "none", "off"}:
+            return "disabled"
+        # bare empty stays "" (also disabled, preserves sentinel)
+        return raw
+
     @property
     def tutor_embedding_model(self) -> str:
         return self._data.get("tutor", {}).get("embedding_model", "embeddinggemma")
 
     @tutor_embedding_model.setter
     def tutor_embedding_model(self, value: str) -> None:
-        self._data.setdefault("tutor", {})["embedding_model"] = value
+        self._data.setdefault("tutor", {})["embedding_model"] = self._normalize_emb_model(value)
         self._schedule_save()
+
+    @property
+    def tutor_embedding_disabled(self) -> bool:
+        """True when embeddings are disabled via sentinel."""
+        return str(self.tutor_embedding_model or "").strip().lower() in self._EMB_DISABLED_SENTINELS
 
     @property
     def tutor_model(self) -> str:

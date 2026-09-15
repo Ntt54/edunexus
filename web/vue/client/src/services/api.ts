@@ -68,6 +68,27 @@ export function buildLearnersUrl(subjectId?: string | null): string {
   return subjectId ? `/learners?subject_id=${encodeURIComponent(subjectId)}` : "/learners";
 }
 
+// ── 011 fix · garde anti-spam + retour vide local ──────────────────
+function isEmptySubjectId(id: string | null | undefined): boolean {
+  return !id || !String(id).trim();
+}
+const CACHED_EMPTY_DASHBOARD = { nextStep: null as null, counts: { sources: 0, notions: 0 }, paths: [] as unknown[] };
+const CACHED_EMPTY_PATHS = { paths: [] as Array<{ id: string; title: string; description: string; status: string; progress?: number }> };
+const CACHED_EMPTY_LEARNERS: { learners: LearnerProfile[] } = { learners: [] };
+const CACHED_EMPTY_BOOKS: { books: SourceBook[] } = { books: [] };
+function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
+async function requestWithSingleRetry<T>(path: string, init?: RequestInit): Promise<T> {
+  try {
+    return await request<T>(path, init);
+  } catch (e) {
+    const status = (e as { status?: number }).status;
+    // 400/404 métier : ne pas retenter (mappée en vide par l'appelant), 5xx/réseau : un seul retry avec backoff
+    if (status === 400 || status === 404 || status === 409) throw e;
+    await sleep(700);
+    return request<T>(path, init);
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, {
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
@@ -200,21 +221,50 @@ export const tutorApi = {
   },
 
   // ── 011 · Helpers filtrés (FR-001/006) ──────────────────────────
+  // Garde: si subject_id vide → retour vide local immédiat, sans fetch (évite 400 + retry loop + blink)
   async getDashboardFiltered(subjectId: string, learnerId?: string | null): Promise<{ nextStep: { id: string; title: string; progress: number; notion?: string } | null; counts: { sources: number; notions: number }; paths: unknown[] }> {
+    if (isEmptySubjectId(subjectId)) return Promise.resolve({ ...CACHED_EMPTY_DASHBOARD, counts: { ...CACHED_EMPTY_DASHBOARD.counts }, paths: [] });
     const url = cacheBust(buildDashboardUrl(subjectId, learnerId || undefined));
-    return request(url);
+    try {
+      return await requestWithSingleRetry(url);
+    } catch (e) {
+      const s = (e as { status?: number }).status;
+      if (s === 400 || s === 404) return { ...CACHED_EMPTY_DASHBOARD, counts: { ...CACHED_EMPTY_DASHBOARD.counts }, paths: [] };
+      throw e;
+    }
   },
   async getPathsFiltered(subjectId: string, learnerId?: string | null): Promise<{ paths: Array<{ id: string; title: string; description: string; status: string; progress?: number }> }> {
+    if (isEmptySubjectId(subjectId)) return Promise.resolve({ paths: [] });
     const url = cacheBust(buildPathsUrl(subjectId, learnerId || undefined));
-    return request(url);
+    try {
+      return await requestWithSingleRetry(url);
+    } catch (e) {
+      const s = (e as { status?: number }).status;
+      if (s === 400 || s === 404) return { paths: [] };
+      throw e;
+    }
   },
   async getLearnersFiltered(subjectId?: string | null): Promise<{ learners: LearnerProfile[] }> {
+    if (isEmptySubjectId(subjectId)) return Promise.resolve({ learners: [] });
     const url = cacheBust(buildLearnersUrl(subjectId || undefined));
-    return request(url);
+    try {
+      return await requestWithSingleRetry(url);
+    } catch (e) {
+      const s = (e as { status?: number }).status;
+      if (s === 400 || s === 404) return { learners: [] };
+      throw e;
+    }
   },
   async getBooksFiltered(subjectId?: string | null, all?: boolean): Promise<{ books: SourceBook[] }> {
+    if (!all && isEmptySubjectId(subjectId)) return Promise.resolve({ books: [] });
     const url = cacheBust(buildBooksUrl(subjectId || undefined, !!all));
-    return request(url);
+    try {
+      return await requestWithSingleRetry(url);
+    } catch (e) {
+      const s = (e as { status?: number }).status;
+      if (s === 400 || s === 404) return { books: [] };
+      throw e;
+    }
   },
 
   // ── Dashboard existant ─────────────────────────────────────────

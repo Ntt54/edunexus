@@ -42,6 +42,7 @@ const searchResults = ref<SearchResult[]>([]);
 const searchLoading = ref(false);
 const importSubject = ref("");
 const importFile = ref<File | null>(null);
+const pendingFiles = ref<File[]>([]);
 const importLoading = ref(false);
 const importProgress = ref("");
 const autoClassifying = ref(false);
@@ -54,6 +55,30 @@ const renamingName = ref("");
 const loading = ref(true);
 
 // (pollTimer déclaré dans la section Polling ci-dessous)
+
+// ── Flat categories guard ────────────────────────────────────────
+// Backend déjà plat (table categories sans parent_id), mais on écrase
+// tout nesting résiduel côté frontend : children/subcategories/parent_id
+// sont ignorés — une catégorie contient directement les livres, pas de
+// sous-catégories.
+function flattenCategories(raw: unknown): LibraryCategory[] {
+  const out: LibraryCategory[] = [];
+  const seen = new Set<number>();
+  const walk = (arr: unknown) => {
+    if (!Array.isArray(arr)) return;
+    for (const c of arr as Array<Record<string, unknown>>) {
+      if (!c || typeof c.id !== "number") continue;
+      if (seen.has(c.id)) continue;
+      seen.add(c.id);
+      out.push({ id: c.id, name: String(c.name ?? ""), book_count: Number((c as { book_count?: unknown }).book_count ?? 0) } as LibraryCategory);
+      if (Array.isArray((c as { children?: unknown }).children)) walk((c as { children?: unknown }).children);
+      if (Array.isArray((c as { subcategories?: unknown }).subcategories)) walk((c as { subcategories?: unknown }).subcategories);
+      if (Array.isArray((c as { categories?: unknown }).categories)) walk((c as { categories?: unknown }).categories);
+    }
+  };
+  walk(raw);
+  return out;
+}
 
 // ── Helpers ────────────────────────────────────────────────────
 const subject = computed(() => state.data?.subject);
@@ -128,7 +153,7 @@ async function loadAll() {
       tutorApi.getQueueStatus().catch(() => ({ running: false, pending_count: 0, completed_count: 0 })),
     ]);
     if (gen !== booksGeneration) return;
-    categories.value = catRes.categories ?? [];
+    categories.value = flattenCategories(catRes.categories ?? []);
     queue.value = queueRes;
     await refreshJobs();
 
@@ -533,33 +558,53 @@ function onDrop(e: DragEvent) {
   e.preventDefault();
   dragOver.value = false;
   const files = e.dataTransfer?.files;
-  if (files?.length) importFile.value = files[0];
+  if (files?.length) {
+    pendingFiles.value = Array.from(files);
+    importFile.value = pendingFiles.value[0] || null;
+  }
 }
 function onFileChange(e: Event) {
   const input = e.target as HTMLInputElement;
-  if (input.files?.length) importFile.value = input.files[0];
+  if (input.files?.length) {
+    pendingFiles.value = Array.from(input.files);
+    importFile.value = pendingFiles.value[0] || null;
+  }
 }
 
 async function doImport() {
-  const file = importFile.value;
-  // Domaine optionnel : vide ⇒ le backend infère depuis le nom du fichier.
+  const files = pendingFiles.value.length ? pendingFiles.value : (importFile.value ? [importFile.value] : []);
   const domain = importSubject.value.trim();
-  if (!file) {
+  if (!files.length) {
     importProgress.value = t("library.importNeedFile");
     return;
   }
   importLoading.value = true;
-  importProgress.value = t("library.importing");
-  try {
-    await tutorApi.importDocument(file, domain, undefined, true);
-    importProgress.value = t("library.importDone");
-    importFile.value = null;
-    await refreshBooks();
-    startPolling();
-    setTimeout(() => { showImport.value = false; importProgress.value = ""; }, 1500);
-  } catch (e) {
-    importProgress.value = e instanceof Error ? e.message : "Erreur d'import";
+  let ok = 0;
+  let dup = 0;
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    importProgress.value = `${t("library.importing")} ${i + 1}/${files.length}`;
+    try {
+      const res: any = await tutorApi.importDocument(file, domain, undefined, true);
+      if (res?.status === "ready" || res?.duplicate) dup++;
+      else ok++;
+    } catch (e) {
+      importProgress.value = e instanceof Error ? e.message : "Erreur d'import";
+      importLoading.value = false;
+      return;
+    }
   }
+  const parts: string[] = [];
+  if (ok) parts.push(`${ok} importé(s)`);
+  if (dup) parts.push(`${dup} doublon(s)`);
+  importProgress.value = parts.join(" · ") || (t("library.importDone") as string);
+  importFile.value = null;
+  pendingFiles.value = [];
+  // clear file input
+  if (fileInputRef.value) fileInputRef.value.value = "";
+  await refreshBooks();
+  startPolling();
+  setTimeout(() => { showImport.value = false; importProgress.value = ""; }, 1800);
   importLoading.value = false;
 }
 
@@ -582,7 +627,7 @@ async function doAutoClassify() {
       }
     }
     await Promise.all([tutorApi.getCategories(), refreshBooks()]);
-    categories.value = (await tutorApi.getCategories()).categories ?? [];
+    categories.value = flattenCategories((await tutorApi.getCategories()).categories ?? []);
   } catch { /* best-effort */ }
   autoClassifying.value = false;
 }
@@ -599,11 +644,12 @@ function toggleCategory(id: number) {
 }
 
 async function createCategory() {
+  // Flat only: pas de parent, pas de sous-catégorie
   const name = prompt(t("library.createCategory") + " :");
   if (!name?.trim()) return;
   try {
     await tutorApi.createCategory(name.trim());
-    categories.value = (await tutorApi.getCategories()).categories ?? [];
+    categories.value = flattenCategories((await tutorApi.getCategories()).categories ?? []);
   } catch { /* best-effort */ }
 }
 
@@ -624,7 +670,7 @@ async function commitRename(cat: { id: number | null; name: string }) {
   if (!name || name === cat.name) { renamingCategoryId.value = null; return; }
   try {
     await tutorApi.renameCategory(cat.id, name);
-    categories.value = (await tutorApi.getCategories()).categories ?? [];
+    categories.value = flattenCategories((await tutorApi.getCategories()).categories ?? []);
   } catch { /* best-effort */ }
   renamingCategoryId.value = null;
 }
@@ -643,7 +689,7 @@ async function deleteCategory(cat: LibraryCategory) {
   if (!confirm(msg)) return;
   try {
     await tutorApi.deleteCategory(cat.id);
-    categories.value = (await tutorApi.getCategories()).categories ?? [];
+    categories.value = flattenCategories((await tutorApi.getCategories()).categories ?? []);
     await refreshBooks();
   } catch { /* best-effort */ }
 }
@@ -737,116 +783,77 @@ async function doSemanticSearch() {
   searchLoading.value = false;
 }
 
-// ── Build tree structure ───────────────────────────────────────
-// ── Catégories vides de premier niveau ───────────────────────────
-// Règle (documentée) : une catégorie SANS livre nulle part (0 doc global)
-// se rend comme un bac à part entière, pair des domaines (domaines d'abord,
-// catégories vides ensuite) — jamais nichée sous un domaine. Dès qu'elle
-// contient des livres, retour au rendu imbriqué (montre l'appartenance).
-// Les catégories vides d'UN domaine mais pleines ailleurs restent affichées
-// « 0 doc » dans ce domaine (cible d'affectation visible partout).
-const emptyTopCategories = computed(() => {
-  const counts = new Map<number, number>();
-  for (const b of allBooksFlat.value) {
-    for (const c of catsOf(b.id)) counts.set(c, (counts.get(c) ?? 0) + 1);
-  }
-  return categories.value.filter((c) => (counts.get(c.id) ?? 0) === 0);
-});
-
-const emptyTopCatIds = computed(() => new Set(emptyTopCategories.value.map((c) => c.id)));
-interface TreeNode {
-  id: string;
-  name: string;
-  type: "domain";
-  open: boolean;
-  books: SourceBook[];
-  categories: CategoryNode[];
-  // Affichage plat (sans niveau catégorie) quand le domaine ne contient
-  // aucune vraie catégorie non vide : tous ses livres tiennent dans le
-  // pseudo-groupe « Non classé » (id null), le nœud intermédiaire serait
-  // un niveau fantôme. Dès qu'≥1 vraie catégorie non vide existe,
-  // l'imbrication est conservée (« Non classé » reste alors informatif).
-  flat: boolean;
-  // Vrai si le nom du domaine est introuvable (course rare entre deux
-  // appels) : l'en-tête est alors masqué plutôt que d'afficher un id brut.
-  headless: boolean;
-}
-
+// ── Flat categories only ───────────────────────────────────────
+// Une catégorie contient directement les livres — pas de sous-catégories,
+// pas de nesting. Tout children/subcategories éventuel du backend est
+// ignoré (flattenCategories). Rendu: liste plate catégorie → livres.
 interface CategoryNode {
   id: number | null;
   name: string;
   books: SourceBook[];
 }
 
+// Liste plate globale (filtrée par recherche + matière active). Chaque
+// catégorie est un header + ses livres, sans niveau intermédiaire.
+const flatCategoryNodes = computed<CategoryNode[]>(() => {
+  const q = searchQuery.value.toLowerCase().trim();
+  const books = q
+    ? allBooksFlat.value.filter((b) => b.title.toLowerCase().includes(q))
+    : allBooksFlat.value;
+  const catMap = new Map<number | null, SourceBook[]>();
+  for (const b of books) {
+    const cats = catsOf(b.id);
+    if (cats.length === 0) {
+      const arr = catMap.get(null) ?? [];
+      if (!arr.find((x) => x.id === b.id)) arr.push(b);
+      catMap.set(null, arr);
+    } else {
+      for (const catId of cats) {
+        const arr = catMap.get(catId) ?? [];
+        if (!arr.find((x) => x.id === b.id)) arr.push(b);
+        catMap.set(catId, arr);
+      }
+    }
+  }
+  const nodes: CategoryNode[] = [];
+  for (const cat of categories.value) {
+    nodes.push({ id: cat.id, name: cat.name, books: catMap.get(cat.id) ?? [] });
+  }
+  const uncat = catMap.get(null);
+  if (uncat?.length) nodes.push({ id: null, name: t("library.uncategorized") as string, books: uncat });
+  // Keep empty categories visible as 0-doc headers (flat, no nesting)
+  return nodes;
+});
+
+// Domaines: conservés pour filtrage/orphelins, mais sans imbriquer les
+// catégories (flat). Sert au select "Déplacer" et à l'aperçu par domaine
+// optionnel — pas à la structure principale catégorie→livres.
+interface TreeNode {
+  id: string;
+  name: string;
+  type: "domain";
+  open: boolean;
+  books: SourceBook[];
+  headless: boolean;
+}
 const tree = computed<TreeNode[]>(() => {
   const result: TreeNode[] = [];
-  // Group books by subject
-  const subjectBooks = new Map<string, SourceBook[]>();
   for (const [subId, books] of booksBySubject.value.entries()) {
+    const subName =
+      subjects.value.find((s) => s.id === subId)?.name ??
+      (state.data?.subject?.id === subId ? state.data?.subject.name : null);
     const filtered = searchQuery.value
       ? books.filter((b) => b.title.toLowerCase().includes(searchQuery.value.toLowerCase()))
       : books;
-    subjectBooks.set(subId, filtered);
-  }
-
-  for (const [subId, books] of subjectBooks.entries()) {
-    // Nom résolu depuis les domaines chargés (jamais l'id brut) ; repli
-    // sur le domaine actif de l'atelier, sinon en-tête masqué (headless).
-    const activeSubject = state.data?.subject;
-    const subName =
-      subjects.value.find((s) => s.id === subId)?.name ??
-      (activeSubject?.id === subId ? activeSubject.name : null);
-
-    // Group books by category
-    const catMap = new Map<number | null, SourceBook[]>();
-    for (const b of books) {
-      const cats = catsOf(b.id);
-      if (cats.length === 0) {
-        const arr = catMap.get(null) ?? [];
-        arr.push(b);
-        catMap.set(null, arr);
-      } else {
-        for (const catId of cats) {
-          const arr = catMap.get(catId) ?? [];
-          arr.push(b);
-          catMap.set(catId, arr);
-        }
-      }
-    }
-
-    const catNodes: CategoryNode[] = [];
-    // Ordered categories — y compris vides (« 0 doc », cible d'affectation
-    // visible), SAUF les globalement vides rendues de premier niveau.
-    const topIds = emptyTopCatIds.value;
-    for (const cat of categories.value) {
-      if (topIds.has(cat.id)) continue;
-      catNodes.push({ id: cat.id, name: cat.name, books: catMap.get(cat.id) ?? [] });
-    }
-    // Uncategorized
-    const uncatBooks = catMap.get(null);
-    if (uncatBooks?.length) {
-      catNodes.push({ id: null, name: t("library.uncategorized"), books: uncatBooks });
-    }
-
-    // If no categories have books, but there are books, add them as uncategorized
-    if (catNodes.length === 0 && books.length > 0) {
-      catNodes.push({ id: null, name: t("library.uncategorized"), books });
-    }
-
     result.push({
       id: subId,
       name: subName ?? "",
       type: "domain",
       open: openDomains.value.has(subId),
-      books,
-      categories: catNodes,
-      // Plat quand aucune VRAIE catégorie non vide (les nœuds vides seuls
-      // ne justifient pas un niveau intermédiaire).
-      flat: !catNodes.some((c) => c.id != null && c.books.length > 0),
+      books: filtered,
       headless: subName == null,
     });
   }
-
   return result;
 });
 
@@ -925,7 +932,7 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
       >
         <template v-if="importFile">
           <FileText :size="18" aria-hidden="true" style="vertical-align: -3px;" />
-          {{ importFile.name }}
+          {{ importFile.name }}<template v-if="pendingFiles.length > 1"> +{{ pendingFiles.length - 1 }} autres</template>
         </template>
         <template v-else>
           <Upload :size="20" aria-hidden="true" style="vertical-align: -4px; margin-bottom: 4px;" />
@@ -936,6 +943,7 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
           ref="fileInputRef"
           type="file"
           accept=".txt,.md,.pdf,.epub,.docx,.pptx"
+          multiple
           @change="onFileChange"
         />
       </div>
@@ -995,12 +1003,12 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
       </button>
     </section>
 
-    <!-- Document Tree -->
+    <!-- Flat Categories — one level only -->
     <section class="content-panel" style="padding: 23px;">
       <div class="panel-heading" style="margin-bottom: 14px;">
         <div>
-          <p class="eyebrow">{{ t('library.active') }}</p>
-          <h2>{{ t('library.documents', { count: allBooksFlat.length }) }}</h2>
+          <p class="eyebrow">Catégories</p>
+          <h2>{{ t('library.documents', { count: allBooksFlat.length }) }} · {{ categories.length }} catégories</h2>
         </div>
         <button type="button" class="ghost-btn" @click="createCategory">
           <FolderPlus :size="14" aria-hidden="true" />
@@ -1011,171 +1019,11 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
       <div v-if="loading" class="lib-empty">
         <LoaderCircle :size="20" class="spin" aria-hidden="true" />
       </div>
-      <div v-else-if="tree.length === 0" class="lib-empty">{{ t('library.emptyLibrary') }}</div>
+      <div v-else-if="flatCategoryNodes.length === 0 && allBooksFlat.length === 0" class="lib-empty">{{ t('library.emptyLibrary') }}</div>
       <div v-else class="lib-tree lib-tree-scroll">
-        <!-- Domain nodes -->
-        <div v-for="domain in tree" :key="domain.id" class="lib-tnode" :class="{ open: domain.open }">
-          <div v-if="!domain.headless" class="lib-trow">
-            <span class="lib-tcaret" @click="toggleDomain(domain.id)">
-              <ChevronRight :size="14" aria-hidden="true" />
-            </span>
-            <strong class="lib-tlabel" @click="toggleDomain(domain.id)">{{ domain.name }}</strong>
-            <span class="lib-tcount">{{ domain.books.length }} doc</span>
-            <span class="lib-tacts">
-              <button type="button" class="lib-tact" :title="t('library.renameDomain')" @click.stop="renameDomain(domain)">✎</button>
-              <button type="button" class="lib-tact del" :title="t('library.deleteDomain')" @click.stop="deleteDomain(domain)">🗑</button>
-            </span>
-          </div>
-          <div class="lib-tkids">
-            <div v-if="domain.open">
-              <!-- Domaine sans vraie catégorie : livres à plat (même carte
-                que les orphelins), sans nœud « Non classé » fantôme. -->
-              <template v-if="domain.flat">
-                <div v-for="book in domain.books" :key="book.id" class="lib-trow lib-tdoc">
-                  <div style="flex: 1; min-width: 0;">
-                    <div class="lib-src-title">{{ book.title }}</div>
-                    <div class="lib-src-meta">
-                      <span class="lib-fmt-chip">{{ formatChip(book) }}</span>
-                      <span class="lib-badge" :class="`lib-badge-${book.status}`">{{ statusLabel(book.status) }}</span>
-                      <span v-if="book.pages">{{ book.pages }} pages</span>
-                      <span v-else-if="book.chunks_total">{{ book.chunks_total }} fragments</span>
-                    </div>
-                    <div v-if="bookIndexMeta(book)" class="lib-src-meta">{{ bookIndexMeta(book) }}</div>
-                    <div v-if="book.status === 'indexing'" style="height: 4px; border-radius: 99px; background: #e7e8f7; overflow: hidden; margin-top: 6px;">
-                      <div style="width: 40%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--orange), #f5ad4e); animation: indeterminate 1.4s ease infinite;" />
-                    </div>
-                  </div>
-                  <span class="lib-src-actions">
-                    <button type="button" class="lib-tact" :title="t('library.reindex')" @click.stop="reindexBook(book)">↻</button>
-                    <select
-                      :value="moveTarget(book.id)"
-                      :aria-label="t('library.moveTo')"
-                      :title="t('library.moveTo')"
-                      :disabled="movingBook !== null"
-                      style="min-height: 26px; font-size: 11px; max-width: 128px;"
-                      @change="onMoveSelect(book, ($event.target as HTMLSelectElement).value)"
-                    >
-                      <option value="">{{ t('library.moveTo') }}</option>
-                      <optgroup :label="t('library.moveDomains')">
-                        <option v-for="sub in subjects.filter(s => s.id !== domain.id)" :key="sub.id" :value="sub.id">{{ sub.name }}</option>
-                        <option value="__none__">{{ t('library.orphans') }}</option>
-                      </optgroup>
-                      <optgroup v-if="categories.length" :label="t('library.moveCategories')">
-                        <option v-for="cat in categories" :key="'movecat-' + cat.id" :value="'cat:' + cat.id">{{ cat.name }}</option>
-                      </optgroup>
-                    </select>
-                    <button type="button" class="lib-src-del" :title="t('library.deleteBook')" @click.stop="deleteBook(book)">×</button>
-                  </span>
-                </div>
-                <!-- Catégories réelles vides : visibles et actionnables même
-                  en mode plat (sinon une création resterait invisible). -->
-                <template v-for="cat in domain.categories" :key="'flat-' + (cat.id ?? 'uncat')">
-                  <div v-if="cat.id != null && !cat.books.length" class="lib-tnode" :class="{ open: openCategories.has(cat.id ?? -1) }">
-                    <div class="lib-trow">
-                      <span class="lib-tcaret" @click="toggleCategory(cat.id ?? -1)">
-                        <ChevronRight :size="14" aria-hidden="true" />
-                      </span>
-                      <template v-if="renamingCategoryId === cat.id">
-                        <input
-                          v-model="renamingName"
-                          class="lib-rename-input"
-                          type="text"
-                          style="width: 160px; min-height: 26px; font-size: 12px;"
-                          @keydown.enter="cat.id != null && commitRename(cat)"
-                          @keydown.escape="renamingCategoryId = null"
-                          @blur="cat.id != null && commitRename(cat)"
-                        />
-                      </template>
-                      <template v-else>
-                        <span class="lib-tlabel" @click="toggleCategory(cat.id ?? -1)">{{ cat.name }}</span>
-                      </template>
-                      <span class="lib-tcount">{{ cat.books.length }} doc</span>
-                      <span v-if="cat.id != null" class="lib-tacts">
-                        <button type="button" class="lib-tact" :title="t('library.renameCategory')" @click.stop="startRenameCat(cat)">✎</button>
-                        <button type="button" class="lib-tact del" :title="t('library.deleteCategory')" @click.stop="deleteCategoryById(cat.id)">🗑</button>
-                      </span>
-                    </div>
-                  </div>
-                </template>
-              </template>
-              <!-- Category nodes -->
-              <template v-else>
-              <div v-for="cat in domain.categories" :key="cat.id ?? 'uncat'" class="lib-tnode" :class="{ open: openCategories.has(cat.id ?? -1) }">
-                <div class="lib-trow">
-                  <span class="lib-tcaret" @click="toggleCategory(cat.id ?? -1)">
-                    <ChevronRight :size="14" aria-hidden="true" />
-                  </span>
-                  <template v-if="renamingCategoryId === cat.id">
-                    <input
-                      v-model="renamingName"
-                      class="lib-rename-input"
-                      type="text"
-                      style="width: 160px; min-height: 26px; font-size: 12px;"
-                      @keydown.enter="cat.id != null && commitRename(cat)"
-                      @keydown.escape="renamingCategoryId = null"
-                      @blur="cat.id != null && commitRename(cat)"
-                    />
-                  </template>
-                  <template v-else>
-                    <span class="lib-tlabel" @click="toggleCategory(cat.id ?? -1)">{{ cat.name }}</span>
-                  </template>
-                  <span class="lib-tcount">{{ cat.books.length }} doc</span>
-                    <span v-if="cat.id != null" class="lib-tacts">
-                    <button type="button" class="lib-tact" :title="t('library.renameCategory')" @click.stop="startRenameCat(cat)">✎</button>
-                    <button type="button" class="lib-tact del" :title="t('library.deleteCategory')" @click.stop="deleteCategoryById(cat.id)">🗑</button>
-                  </span>
-                </div>
-                <div class="lib-tkids">
-                  <div v-for="book in cat.books" :key="book.id" class="lib-trow lib-tdoc">
-                    <div style="flex: 1; min-width: 0;">
-                      <div class="lib-src-title">{{ book.title }}</div>
-                      <div class="lib-src-meta">
-                        <span class="lib-fmt-chip">{{ formatChip(book) }}</span>
-                        <span class="lib-badge" :class="`lib-badge-${book.status}`">{{ statusLabel(book.status) }}</span>
-                        <span v-if="book.pages">{{ book.pages }} pages</span>
-                        <span v-else-if="book.chunks_total">{{ book.chunks_total }} fragments</span>
-                      </div>
-                      <div v-if="bookIndexMeta(book)" class="lib-src-meta">{{ bookIndexMeta(book) }}</div>
-                      <!-- Indexing progress bar -->
-                      <div v-if="book.status === 'indexing'" style="height: 4px; border-radius: 99px; background: #e7e8f7; overflow: hidden; margin-top: 6px;">
-                        <div style="width: 40%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--orange), #f5ad4e); animation: indeterminate 1.4s ease infinite;" />
-                      </div>
-                    </div>
-                    <span class="lib-src-actions">
-                      <button type="button" class="lib-tact" :title="t('library.reindex')" @click.stop="reindexBook(book)">↻</button>
-                      <select
-                        :value="moveTarget(book.id)"
-                        :aria-label="t('library.moveTo')"
-                        :title="t('library.moveTo')"
-                        :disabled="movingBook !== null"
-                        style="min-height: 26px; font-size: 11px; max-width: 128px;"
-                        @change="onMoveSelect(book, ($event.target as HTMLSelectElement).value)"
-                      >
-                        <option value="">{{ t('library.moveTo') }}</option>
-                        <optgroup :label="t('library.moveDomains')">
-                          <option v-for="sub in subjects.filter(s => s.id !== domain.id)" :key="sub.id" :value="sub.id">{{ sub.name }}</option>
-                          <option value="__none__">{{ t('library.orphans') }}</option>
-                        </optgroup>
-                        <optgroup v-if="categories.length" :label="t('library.moveCategories')">
-                          <option v-for="cat in categories" :key="'movecat-' + cat.id" :value="'cat:' + cat.id">{{ cat.name }}</option>
-                        </optgroup>
-                      </select>
-                      <button type="button" class="lib-src-del" :title="t('library.deleteBook')" @click.stop="deleteBook(book)">×</button>
-                    </span>
-                  </div>
-                </div>
-              </div>
-              </template>
-            </div>
-          </div>
-        </div>
-      </div>
-      <!-- Catégories vides de premier niveau : pairs des domaines (ordre :
-        domaines puis catégories vides), mêmes en-tête/compteurs/actions. -->
-      <div v-if="!loading && emptyTopCategories.length" class="lib-tree" style="margin-top: 10px;">
-        <div v-for="cat in emptyTopCategories" :key="'topcat-' + cat.id" class="lib-tnode" :class="{ open: openCategories.has(cat.id) }">
+        <div v-for="cat in flatCategoryNodes" :key="cat.id ?? 'uncat'" class="lib-tnode" :class="{ open: openCategories.has(cat.id ?? -1) }">
           <div class="lib-trow">
-            <span class="lib-tcaret" @click="toggleCategory(cat.id)">
+            <span class="lib-tcaret" @click="toggleCategory(cat.id ?? -1)">
               <ChevronRight :size="14" aria-hidden="true" />
             </span>
             <template v-if="renamingCategoryId === cat.id">
@@ -1184,19 +1032,78 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
                 class="lib-rename-input"
                 type="text"
                 style="width: 160px; min-height: 26px; font-size: 12px;"
-                @keydown.enter="commitRename(cat)"
+                @keydown.enter="cat.id != null && commitRename(cat)"
                 @keydown.escape="renamingCategoryId = null"
-                @blur="commitRename(cat)"
+                @blur="cat.id != null && commitRename(cat)"
               />
             </template>
             <template v-else>
-              <span class="lib-tlabel" @click="toggleCategory(cat.id)">{{ cat.name }}</span>
+              <span class="lib-tlabel" @click="toggleCategory(cat.id ?? -1)">{{ cat.name }}</span>
             </template>
-            <span class="lib-tcount">0 doc</span>
-            <span class="lib-tacts">
+            <span class="lib-tcount">{{ cat.books.length }} doc</span>
+            <span v-if="cat.id != null" class="lib-tacts">
               <button type="button" class="lib-tact" :title="t('library.renameCategory')" @click.stop="startRenameCat(cat)">✎</button>
               <button type="button" class="lib-tact del" :title="t('library.deleteCategory')" @click.stop="deleteCategoryById(cat.id)">🗑</button>
             </span>
+            <span v-else class="lib-tcount" style="color: var(--faint);">—</span>
+          </div>
+          <div class="lib-tkids">
+            <div v-if="openCategories.has(cat.id ?? -1)">
+              <div v-if="cat.books.length === 0" class="lib-empty" style="padding: 10px 0 6px; font-size: 12px; color: var(--faint);">Aucun document</div>
+              <div v-for="book in cat.books" :key="book.id" class="lib-trow lib-tdoc">
+                <div style="flex: 1; min-width: 0;">
+                  <div class="lib-src-title">{{ book.title }}</div>
+                  <div class="lib-src-meta">
+                    <span class="lib-fmt-chip">{{ formatChip(book) }}</span>
+                    <span class="lib-badge" :class="`lib-badge-${book.status}`">{{ statusLabel(book.status) }}</span>
+                    <span v-if="book.pages">{{ book.pages }} pages</span>
+                    <span v-else-if="book.chunks_total">{{ book.chunks_total }} fragments</span>
+                  </div>
+                  <div v-if="bookIndexMeta(book)" class="lib-src-meta">{{ bookIndexMeta(book) }}</div>
+                  <div v-if="book.status === 'indexing'" style="height: 4px; border-radius: 99px; background: #e7e8f7; overflow: hidden; margin-top: 6px;">
+                    <div style="width: 40%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--orange), #f5ad4e); animation: indeterminate 1.4s ease infinite;" />
+                  </div>
+                </div>
+                <span class="lib-src-actions">
+                  <button type="button" class="lib-tact" :title="t('library.reindex')" @click.stop="reindexBook(book)">↻</button>
+                  <select
+                    :value="moveTarget(book.id)"
+                    :aria-label="t('library.moveTo')"
+                    :title="t('library.moveTo')"
+                    :disabled="movingBook !== null"
+                    style="min-height: 26px; font-size: 11px; max-width: 128px;"
+                    @change="onMoveSelect(book, ($event.target as HTMLSelectElement).value)"
+                  >
+                    <option value="">{{ t('library.moveTo') }}</option>
+                    <optgroup :label="t('library.moveDomains')">
+                      <option v-for="sub in subjects" :key="sub.id" :value="sub.id">{{ sub.name }}</option>
+                      <option value="__none__">{{ t('library.orphans') }}</option>
+                    </optgroup>
+                    <optgroup v-if="categories.length" :label="t('library.moveCategories')">
+                      <option v-for="c in categories" :key="'movecat-' + c.id" :value="'cat:' + c.id">{{ c.name }}</option>
+                    </optgroup>
+                  </select>
+                  <button type="button" class="lib-src-del" :title="t('library.deleteBook')" @click.stop="deleteBook(book)">×</button>
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <!-- Domaines: aperçu compact non imbriqué (pas de catégories dedans) -->
+        <div v-if="tree.length" style="margin-top: 18px; border-top: 1px solid var(--line-soft); padding-top: 12px;">
+          <p class="eyebrow" style="margin: 0 0 6px;">Domaines</p>
+          <div v-for="domain in tree" :key="'domain-'+domain.id" class="lib-tnode" :class="{ open: domain.open }" style="opacity: .9;">
+            <div v-if="!domain.headless" class="lib-trow">
+              <span class="lib-tcaret" @click="toggleDomain(domain.id)">
+                <ChevronRight :size="14" aria-hidden="true" />
+              </span>
+              <strong class="lib-tlabel" @click="toggleDomain(domain.id)">{{ domain.name }}</strong>
+              <span class="lib-tcount">{{ domain.books.length }} doc</span>
+              <span class="lib-tacts">
+                <button type="button" class="lib-tact" :title="t('library.renameDomain')" @click.stop="renameDomain(domain)">✎</button>
+                <button type="button" class="lib-tact del" :title="t('library.deleteDomain')" @click.stop="deleteDomain(domain)">🗑</button>
+              </span>
+            </div>
           </div>
         </div>
       </div>

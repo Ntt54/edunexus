@@ -273,15 +273,21 @@ async def retrieve_hybrid(
        ``chunk_id, text, score (fused), cosine_score, bm25_score``.
     """
     # --- Build a temporary Retriever for the cosine path ---
-    retr = Retriever(store=store, client=client, model=model)
-
-    # --- Ranked list 1: cosine (semantic) ---
-    cosine_chunks = await retr.retrieve(subject_id, question, k=k * 3, book_ids=book_ids)
-    cosine_ranked: list[tuple[str, float]] = [
-        (sc.chunk_id, sc.score) for sc in cosine_chunks
-    ]
-    cosine_map: dict[str, float] = {cid: sc for cid, sc in cosine_ranked}
-    cosine_meta: dict[str, ScoredChunk] = {sc.chunk_id: sc for sc in cosine_chunks}
+    # When embeddings disabled, skip cosine entirely (no embed cost) and
+    # return BM25-only results — cheap lexical fallback, still no 400.
+    if _is_emb_disabled(model):
+        cosine_ranked: list[tuple[str, float]] = []
+        cosine_map: dict[str, float] = {}
+        cosine_meta: dict[str, ScoredChunk] = {}
+    else:
+        retr = Retriever(store=store, client=client, model=model)
+        # --- Ranked list 1: cosine (semantic) ---
+        cosine_chunks = await retr.retrieve(subject_id, question, k=k * 3, book_ids=book_ids)
+        cosine_ranked = [
+            (sc.chunk_id, sc.score) for sc in cosine_chunks
+        ]
+        cosine_map = {cid: sc for cid, sc in cosine_ranked}
+        cosine_meta = {sc.chunk_id: sc for sc in cosine_chunks}
 
     # --- Ranked list 2: BM25 (lexical) ---
     # Use all subject chunks (not just embedded ones) so BM25 sees everything.
@@ -359,6 +365,13 @@ async def retrieve_hybrid(
                 results.append(orig)
 
     return results
+
+
+_EMB_DISABLED = {"", "disabled", "none", "off"}
+
+
+def _is_emb_disabled(model: str | None) -> bool:
+    return str(model or "").strip().lower() in _EMB_DISABLED
 
 
 class Retriever:
@@ -466,7 +479,13 @@ class Retriever:
         actives d'une conversation, 005-platform-ui-library) : la recherche
         élargit temporairement son rayon pour compenser le filtrage, puis
         coupe à ``k``. ``None`` = illimité (comportement historique).
+
+        When embeddings are disabled (``""`` / ``"disabled"`` / ``"none"`` /
+        ``"off"`` header sentinel), returns ``[]`` without any ``embed`` call
+        so ``ask`` flows directly to ungrounded LLM (no RAG context, no 400).
         """
+        if _is_emb_disabled(self.model):
+            return []
         idx, meta, titles = self._index_for(subject_id)
         vectors = await self.client.embed(self.model, [question])
         if not vectors or not vectors[0]:
@@ -611,7 +630,11 @@ class Retriever:
         Used by compare mode (T047): each book contributes its own most
         relevant passages so the synthesis can cite every source. Falls back to
         ``{}`` when no embedding/vector is available.
+
+        When embeddings disabled, returns ``{}`` without any ``embed`` call.
         """
+        if _is_emb_disabled(self.model):
+            return {}
         idx, meta, titles = self._index_for(subject_id)
         vectors = await self.client.embed(self.model, [question])
         if not vectors or not vectors[0]:

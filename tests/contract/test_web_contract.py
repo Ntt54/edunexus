@@ -141,6 +141,12 @@ IGNORED_ROUTES: set[tuple[str, str]] = {
     ("GET", "/api/tutor/dashboard"),
     ("GET", "/api/tutor/stats"),
     ("PATCH", "/api/tutor/subjects/{}"),
+    # --- Catégories : verbes PUT/move (CRUD catégories enrichi, back-end
+    # seulement pour l'instant — api.ts ne fetche que create/rename/delete ;
+    # PUT/{}/move réservés au panneau admin/réorganisation à venir) ---
+    ("PUT", "/api/tutor/categories"),
+    ("PUT", "/api/tutor/categories/{}"),
+    ("POST", "/api/tutor/categories/{}/move"),
 }
 
 # Motifs legacy interdits dans le front (adapté de FORBIDDEN_PATTERNS :

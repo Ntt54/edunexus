@@ -175,22 +175,34 @@ const fillTarget = computed(() =>
 /* ── Data loading ─────────────────────────────────────────────── */
 let pathsGen = 0;
 async function loadPaths() {
-  const sid = subjectId.value;
-  const lid = learnerIdRef.value;
+  const sid = (subjectId.value || "").trim();
+  const lid = (learnerIdRef.value || "").trim();
   const gen = ++pathsGen;
-  if (!sid) { paths.value = []; selectedPath.value = null; return; }
+  if (!sid) { paths.value = []; selectedPath.value = null; loadingPaths.value = false; return; }
   // No-flash (FR-009): clear immediately on matière switch
   paths.value = [];
   selectedPath.value = null;
   loadingPaths.value = true;
   error.value = null;
+  // single retry with backoff, map 400/404 → vide sans boucle
+  async function fetchPathsOnce(retried = false): Promise<{ paths: Array<{ id: string; title: string; description: string; status: string; progress?: number }> }> {
+    try {
+      return lid ? await tutorApi.getPathsFiltered(sid, lid) : await tutorApi.getPaths(sid, lid || undefined);
+    } catch (e) {
+      const st = (e as { status?: number }).status;
+      if (st === 400 || st === 404) return { paths: [] };
+      if (!retried) { await new Promise(r => setTimeout(r, 700)); return fetchPathsOnce(true); }
+      throw e;
+    }
+  }
   try {
-    const data = lid ? await tutorApi.getPathsFiltered(sid, lid) : await tutorApi.getPaths(sid, lid || undefined);
+    const data = await fetchPathsOnce();
     if (gen !== pathsGen) return;
     paths.value = data.paths;
   } catch (e) {
     if (gen !== pathsGen) return;
     error.value = e instanceof Error ? e.message : "Erreur de chargement";
+    paths.value = [];
   } finally {
     if (gen === pathsGen) loadingPaths.value = false;
   }

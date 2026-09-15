@@ -384,6 +384,7 @@ class LibraryStore:
             CREATE TABLE IF NOT EXISTS categories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL COLLATE NOCASE UNIQUE
+                -- flat categories: no parent_id / nesting (migration ignores legacy column if present)
             );
 
             CREATE TABLE IF NOT EXISTS corpora (
@@ -1028,6 +1029,16 @@ class LibraryStore:
                 except Exception:
                     cur.execute("DROP TABLE IF EXISTS _lesson_discussions_new")
                     cur.commit()
+        except Exception:
+            pass
+        # Flat categories enforcement (011-subject-learner-context):
+        # If legacy DB has parent_id / parentId column (hierarchical attempt),
+        # keep column but ignore it — flatten on read (list_categories filters
+        # WHERE parent_id IS NULL). No DROP, idempotent.
+        try:
+            cat_cols = {r["name"] for r in cur.execute("PRAGMA table_info(categories)")}
+            if "parent_id" in cat_cols or "parentId" in cat_cols:
+                pass
         except Exception:
             pass
 
@@ -1980,6 +1991,57 @@ class LibraryStore:
         ).fetchone()
         return self._job_dict(fresh)
 
+    def get_next_queued_job(self) -> dict[str, Any] | None:
+        """Oldest queued job FIFO (or ``None`` when queue empty)."""
+        row = self._conn.execute(
+            "SELECT * FROM ingestion_jobs WHERE status = 'queued' "
+            "ORDER BY created_at ASC, rowid ASC LIMIT 1"
+        ).fetchone()
+        return self._job_dict(row) if row is not None else None
+
+    def claim_queued_job(self, job_id: str) -> dict[str, Any] | None:
+        """Atomically claim a queued job for processing (idempotent).
+
+        Moves ``queued`` → ``extracting`` (20 %) only if still queued
+        (race-free via ``WHERE status='queued'``). Returns fresh snapshot
+        when claimed, ``None`` when already claimed/missing/terminal.
+        Single llama-server invariant: exactly one worker owns the row.
+        """
+        from .models import _now_iso
+
+        row = self._conn.execute(
+            "SELECT * FROM ingestion_jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        cur = dict(row)
+        if cur["status"] != "queued":
+            return None
+        # Transaction: busy_timeout already set; use immediate claim.
+        updated = self._conn.execute(
+            "UPDATE ingestion_jobs SET status = 'extracting', progress_percent = 20, "
+            "phase_label = ?, updated_at = ? WHERE id = ? AND status = 'queued'",
+            (
+                self.INGESTION_PHASE_LABELS.get("extracting", "extracting"),
+                _now_iso(),
+                job_id,
+            ),
+        )
+        self._conn.commit()
+        if updated.rowcount == 0:
+            return None
+        fresh = self._conn.execute(
+            "SELECT * FROM ingestion_jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        return self._job_dict(fresh) if fresh is not None else None
+
+    def count_queued_jobs(self) -> int:
+        """Number of jobs still waiting in FIFO queue."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM ingestion_jobs WHERE status = 'queued'"
+        ).fetchone()
+        return int(row[0]) if row else 0
+
     # ------------------------------------------------------------------
     # Indexing (T014): chunks, embeddings cache, status transitions
     # ------------------------------------------------------------------
@@ -2867,6 +2929,25 @@ class LibraryStore:
         return self._create_label("categories", "category", name)
 
     def list_categories(self) -> list[dict[str, Any]]:
+        """List categories — flat only (ignore legacy parent_id hierarchy).
+
+        If a legacy ``parent_id``/``parentId`` column exists, only top-level
+        rows (parent IS NULL) are returned so the frontend never sees nesting.
+        """
+        try:
+            cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(categories)")}
+        except Exception:
+            cols = set()
+        if "parent_id" in cols:
+            rows = self._conn.execute(
+                "SELECT * FROM categories WHERE parent_id IS NULL ORDER BY name"
+            ).fetchall()
+            return [dict(r) for r in rows]
+        if "parentId" in cols:
+            rows = self._conn.execute(
+                "SELECT * FROM categories WHERE parentId IS NULL ORDER BY name"
+            ).fetchall()
+            return [dict(r) for r in rows]
         return self._list_labels("categories")
 
     def rename_category(self, category_id: int, name: str) -> dict[str, Any]:

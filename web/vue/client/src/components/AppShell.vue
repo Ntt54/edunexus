@@ -88,13 +88,19 @@ function providerGroup(name: string): string {
   return "Autres";
 }
 
+// ── Embedding disabled state ──────────────────────────────────────
+const EMBED_SENTINELS = new Set(["disabled", "none", "off"]);
+const embeddingDisabled = computed(() =>
+  !currentEmbedding.value || EMBED_SENTINELS.has(currentEmbedding.value),
+);
+
 function buildModelGroups(
   list: string[],
   current: string,
   sources: ModelSources,
   filter: string,
 ): Map<string, string[]> {
-  const names = Array.from(new Set([...(list || []), current].filter(Boolean)));
+  const names = Array.from(new Set([...(list || []), current].filter(n => n && !EMBED_SENTINELS.has(n))));
   if (!names.length) return new Map();
 
   const favSet = new Set(favModels.value);
@@ -539,13 +545,16 @@ onUnmounted(() => {
         <div
           v-if="engineReady"
           class="engine-badge"
-          :title="engineOcr
-            ? 'Moteur : embeddings GGUF locaux · OCR Docling actif'
-            : 'Moteur : embeddings via Ollama'"
+          :class="{ 'engine-badge--rag-off': embeddingDisabled }"
+          :title="embeddingDisabled
+            ? 'RAG désactivé — le modèle répond de mémoire'
+            : engineOcr
+              ? 'Moteur : embeddings GGUF locaux · OCR Docling actif'
+              : 'Moteur : embeddings via Ollama'"
         >
-          <span class="engine-dot" />
-          <Sparkles :size="13" aria-hidden="true" />
-          <span>{{ engineLabel }}</span>
+          <span class="engine-dot" :class="{ 'engine-dot--off': embeddingDisabled }" />
+          <Sparkles v-if="!embeddingDisabled" :size="13" aria-hidden="true" />
+          <span>{{ embeddingDisabled ? 'RAG off' : engineLabel }}</span>
         </div>
 
         <!-- Model selectors -->
@@ -561,10 +570,10 @@ onUnmounted(() => {
             />
             <select
               :value="currentEmbedding"
-              :disabled="!embeddingModels.length && !currentEmbedding"
               aria-label="Modèle d'embeddings"
               @change="onEmbeddingChange"
             >
+              <option value="disabled">Désactivé — réponse directe du modèle</option>
               <option v-if="!embeddingModels.length && !currentEmbedding" value="" disabled>(hors ligne)</option>
               <template v-for="[group, items] in buildModelGroups(embeddingModels, currentEmbedding, modelSources, searchEmbedding)" :key="group">
                 <optgroup :label="group">
@@ -576,6 +585,7 @@ onUnmounted(() => {
               type="button"
               class="fav-btn"
               :class="{ on: isFavModel(currentEmbedding) }"
+              :disabled="embeddingDisabled"
               title="Favori du modèle d'embeddings"
               aria-label="Favori du modèle d'embeddings"
               @click="toggleFavModel(currentEmbedding)"
@@ -754,6 +764,18 @@ onUnmounted(() => {
   flex: 0 0 auto;
 }
 
+/* ── Engine badge — RAG off state ──────────────────────────────── */
+.engine-badge--rag-off {
+  border-color: var(--amber, #d97706);
+  color: var(--amber, #d97706);
+  background: rgba(217, 119, 6, 0.08);
+}
+
+.engine-dot--off {
+  background: var(--amber, #d97706);
+  box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.12);
+}
+
 /* ── Model group ───────────────────────────────────────────────── */
 .model-group {
   display: flex;
@@ -842,6 +864,11 @@ onUnmounted(() => {
 .fav-btn:hover {
   border-color: var(--indigo, #4f46e5);
   color: var(--indigo);
+}
+
+.fav-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .fav-btn.on {

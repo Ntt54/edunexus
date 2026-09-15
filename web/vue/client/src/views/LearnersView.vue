@@ -31,15 +31,33 @@ const activeSubject = computed(() => activeSubjectId.value || localStorage.getIt
 const activeLearner = computed(() => activeLearnerId.value || localStorage.getItem("edunexus.learner") || "");
 
 async function fetchLearners() {
-  const sid = activeSubject.value;
+  const sid = (activeSubject.value || "").trim();
   const gen = ++learnersGen;
+  // garde: si pas de matière, pas de fetch 400 — vide local immédiat (évite loop + blink)
+  if (!sid) {
+    learners.value = [];
+    loading.value = false;
+    subjectName.value = "";
+    error.value = null;
+    return;
+  }
   // No-flash: clear immediately on subject switch
   learners.value = [];
   loading.value = true;
   error.value = null;
+  async function fetchLearnersOnce(retried = false): Promise<{ learners: unknown[] }> {
+    try {
+      return await tutorApi.getLearnersFiltered(sid) as unknown as { learners: unknown[] };
+    } catch (e) {
+      const st = (e as { status?: number }).status;
+      if (st === 400 || st === 404) return { learners: [] };
+      if (!retried) { await new Promise(r => setTimeout(r, 700)); return fetchLearnersOnce(true); }
+      throw e;
+    }
+  }
   try {
     const [data, subjRes] = await Promise.all([
-      sid ? tutorApi.getLearnersFiltered(sid) : tutorApi.getLearnersFiltered(null),
+      fetchLearnersOnce().catch(() => ({ learners: [] as unknown[] })),
       tutorApi.getSubjects().catch(() => ({ subjects: [] as Array<{ id: string; name: string }>, active_id: null })),
     ]);
     if (gen !== learnersGen) return;
@@ -52,6 +70,7 @@ async function fetchLearners() {
   } catch (e) {
     if (gen !== learnersGen) return;
     error.value = e instanceof Error ? e.message : "Impossible de charger les apprenants.";
+    learners.value = [];
   } finally {
     if (gen === learnersGen) loading.value = false;
   }
