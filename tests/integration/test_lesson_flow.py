@@ -195,3 +195,92 @@ def test_full_lesson_flow_parcours_to_progression(tmp_path: Path):
     assert LibraryStore(config_dir).get_path_step(step2.id).status == "not_started"
 
     client.close()
+
+
+# ---------------------------------------------------------------------------
+# Bug « données héritées » : discussion legacy avec notion_id "Général"
+# ---------------------------------------------------------------------------
+
+def test_legacy_generic_notion_repaired_on_get_or_create(tmp_path: Path):
+    """Une discussion héritée avec notion_id='Général' est réparée depuis le step.
+
+    Simule l'ancien bug : step sans source (activity_id "Général") + ligne
+    lesson_discussions insérée AVANT le fallback de création. ``get_or_create``
+    doit ré-inférer le notion_id depuis le titre de l'étape, retourner la
+    discussion réparée ET persister le UPDATE.
+    """
+    config_dir = tmp_path / "config"
+    store = LibraryStore(config_dir)
+    learner_id = store.create_learner("Alice").id
+    subject = store.create_subject("Informatique", learner_id=learner_id)
+    path = store.create_learning_path(subject.id, "Parcours POO")
+    step = store.add_path_step(
+        path.id,
+        "concept",
+        "Général",
+        "Les bases de la programmation orientée objet en Java",
+        ordinal=0,
+    )
+
+    # Legacy row : l'ancien serveur a persisté notion_id='Général'.
+    store._conn.execute(
+        "INSERT INTO lesson_discussions"
+        " (id, path_step_id, notion_id, subject_id, learner_id, status, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("disc_legacy", step.id, "Général", subject.id, learner_id, "active",
+         "2025-06-01T00:00:00+00:00"),
+    )
+    store._conn.commit()
+
+    disc = store.get_or_create_lesson_discussion(step.id, learner_id)
+    # 1) le retour porte le notion ré-inféré (titre du step)
+    assert disc.id == "disc_legacy"
+    assert disc.notion_id == "Les bases de la programmation orientée objet en Java"
+
+    # 2) l'UPDATE est persisté en base (relu via un store frais)
+    row = LibraryStore(config_dir)._conn.execute(
+        "SELECT notion_id FROM lesson_discussions WHERE id = ?", (disc.id,)
+    ).fetchone()
+    assert row["notion_id"] == "Les bases de la programmation orientée objet en Java"
+
+    # 3) la création (pas de ligne existante) partage la même inférence
+    step2 = store.add_path_step(
+        path.id, "concept", "Général", "Collections et Generics", ordinal=1
+    )
+    disc2 = store.get_or_create_lesson_discussion(step2.id, learner_id)
+    assert disc2.notion_id == "Collections et Generics"
+    assert disc2.id != "disc_legacy"
+
+
+def test_valid_existing_notion_never_overwritten(tmp_path: Path):
+    """Un notion_id déjà réel (non générique) n'est JAMAIS écrasé."""
+    config_dir = tmp_path / "config"
+    store = LibraryStore(config_dir)
+    learner_id = store.create_learner("Alice").id
+    subject = store.create_subject("Informatique", learner_id=learner_id)
+    path = store.create_learning_path(subject.id, "Parcours POO")
+    step = store.add_path_step(
+        path.id,
+        "concept",
+        "Général",
+        "Les bases de la programmation orientée objet en Java",
+        ordinal=0,
+    )
+
+    store._conn.execute(
+        "INSERT INTO lesson_discussions"
+        " (id, path_step_id, notion_id, subject_id, learner_id, status, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("disc_real", step.id, "notion-vars", subject.id, learner_id, "active",
+         "2025-06-01T00:00:00+00:00"),
+    )
+    store._conn.commit()
+
+    disc = store.get_or_create_lesson_discussion(step.id, learner_id)
+    assert disc.id == "disc_real"
+    assert disc.notion_id == "notion-vars"  # inchangé malgré le titre du step
+
+    row = store._conn.execute(
+        "SELECT notion_id FROM lesson_discussions WHERE id = ?", (disc.id,)
+    ).fetchone()
+    assert row["notion_id"] == "notion-vars"

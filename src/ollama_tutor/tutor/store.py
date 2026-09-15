@@ -4451,12 +4451,60 @@ class LibraryStore:
     # Feature 009 — leçon discussion centrée
     # ------------------------------------------------------------------
 
+    def _infer_notion_for_step(self, step: Any, subject_id: str) -> str:
+        """Inférer le ``notion_id`` effectif d'une étape (création + réparation).
+
+        Logique partagée entre la création d'une discussion et la réparation
+        des lignes héritées (bug « données héritées » : ``notion_id`` vaut
+        « Général » sur d'anciennes discussions) :
+        - ``sanitize_notion_id`` sur ``activity_id`` (jamais un filename) ;
+        - activité générique ("Général") ou vide → titre de l'étape ;
+        - notion qui répète un titre de livre (filename leak) → titre de
+          l'étape (comparaison normalisée des deux côtés).
+        Ne lève jamais : sujet inconnu ⇒ ``book_keys`` vide ⇒ pas de
+        substitution par un titre de livre.
+        """
+        notion_id = sanitize_notion_id(step["activity_id"])
+        step_title = sanitize_notion_id(step["title"]) or str(step["title"] or "").strip()
+        # When activity_id is generic ("Général"), use the step title directly.
+        if not notion_id or notion_id == "Général":
+            notion_id = step_title or "Général"
+        if not notion_id:
+            return ""
+        # A notion that merely repeats a book title is a filename leak,
+        # not a lesson topic: fall back to the step (concept) title.
+        # Comparison is normalized on BOTH sides (extension, dedup
+        # suffix, separators, case) so bare stems and legacy suffixed
+        # rows match too.
+        try:
+            book_keys = {
+                normalize_notion_key(r["title"])
+                for r in self._conn.execute(
+                    "SELECT b.title FROM books b "
+                    "JOIN subject_books sb ON sb.book_id = b.id "
+                    "WHERE sb.subject_id = ?",
+                    (subject_id,),
+                ).fetchall()
+            }
+        except Exception:
+            book_keys = set()
+        book_keys.discard("")
+        if normalize_notion_key(notion_id) in book_keys:
+            if step_title and normalize_notion_key(step_title) not in book_keys:
+                notion_id = step_title
+        return notion_id
+
     def get_or_create_lesson_discussion(self, path_step_id: str, learner_id: str) -> LessonDiscussion:
         """Return existing discussion for (path_step_id, learner_id) or create it.
 
         Infers ``notion_id`` (activity_id) and ``subject_id`` from the
         ``path_steps`` → ``learning_paths`` join. Raises ``KeyError`` if the
         path step does not exist.
+
+        Rows héritées (créées avant le fallback de création) : un
+        ``notion_id`` générique — "Général" ou vide — est ré-inféré depuis
+        l'étape et le ``UPDATE`` est persisté. Un ``notion_id`` déjà réel
+        n'est JAMAIS écrasé.
         """
         # Backward-compat: legacy tests use bare strings "alice"/"bob" as learner_id
         # without pre-creating learner_profiles. Auto-seed those ids so the
@@ -4482,41 +4530,53 @@ class LibraryStore:
             (path_step_id, learner_id),
         ).fetchone()
         if row is not None:
+            # Bug « données héritées » : les discussions créées par un ancien
+            # serveur (avant le fallback de création) peuvent porter un
+            # notion_id générique — "Général" ou vide — d'où un titre de
+            # leçon « Général » côté UI. Ré-infère le notion depuis l'étape
+            # et persiste la réparation. Un notion_id déjà réel n'est JAMAIS
+            # écrasé (réparation seulement si stockée générique).
+            try:
+                step = self._conn.execute(
+                    "SELECT * FROM path_steps WHERE id = ?", (path_step_id,)
+                ).fetchone()
+            except Exception:
+                step = None
+            if step is not None:
+                path_row = self._conn.execute(
+                    "SELECT subject_id FROM learning_paths WHERE id = ?",
+                    (step["path_id"],),
+                ).fetchone()
+                subject_id = (
+                    str(path_row["subject_id"]) if path_row is not None else ""
+                )
+                stored = str(row["notion_id"] or "").strip()
+                inferred = self._infer_notion_for_step(step, subject_id)
+                if (
+                    inferred
+                    and inferred != stored
+                    and (not stored or stored.lower() == "général")
+                ):
+                    self._conn.execute(
+                        "UPDATE lesson_discussions SET notion_id = ? WHERE id = ?",
+                        (inferred, row["id"]),
+                    )
+                    self._conn.commit()
+                    return LessonDiscussion.from_dict(
+                        {**dict(row), "notion_id": inferred}
+                    )
             return LessonDiscussion.from_dict(dict(row))
         step = self._conn.execute(
             "SELECT * FROM path_steps WHERE id = ?", (path_step_id,)
         ).fetchone()
         if step is None:
             raise KeyError(f"Unknown path_step: {path_step_id}")
-        notion_id = sanitize_notion_id(step["activity_id"])
         # Resolve subject_id via learning_paths
         path_row = self._conn.execute(
             "SELECT subject_id FROM learning_paths WHERE id = ?", (step["path_id"],)
         ).fetchone()
         subject_id = str(path_row["subject_id"]) if path_row is not None else ""
-        if notion_id:
-            # A notion that merely repeats a book title is a filename leak,
-            # not a lesson topic: fall back to the step (concept) title.
-            # Comparison is normalized on BOTH sides (extension, dedup
-            # suffix, separators, case) so bare stems and legacy suffixed
-            # rows match too.
-            try:
-                book_keys = {
-                    normalize_notion_key(r["title"])
-                    for r in self._conn.execute(
-                        "SELECT b.title FROM books b "
-                        "JOIN subject_books sb ON sb.book_id = b.id "
-                        "WHERE sb.subject_id = ?",
-                        (subject_id,),
-                    ).fetchall()
-                }
-            except Exception:
-                book_keys = set()
-            book_keys.discard("")
-            if normalize_notion_key(notion_id) in book_keys:
-                step_title = sanitize_notion_id(step["title"]) or str(step["title"] or "").strip()
-                if step_title and normalize_notion_key(step_title) not in book_keys:
-                    notion_id = step_title
+        notion_id = self._infer_notion_for_step(step, subject_id)
         now = _now_iso()
         disc = LessonDiscussion(
             id=_uid(),

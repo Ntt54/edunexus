@@ -224,7 +224,7 @@ class PrepareReport:
 
 
 #: Bounded timeout for the synchronous lesson LLM call (slow CPU, non-streaming).
-LESSON_LLM_TIMEOUT_S = 180.0
+LESSON_LLM_TIMEOUT_S = 300.0
 
 #: Longer timeout for full courses: measured ~6 words/s on this CPU-only
 #: box, so 800–1200 words need ~4–6 min of generation — 180 s would time

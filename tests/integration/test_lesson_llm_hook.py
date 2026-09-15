@@ -275,7 +275,7 @@ def test_lesson_timeout_per_kind(monkeypatch, tmp_path: Path) -> None:
     svc.generate_lesson_text("lesson_summary", "Boucles", ["extrait"])
     svc.generate_lesson_text("lesson_answer", "Boucles", ["extrait"], question="Comment ?")
     reads = [float(t.read) for t in seen["calls"]]
-    assert reads == [360.0, 180.0, 180.0], f"timeouts par kind : {reads}"
+    assert reads == [360.0, 300.0, 300.0], f"timeouts par kind : {reads}"
 
 
 # ------------------------------------------------------------------
