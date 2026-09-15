@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@vitejs/plugin-vue": "^5.2.3",
+    "katex": "^0.18.7",
     "lucide-vue-next": "^0.468.0",
     "vue": "^3.5.13",
     "vue-router": "^4.5.0"

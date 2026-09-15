@@ -21,6 +21,9 @@ import { useLearningStore } from "@/stores/learning";
 import { usePreferences } from "@/stores/preferences";
 import { feedSSE, formatElapsed, openEventStream } from "@/services/sse";
 import { tutorApi } from "@/services/api";
+// Rendu markdown UNIFIÉ (module partagé avec TutorView) : titres, listes
+// imbriquées + tâches, tableaux GFM, code, citations, liens sûrs, maths KaTeX.
+import { renderMarkdown as renderMarkdownShared } from "@/lib/markdown";
 
 const route = useRoute();
 const router = useRouter();
@@ -92,7 +95,6 @@ onUnmounted(() => {
 
 /* ── Helpers ──────────────────────────────────────────────── */
 function wordCount(s: string): number { return String(s||"").trim().split(/\s+/).filter(Boolean).length; }
-function escHtml(s: unknown): string { return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;"); }
 function lessonTitle(): string {
   if (discussion.value?.notion_id) return discussion.value.notion_id;
   const stepTitle = (discussion.value as unknown as { title?: string })?.title;
@@ -197,105 +199,12 @@ function sourcesLabel(sources: unknown): string {
   return parts.join(", ");
 }
 
-/* ── Mini-markdown maison (sans dépendance) ────────────────────────
-   SÉCURITÉ : tout texte interpolé passe par escHtml (jamais de HTML brut
-   du modèle — v-html oblige) ; les liens javascript:/data:/… sont refusés
-   (rendus en texte seul). Tableaux GFM, fences ```lang, **gras**,
-   *italique*, `code`, [liens](url) et listes ordonnées ; le reste
-   (titres #/listes -/texte) est conservé à l'identique. */
-function safeHref(raw: string): string | null {
-  const u = String(raw || "").trim();
-  if (!u || /[\s<>]/.test(u)) return null;
-  const m = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.exec(u);
-  // Schéma explicite : seuls http(s) passent ; relatif (sans schéma) OK.
-  if (m) {
-    const scheme = m[0].toLowerCase();
-    if (scheme !== "http:" && scheme !== "https:") return null;
-  }
-  return u;
-}
-
-function renderInlineRich(seg: string): string {
-  // seg déjà échappé : on n'y injecte que nos propres balises.
-  let s = seg.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (whole, text: string, url: string) => {
-    const href = safeHref(url);
-    if (!href) return text;
-    const ext = /^https?:\/\//i.test(href);
-    return `<a class="md-link" href="${href}"${ext ? ' target="_blank" rel="noopener"' : ""}>${text}</a>`;
-  });
-  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  s = s.replace(/(^|[^\w*])\*([^*\n]+?)\*/g, "$1<em>$2</em>");
-  return s;
-}
-
-function renderInline(raw: string): string {
-  // Code inline d'abord (aucun formatage dedans), puis riche sur le reste.
-  return String(raw ?? "").split(/(`[^`\n]+`)/g).map((p, i) => {
-    if (i % 2 === 1) return `<code class="md-code-inline">${escHtml(p.slice(1, -1))}</code>`;
-    return renderInlineRich(escHtml(p));
-  }).join("");
-}
-
-function splitTableRow(line: string): string[] {
-  let s = line.trim();
-  if (s.startsWith("|")) s = s.slice(1);
-  if (s.endsWith("|")) s = s.slice(0, -1);
-  return s.split("|").map((c) => c.trim());
-}
-
-// ── Coloration regex maison (zéro lib) ─────────────────────────────
-// NULLE confiance au contenu : on tokenize le code BRUT, chaque morceau
-// est échappé via escHtml AVANT d'être enveloppé. Les mots/nombres sont
-// cherchés hors-entités (&…;) pour ne jamais corrompre un échappement.
-// Python : keywords/builtins/strings/comments/nombres ; autres langages :
-// strings/comments/nombres uniquement (générique discret).
-const PY_KEYWORDS = new Set(
-  ("False None True and as assert async await break class continue def del " +
-    "elif else except finally for from global if import in is lambda nonlocal " +
-    "not or pass raise return try while with yield match case").split(" "),
-);
-const PY_BUILTINS = new Set(
-  ("print len range str int float bool list dict set tuple open enumerate zip " +
-    "map filter sorted sum min max abs round isinstance type input").split(" "),
-);
-
-function highlightWords(chunk: string, isPy: boolean): string {
-  return escHtml(chunk)
-    .split(/(&[a-zA-Z]+;|&#[0-9]+;)/g)
-    .map((part, k) => {
-      if (k % 2 === 1) return part; // entité d'échappement : intacte
-      return part.split(/(\b\d+(?:\.\d+)?\b)/g).map((p, j) => {
-        if (j % 2 === 1) return `<span class="md-tok-num">${p}</span>`;
-        if (!isPy) return p;
-        return p.replace(/\b([A-Za-z_]\w*)(\()?/g, (whole, w: string, paren: string) => {
-          if (PY_KEYWORDS.has(w)) return `<span class="md-tok-kw">${w}</span>${paren || ""}`;
-          if (paren) return `<span class="md-tok-${PY_BUILTINS.has(w) ? "bi" : "fn"}">${w}</span>(`;
-          return whole;
-        });
-      }).join("");
-    })
-    .join("");
-}
-
-function highlightCode(code: string, lang: string): string {
-  const isPy = /^(python|py)$/.test(lang);
-  const re = isPy
-    ? /(#[^\n]*)|("""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')/g
-    : /((?:\/\/|#)[^\n]*)|("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\\n])*`)/g;
-  let out = "";
-  let last = 0;
-  const flushPlain = (chunk: string) => { out += highlightWords(chunk, isPy); };
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(code)) !== null) {
-    if (!m[0].length) { re.lastIndex++; continue; }
-    flushPlain(code.slice(last, m.index));
-    if (m[1] !== undefined) out += `<span class="md-tok-com">${escHtml(m[1])}</span>`;
-    else out += `<span class="md-tok-str">${escHtml(m[2])}</span>`;
-    last = m.index + m[0].length;
-  }
-  flushPlain(code.slice(last));
-  return out;
-}
+/* ── Rendu markdown : délégation au module partagé ─────────────────
+   Le moteur complet (titres, listes imbriquées + tâches, tableaux GFM,
+   fences, citations, liens sûrs, images http(s), échappements, maths KaTeX)
+   vit dans @/lib/markdown — même sortie pour LessonView et TutorView.
+   Options : coloration par défaut du module (ex-maison, zéro lib) et
+   libellés i18n de la vue (Copier / Table / copié ✓). */
 
 // ── Copie (Clipboard + repli execCommand) + délégation de clic ─────
 // Les boutons naissent dans du v-html : un seul gestionnaire par conteneur,
@@ -351,78 +260,18 @@ function onMarkdownClick(e: Event): void {
   });
 }
 
+/**
+ * Wrapper de la vue → moteur partagé (@/lib/markdown).
+ * Le module reçoit les libellés i18n de la leçon (lesson.copy / lesson.table)
+ * ; la coloration par défaut du module reproduit l'ancienne regex maison.
+ */
 function renderMarkdown(text: string): string {
-  const lines = String(text||"").split("\n");
-  let out="";
-  let i=0;
-  while (i < lines.length) {
-    const ln = lines[i];
-    const tl=ln.trim();
-    // Blocs clôturés ```lang (non fermé ⇒ tout le reste en code) :
-    // en-tête (langage + copier) + coloration maison sur tokens échappés.
-    const fence = /^```(\w*)\s*$/.exec(tl);
-    if (fence) {
-      const lang = (fence[1] || "text").toLowerCase().replace(/[^a-z0-9+-]/g, "") || "text";
-      const buf: string[] = [];
-      i++;
-      while (i < lines.length && !/^```\s*$/.test(lines[i].trim())) { buf.push(lines[i]); i++; }
-      if (i < lines.length) i++;
-      const code = buf.join("\n");
-      out += `<div class="md-codeblock"><div class="md-codehead"><span class="md-codelang">${escHtml(lang)}</span>` +
-        `<button type="button" class="md-copybtn" data-copy="code">${escHtml(t("lesson.copy"))}</button></div>` +
-        `<pre class="md-code"><code class="language-${lang}" data-lang="${lang}">${highlightCode(code, lang)}</code></pre></div>`;
-      continue;
-    }
-    // Citations « > » groupées (avant les tableaux : un tableau cité reste
-    // une citation, au mieux).
-    if (/^\s*>\s?/.test(ln)) {
-      const buf: string[] = [];
-      while (i < lines.length) {
-        const m = /^\s*>\s?(.*)$/.exec(lines[i]);
-        if (!m) break;
-        buf.push(m[1]);
-        i++;
-      }
-      out += `<blockquote class="md-quote">${buf.map((l) =>
-        l.trim() ? `<div>${renderInline(l)}</div>` : `<div style="height:6px"></div>`).join("")}</blockquote>`;
-      continue;
-    }
-    // Tableaux GFM : en-tête + séparateur |---|:---:| puis lignes.
-    if (tl.includes("|") && i + 1 < lines.length) {
-      const sep = splitTableRow(lines[i + 1]);
-      const head = splitTableRow(tl);
-      const isSep = sep.length === head.length && sep.length > 0 &&
-        sep.every((c) => /^:?-+:?$/.test(c));
-      if (isSep) {
-        const aligns = sep.map((c) =>
-          c.startsWith(":") && c.endsWith(":") && c.length > 2 ? "center"
-          : c.endsWith(":") ? "right" : "left");
-        const alignAttr = (a: string) => (a === "left" ? "" : ` align="${a}"`);
-        out += `<div class="md-tablewrap"><div class="md-tablebar"><span class="md-tabletitle">${escHtml(t("lesson.table"))}</span>` +
-          `<button type="button" class="md-copybtn" data-copy="table">${escHtml(t("lesson.copy"))}</button></div>` +
-          `<div class="md-tablescroll"><table class="md-table"><thead><tr>${head.map((c, k) =>
-          `<th${alignAttr(aligns[k])}>${renderInline(c)}</th>`).join("")}</tr></thead><tbody>`;
-        i += 2;
-        while (i < lines.length && lines[i].includes("|") && lines[i].trim()) {
-          const cells = splitTableRow(lines[i]);
-          out += `<tr>${head.map((_, k) =>
-            `<td${alignAttr(aligns[k])}>${renderInline(cells[k] ?? "")}</td>`).join("")}</tr>`;
-          i++;
-        }
-        out += `</tbody></table></div></div>`;
-        continue;
-      }
-    }
-    if(!tl){ out+='<div style="height:6px"></div>'; i++; continue; }
-    const hm = /^(#{1,6})\s+(.*)$/.exec(tl);
-    if(hm){ out+=`<div class="md-h md-h${hm[1].length}">${renderInline(hm[2])}</div>`; i++; continue; }
-    if(/^---+\s*$/.test(tl)){ out+='<hr class="md-hr">'; i++; continue; }
-    const ol = /^(\d+)[.)]\s+(.*)$/.exec(tl);
-    if(ol){ out+=`<div style="margin-left:16px">${escHtml(ol[1])}. ${renderInline(ol[2])}</div>`; i++; continue; }
-    if(/^[-*•]\s+/.test(tl)){ out+=`<div style="margin-left:16px">• ${renderInline(tl.replace(/^[-*•]\s+/,""))}</div>`; i++; continue; }
-    out+=`<div>${renderInline(ln)}</div>`; i++;
-  }
-  return out;
+  return renderMarkdownShared(text, {
+    labels: {
+      copy: t("lesson.copy") as string,
+      table: t("lesson.table") as string,
+    },
+  });
 }
 function parseFeedback(raw: unknown): Array<{ statement?: string; question_id?: string; given?: string; expected?: string; correct?: boolean; explanation?: string }> {
   try {
@@ -1286,6 +1135,21 @@ export default { name: "LessonView" };
 .notebook-output-body :deep(.md-code code) { font-family: ui-monospace, Menlo, Consolas, monospace; white-space: pre; }
 .notebook-output-body :deep(.md-code-inline) { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .9em; background: var(--panel-soft); border: 1px solid var(--line); border-radius: 6px; padding: 1px 5px; }
 .notebook-output-body :deep(.md-link) { color: var(--indigo); text-decoration: underline; }
+/* ── Rendu markdown unifié — ajouts du module partagé (@/lib/markdown) ──
+   Concerne les DEUX conteneurs v-html (notebook et bulles de discussion) :
+   listes imbriquées/tâches, barré, images, maths KaTeX. */
+.notebook-output-body :deep(.md-list), .bubble-md :deep(.md-list) { margin: 6px 0 6px 18px; padding: 0; }
+.notebook-output-body :deep(ul.md-list), .bubble-md :deep(ul.md-list) { list-style: disc; }
+.notebook-output-body :deep(ol.md-list), .bubble-md :deep(ol.md-list) { list-style: decimal; }
+.notebook-output-body :deep(.md-list li), .bubble-md :deep(.md-list li) { margin: 2px 0; }
+.notebook-output-body :deep(.md-list .md-list), .bubble-md :deep(.md-list .md-list) { margin: 2px 0; }
+.notebook-output-body :deep(li.md-task), .bubble-md :deep(li.md-task) { list-style: none; }
+.notebook-output-body :deep(.md-check), .bubble-md :deep(.md-check) { margin: 0 6px 0 0; accent-color: var(--indigo); vertical-align: -2px; opacity: .9; }
+.notebook-output-body :deep(del), .bubble-md :deep(del) { color: var(--muted); }
+.notebook-output-body :deep(.md-img), .bubble-md :deep(.md-img) { display: block; max-width: 100%; height: auto; margin: 8px 0; border: 1px solid var(--line); border-radius: 10px; }
+.notebook-output-body :deep(.md-math-block), .bubble-md :deep(.md-math-block) { margin: 10px 0; padding: 2px 0; overflow-x: auto; overflow-y: hidden; text-align: center; }
+.notebook-output-body :deep(.md-math-inline), .bubble-md :deep(.md-math-inline) { max-width: 100%; overflow-x: auto; }
+.notebook-output-body :deep(.katex-error), .bubble-md :deep(.katex-error) { color: var(--warn, var(--orange-deep)); }
 .code-check-details { margin-top: 8px; font-size: 12px; color: var(--muted); }
 .code-check-details summary { cursor: pointer; font-weight: 700; }
 .code-check-details summary:hover { color: var(--orange-deep); }

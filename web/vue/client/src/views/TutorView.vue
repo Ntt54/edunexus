@@ -9,6 +9,11 @@ import { usePreferences } from "@/stores/preferences";
 import { tutorApi } from "@/services/api";
 import { useTutorSocket } from "@/composables/useTutorSocket";
 import type { ChatMessage, TutorSource } from "@/composables/useTutorSocket";
+// Rendu markdown UNIFIÉ (module partagé avec LessonView) : titres, listes
+// imbriquées + tâches, tableaux GFM avec copie, code avec copie, citations,
+// liens sûrs, images http(s), maths KaTeX. Coloration syntaxique propre à
+// cette vue via l'option `highlight`.
+import { renderMarkdown as renderMarkdownShared, handleMarkdownClick } from "@/lib/markdown";
 
 /* ── Stores ──────────────────────────────────────────────────── */
 const { state } = useLearningStore();
@@ -219,58 +224,27 @@ function toggleBook(bookId: string) {
   }
 }
 
-/* ── Simple markdown renderer ────────────────────────────────── */
+/* ── Markdown : délégation au module partagé ─────────────────── */
+/* Le moteur complet (titres, listes + tâches, tableaux, fences, citations,
+   liens sûrs, images http(s), échappements, maths KaTeX) est dans
+   @/lib/markdown — même sortie que LessonView. La vue garde SA coloration
+   (highlighters ci-dessous) et ses libellés i18n pour les boutons copier. */
 function renderMarkdown(raw: string): string {
-  if (!raw) return "";
-  let html = raw;
-
-  // Code blocks: ```lang\n...\n```
-  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_m, lang: string, code: string) => {
-    const escaped = escapeHtml(code.replace(/\n$/, ""));
-    const langLabel = lang
-      ? `<div class="code-lang">${escapeHtml(lang)}</div>`
-      : "";
-    return `<pre class="code-block">${langLabel}<code>${highlightSyntax(escaped, lang)}</code></pre>`;
+  return renderMarkdownShared(raw, {
+    labels: {
+      copy: t("lesson.copy") as string,
+      table: t("lesson.table") as string,
+    },
+    // Le contrat du module passe le code BRUT ; les highlighters de cette
+    // vue attendent du code déjà échappé (entités) → échappement ici.
+    highlight: (code, lang) => highlightSyntax(escapeHtml(code), lang),
   });
+}
 
-  // Headings
-  html = html.replace(/^######\s+(.+)$/gm, '<div class="md-h md-h6">$1</div>');
-  html = html.replace(/^#####\s+(.+)$/gm, '<div class="md-h md-h5">$1</div>');
-  html = html.replace(/^####\s+(.+)$/gm, '<div class="md-h md-h4">$1</div>');
-  html = html.replace(/^###\s+(.+)$/gm, '<div class="md-h md-h3">$1</div>');
-  html = html.replace(/^##\s+(.+)$/gm, '<div class="md-h md-h2">$1</div>');
-  html = html.replace(/^#\s+(.+)$/gm, '<div class="md-h md-h1">$1</div>');
-
-  // Horizontal rule
-  html = html.replace(/^(\s*[-*_]{3,})\s*$/gm, '<hr class="md-hr" />');
-
-  // Unordered lists
-  html = html.replace(/^[\-\*+]\s+(.+)$/gm, '<li class="md-li">$1</li>');
-
-  // Ordered lists
-  html = html.replace(/^\d+[.)]\s+(.+)$/gm, '<li class="md-oli">$1</li>');
-
-  // Wrap consecutive <li> in <ul>, consecutive <li class="md-oli"> in <ol>
-  html = html.replace(/((?:<li class="md-li">[\s\S]*?<\/li>\n?)+)/g, (match) => {
-    return `<ul class="md-list">${match.replace(/<\/?li class="md-li">/g, (li) => li.replace(' class="md-li"', ""))}</ul>`;
-  });
-  html = html.replace(/((?:<li class="md-oli">[\s\S]*?<\/li>\n?)+)/g, (match) => {
-    return `<ol class="md-list">${match.replace(/<li class="md-oli">/g, "<li>").replace(/<\/li>\n?/g, "</li>\n")}</ol>`;
-  });
-
-  // Inline: bold, italic, inline code, links
-  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-  html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
-  html = html.replace(/`([^`]+)`/g, '<code class="md-inline-code">$1</code>');
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-
-  // Block quotes
-  html = html.replace(/^&gt;\s+(.+)$/gm, '<blockquote class="md-quote">$1</blockquote>');
-
-  // Paragraphs: wrap bare text lines
-  html = html.replace(/^(?!<[a-z])((?!$).+)$/gm, '<div class="tutor-para">$1</div>');
-
-  return html;
+/* Copie au clic : les boutons naissent dans le v-html du module
+   (.md-copybtn[data-copy]) — un seul gestionnaire délégué par conteneur. */
+function onMarkdownClick(e: Event): void {
+  handleMarkdownClick(e, t("lesson.copied") as string);
 }
 
 function escapeHtml(s: string): string {
@@ -588,10 +562,11 @@ const sourcesClass = computed(() => {
                         class="tutor-think"
                       >{{ msg.id === '_streaming' ? currentThinking : msg.thinking }}</div>
 
-                      <!-- Content (markdown rendered) -->
+                      <!-- Content (markdown rendered — module partagé) -->
                       <div
                         v-if="msg.id === '_streaming' ? currentContent : msg.content"
                         class="tutor-text"
+                        @click="onMarkdownClick"
                         v-html="renderMarkdown(msg.id === '_streaming' ? currentContent : msg.content)"
                       ></div>
                     </div>
@@ -1118,9 +1093,18 @@ const sourcesClass = computed(() => {
 :deep(.md-list) {
   margin: 6px 0 6px 20px;
   padding: 0;
-  list-style: disc;
 }
+:deep(ul.md-list) { list-style: disc; }
+:deep(ol.md-list) { list-style: decimal; }
 :deep(.md-list li) { margin: 2px 0; }
+:deep(.md-list .md-list) { margin: 2px 0 2px 18px; }
+:deep(li.md-task) { list-style: none; }
+:deep(.md-check) {
+  margin: 0 6px 0 0;
+  accent-color: var(--indigo);
+  vertical-align: -2px;
+  opacity: 0.9;
+}
 
 :deep(.md-hr) {
   border: none;
@@ -1128,7 +1112,7 @@ const sourcesClass = computed(() => {
   margin: 10px 0;
 }
 
-:deep(.md-inline-code) {
+:deep(.md-code-inline) {
   font-family: ui-monospace, "SF Mono", monospace;
   font-size: 0.9em;
   background: var(--panel-soft, #f8f9ff);
@@ -1146,13 +1130,33 @@ const sourcesClass = computed(() => {
   font-style: italic;
 }
 
-:deep(.code-block) {
-  position: relative;
+/* Bloc de code (markup du module partagé : en-tête langage + copier). */
+:deep(.md-codeblock) {
   margin: 8px 0;
-  padding: 10px 12px;
-  background: #1e2230;
   border: 1px solid #2c3142;
   border-radius: 8px;
+  overflow: hidden;
+  background: #1e2230;
+}
+:deep(.md-codehead) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 8px 3px 12px;
+  background: #232838;
+  border-bottom: 1px solid #2c3142;
+}
+:deep(.md-codelang) {
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #8b93a8;
+}
+:deep(.md-code) {
+  margin: 0;
+  padding: 10px 12px;
   overflow-x: auto;
   font-family: ui-monospace, "SF Mono", monospace;
   font-size: 12.5px;
@@ -1160,25 +1164,106 @@ const sourcesClass = computed(() => {
   color: #d6dae6;
   white-space: pre;
 }
-
-:deep(.code-block code) {
+:deep(.md-code code) {
   font-family: inherit;
   background: transparent;
 }
-
-:deep(.code-lang) {
-  position: absolute;
-  top: 0;
-  right: 0;
-  padding: 2px 8px;
+:deep(.md-codeblock .md-copybtn) {
   font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: #aab2c5;
+  background: transparent;
+  border: 1px solid #3a4155;
+  border-radius: 5px;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+:deep(.md-codeblock .md-copybtn:hover) {
+  color: #fff;
+  border-color: #566080;
+  background: #2c3142;
+}
+
+/* Tableaux GFM (markup du module partagé). */
+:deep(.md-tablewrap) {
+  margin: 10px 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--panel);
+}
+:deep(.md-tablebar) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 8px 3px 12px;
+  background: var(--panel-soft, #f8f9ff);
+  border-bottom: 1px solid var(--line);
+}
+:deep(.md-tabletitle) {
   font-size: 10px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #8b93a8;
-  background: #2c3142;
-  border-radius: 0 8px 0 8px;
+  color: var(--muted);
 }
+:deep(.md-tablebar .md-copybtn) {
+  font: inherit;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--indigo-deep);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+:deep(.md-tablebar .md-copybtn:hover) {
+  background: var(--indigo-soft);
+  border-color: var(--indigo);
+}
+:deep(.md-tablescroll) { overflow-x: auto; }
+:deep(.md-table) {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+:deep(.md-table th),
+:deep(.md-table td) {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line-soft, var(--line));
+  text-align: left;
+  vertical-align: top;
+}
+:deep(.md-table th) {
+  background: var(--panel-soft, #f8f9ff);
+  font-weight: 600;
+  color: var(--ink);
+}
+:deep(.md-table tbody tr:last-child td) { border-bottom: none; }
+
+/* Maths KaTeX + images + barré (module partagé). */
+:deep(.md-math-block) {
+  margin: 10px 0;
+  padding: 2px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  text-align: center;
+}
+:deep(.md-math-inline) { max-width: 100%; overflow-x: auto; }
+:deep(.katex-error) { color: var(--warn, var(--orange-deep)); }
+:deep(.md-img) {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 8px 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+:deep(del) { color: var(--muted); }
 
 :deep(.tok.k) { color: #c792ea; }
 :deep(.tok.s) { color: #a5d6a7; }
