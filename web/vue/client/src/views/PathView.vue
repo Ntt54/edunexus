@@ -25,6 +25,7 @@ import { useLearningStore } from "@/stores/learning";
 import { tutorApi, invalidateSubjectCaches } from "@/services/api";
 import type { ActivityType } from "@/types";
 import { usePreferences } from "@/stores/preferences";
+import { isEmbeddingDisabled } from "@/stores/embedding";
 
 const { state, hydrate } = useLearningStore();
 const { t, activeSubjectId, activeLearnerId } = usePreferences();
@@ -448,7 +449,8 @@ async function openBookModal() {
 }
 
 async function generateFromBooks() {
-  if (!subjectId.value || selectedBookIds.value.length === 0) return;
+  if (!subjectId.value) return;
+  if (!isEmbeddingDisabled.value && selectedBookIds.value.length === 0) return;
   generatingBooks.value = true;
   error.value = null;
   // Remplissage : le parcours sélectionné ne reçoit les étapes que s'il
@@ -741,8 +743,10 @@ async function generateFromBooks() {
                     </div>
                   </div>
                 </label>
-                <p v-if="availableBooks.length === 0" class="lib-empty">{{ t("path.noBooks") }}</p>
+                <p v-if="availableBooks.length === 0 && !isEmbeddingDisabled" class="lib-empty">{{ t("path.noBooks") }}</p>
+                <p v-if="availableBooks.length === 0 && isEmbeddingDisabled" class="lib-empty">{{ t("path.ragOffNoBooks") }}</p>
               </div>
+              <p v-if="isEmbeddingDisabled" style="margin: 8px 0 0; padding: 8px 12px; border-radius: 8px; background: rgba(217, 119, 6, 0.06); color: var(--amber, #92600a); font-size: 12px; line-height: 1.5;">{{ t("path.ragOffHint") }}</p>
               <div style="margin-top: 12px;">
                 <label class="field-label" for="book-goal">{{ t("path.bookGoalLabel") }}</label>
                 <textarea
@@ -758,7 +762,7 @@ async function generateFromBooks() {
               <div class="modal-actions">
                 <button
                   class="primary-action"
-                  :disabled="generatingBooks || selectedBookIds.length === 0"
+                  :disabled="generatingBooks || (!isEmbeddingDisabled && selectedBookIds.length === 0)"
                   @click="generateFromBooks"
                 >
                   <Loader2 v-if="generatingBooks" :size="16" class="spin" aria-hidden="true" />

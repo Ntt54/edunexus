@@ -161,6 +161,7 @@ from .models import (
     ExerciseAttempt,
     ResumeBriefing,
     SessionSummary,
+    Subject,
     _now_iso,
     _uid,
 )
@@ -174,6 +175,7 @@ from .prompts import (
     build_exam_resolve_prompt,
     build_learning_path_prompt,
     build_path_from_books_prompt,
+    build_path_from_knowledge_prompt,
     build_revision_sheet_prompt,
     build_summary_prompt,
     build_system_prompt,
@@ -4272,6 +4274,13 @@ class TutorService:
         ``KeyError``; absent ⇒ creation as before. The result gains
         ``filled: true|false``.
 
+        RAG off (``is_embedding_disabled``) with an EMPTY ``book_ids``
+        generates the steps from the model's own knowledge (subject +
+        goal only, no books/TOC involved): the model must NOT invent book
+        citations, and no TOC fallback exists — degenerate output simply
+        raises :class:`PathGenerationError`. With books selected (RAG off
+        OR on) the books/TOC behavior below is unchanged.
+
         Hardened against degenerate small-local-LLM output: parsed steps
         are validated (titled, duration clamped, source normalised), and a
         deterministic TOC fallback (``fallback: True``) replaces unusable
@@ -4285,6 +4294,51 @@ class TutorService:
         5. Returns the created path as a dict (plus ``fallback`` flag).
         """
         subject = self.store.require_subject(subject_id)
+        goal = str(description or "").strip() or None
+
+        # RAG off + NO books: generate the steps from the model's general
+        # knowledge (subject + goal), no books/TOC involved. Same parse +
+        # title filters as the RAG-on path; no TOC fallback exists, so an
+        # output under the minimum viable count simply fails explicitly.
+        if self.is_embedding_disabled and not book_ids:
+            level = self.config.tutor_level or "intermediate"
+            system_prompt = build_path_from_knowledge_prompt(
+                subject.name, level, goal
+            )
+            messages = [
+                Message(role=MessageRole.SYSTEM, content=system_prompt),
+                Message(
+                    role=MessageRole.USER,
+                    content=(
+                        f"Crée un parcours d'apprentissage structuré pour la "
+                        f"matière « {subject.name} »."
+                    ),
+                ),
+            ]
+            raw = await self._llm_collect(messages, self._generation_options())
+            steps_data = self._parse_path_steps_response(raw)
+            steps_data = [
+                s for s in steps_data if self._is_step_title_usable(s.get("title", ""))
+            ]
+            steps_data = self._dedupe_steps(steps_data)[: self.PATH_MAX_STEPS]
+            if len(steps_data) < self.PATH_MIN_STEPS:
+                raise PathGenerationError(
+                    "Impossible de générer un parcours sans livres : la sortie "
+                    "du modèle est insuffisante (moins de "
+                    f"{self.PATH_MIN_STEPS} étapes exploitables)."
+                )
+            return self._create_path_from_steps(
+                subject_id,
+                subject,
+                steps_data,
+                title=f"Parcours — {subject.name}",
+                description=goal or (
+                    f"Parcours structuré sur « {subject.name} » "
+                    f"({len(steps_data)} étapes)"
+                ),
+                path_id=path_id,
+                fallback=False,
+            )
 
         # Fetch chunks from the selected books to build the TOC structure
         # via public store API (no private _conn access).
@@ -4326,8 +4380,6 @@ class TutorService:
             )
 
         # Learner goal (additive): guides the split + becomes the description.
-        goal = str(description or "").strip() or None
-
         # Build prompt and call LLM.
         level = self.config.tutor_level or "intermediate"
         system_prompt = build_path_from_books_prompt(book_structures, level, goal)
@@ -4390,25 +4442,53 @@ class TutorService:
                     "code ou bruit)."
                 )
 
-        # Target path: fill an existing EMPTY path in place (manual
-        # title/description kept), else create (never destroy steps).
-        filled = False
+        description = goal or (
+            f"Parcours structuré basé sur {len(book_structures)} livre(s) "
+            f"({len(steps_data)} étapes)"
+        )
+        if fallback:
+            description += " — généré depuis la table des matières"
+        return self._create_path_from_steps(
+            subject_id,
+            subject,
+            steps_data,
+            title=f"Parcours depuis livres — {subject.name}",
+            description=description,
+            path_id=path_id,
+            fallback=fallback,
+        )
+
+    def _create_path_from_steps(
+        self,
+        subject_id: str,
+        subject: Subject,
+        steps_data: list[dict[str, Any]],
+        *,
+        title: str,
+        description: str,
+        path_id: str | None = None,
+        fallback: bool = False,
+    ) -> dict[str, Any]:
+        """Shared creation of a learning path + its steps (RAG on AND off).
+
+        ``steps_data`` are the validated LLM steps (title/type/duration,
+        optional ``source``). ``path_id`` fills an existing EMPTY path in
+        place (manual title/description kept) when provided and matching;
+        otherwise a new path is created (never destroys existing steps).
+        Returns the path dict with id/title/steps + ``fallback`` and
+        ``filled`` flags.
+        """
         if path_id:
             existing = self.store.get_learning_path(path_id)
             if existing is None or existing.subject_id != subject_id:
                 raise KeyError(f"Parcours introuvable : {path_id}")
-            if not self.store.list_path_steps(existing.id):
-                path = existing
-                filled = True
-        if not filled:
+            filled = not self.store.list_path_steps(existing.id)
+            path = existing if filled else None
+        else:
+            filled = False
+            path = None
+        if not filled and path is None:
             # Create the learning path.
-            title = f"Parcours depuis livres — {subject.name}"
-            description = goal or (
-                f"Parcours structuré basé sur {len(book_structures)} livre(s) "
-                f"({len(steps_data)} étapes)"
-            )
-            if fallback:
-                description += " — généré depuis la table des matières"
             path = self.store.create_learning_path(subject_id, title, description)
 
         # Create PathSteps from the validated steps.

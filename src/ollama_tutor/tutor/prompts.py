@@ -615,6 +615,101 @@ def build_path_from_books_prompt(
     return "\n".join(lines)
 
 
+def build_path_from_knowledge_prompt(
+    subject_name: str,
+    level: str = "intermediate",
+    description: str | None = None,
+) -> str:
+    """Build a system prompt generating a learning path from model knowledge.
+
+    RAG-off fallback of :func:`build_path_from_books_prompt`: no books/TOC
+    are available, the model builds a structured progression from the
+    subject alone (its general knowledge) and must NOT invent book,
+    chapter or page citations.
+
+    ``subject_name`` is the learning subject's name; ``level`` the learner's
+    level; ``description`` the learner's optional goal: when non-blank it
+    adds an « Objectif de l'élève » section guiding the split; blank/None
+    omits the section entirely.
+
+    The LLM must return a JSON array of step objects with keys:
+    - title: string
+    - type: "concept" | "exercise" | "quiz" | "reading"
+    - duration: number (minutes)
+    - objectives: short list of learning objectives (optional but encouraged)
+
+    Structure: 2 lessons → exercises → 2 lessons → exercises → ... → project.
+    """
+    level = _normalize_level(level)
+
+    lines: list[str] = []
+    lines.append(
+        "Tu es un tuteur pédagogique qui conçoit un parcours d'apprentissage "
+        "structuré en français."
+    )
+    lines.append("")
+    lines.append(
+        "Tâche — Créer un parcours d'apprentissage pour la matière indiquée, "
+        "sans livres ni documents : tu t'appuies uniquement sur tes "
+        "connaissances générales."
+    )
+    lines.append("")
+    lines.append(f"Matière : {subject_name}.")
+    lines.append(f"Niveau de l'élève : {level}.")
+    lines.append("")
+    goal = str(description or "").strip()
+    if goal:
+        lines.append(f"Objectif de l'élève : {goal}")
+        lines.append(
+            "Tiens compte de cet objectif pour guider le découpage : priorise "
+            "les notions liées à l'objectif, adapte les intitulés des étapes "
+            "pour y répondre."
+        )
+        lines.append("")
+    lines.append("Règles de construction du parcours :")
+    lines.append(
+        "- Le parcours alterne 2 leçons (concept ou reading) puis des exercices "
+        "qui testent les leçons précédentes."
+    )
+    lines.append(
+        "- Après chaque bloc de 2-3 leçons, insère un quiz de validation."
+    )
+    lines.append(
+        "- Les exercices testent les concepts des leçons précédentes (pas les suivantes)."
+    )
+    lines.append(
+        "- La dernière étape est un projet qui synthétise tout le parcours."
+    )
+    lines.append(
+        "- Chaque étape doit avoir un titre explicite, un type, une durée estimée "
+        "(en minutes) et, si possible, des objectifs d'apprentissage."
+    )
+    lines.append(
+        "- N'invente AUCUNE citation de livre, de chapitre ou de page : aucune "
+        "source documentaire n'est attendue."
+    )
+    lines.append("")
+    lines.append("Réponds STRICTEMENT en JSON, sans aucun texte autour, sous la forme :")
+    lines.append(
+        '[{"title": "Titre de l\'étape", "type": "concept", "duration": 15, '
+        '"objectives": ["Objectif 1", "Objectif 2"]}]'
+    )
+    lines.append("")
+    lines.append(
+        "Les valeurs de type possibles sont : \"concept\", \"exercise\", \"quiz\", "
+        "\"reading\"."
+    )
+    lines.append(
+        "Le parcours doit contenir au moins 6 étapes et au plus 20 étapes."
+    )
+    lines.append("")
+    lines.append(
+        "Toute la réponse est en français. Chaque étape doit être pertinente "
+        "par rapport à la matière et à l'objectif de l'élève."
+    )
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # US3 — Diagnostic initial / quiz de positionnement (T020)
 # ---------------------------------------------------------------------------

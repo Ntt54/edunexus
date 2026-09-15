@@ -13,6 +13,7 @@ import PreferenceControls from "@/components/PreferenceControls.vue";
 import { usePreferences } from "@/stores/preferences";
 import { tutorApi } from "@/services/api";
 import type { EngineInfo, ModelInfo, ModelSources, SubjectInfo, LearnerProfile } from "@/services/api";
+import { currentEmbedding, isEmbeddingDisabled, EMBED_SENTINELS } from "@/stores/embedding";
 
 const { state, dismissNotice } = useLearningStore();
 const brandMark = "/manus-storage/edunexus-nexus-mark_e91945cc.png";
@@ -28,7 +29,6 @@ const engineReady = ref(false);
 // ── Models ────────────────────────────────────────────────────────
 const embeddingModels = ref<string[]>([]);
 const llmModels = ref<string[]>([]);
-const currentEmbedding = ref("");
 const currentLLM = ref("");
 const modelSources = ref<ModelSources>({ ollama: [], cloud: [] });
 const searchEmbedding = ref("");
@@ -89,11 +89,9 @@ function providerGroup(name: string): string {
 }
 
 // ── Embedding disabled state ──────────────────────────────────────
-const EMBED_SENTINELS = new Set(["disabled", "none", "off"]);
-const embeddingDisabled = computed(() =>
-  !currentEmbedding.value || EMBED_SENTINELS.has(currentEmbedding.value),
-);
-
+// `isEmbeddingDisabled` vient du module partagé stores/embedding.ts
+// (currentEmbedding y est écrit par loadModels / onEmbeddingChange /
+// onLLMChange) : tout écran (Parçours, etc.) lit le même état.
 function buildModelGroups(
   list: string[],
   current: string,
@@ -545,16 +543,16 @@ onUnmounted(() => {
         <div
           v-if="engineReady"
           class="engine-badge"
-          :class="{ 'engine-badge--rag-off': embeddingDisabled }"
-          :title="embeddingDisabled
+          :class="{ 'engine-badge--rag-off': isEmbeddingDisabled }"
+          :title="isEmbeddingDisabled
             ? 'RAG désactivé — le modèle répond de mémoire'
             : engineOcr
               ? 'Moteur : embeddings GGUF locaux · OCR Docling actif'
               : 'Moteur : embeddings via Ollama'"
         >
-          <span class="engine-dot" :class="{ 'engine-dot--off': embeddingDisabled }" />
-          <Sparkles v-if="!embeddingDisabled" :size="13" aria-hidden="true" />
-          <span>{{ embeddingDisabled ? 'RAG off' : engineLabel }}</span>
+          <span class="engine-dot" :class="{ 'engine-dot--off': isEmbeddingDisabled }" />
+          <Sparkles v-if="!isEmbeddingDisabled" :size="13" aria-hidden="true" />
+          <span>{{ isEmbeddingDisabled ? 'RAG off' : engineLabel }}</span>
         </div>
 
         <!-- Model selectors -->
@@ -585,7 +583,7 @@ onUnmounted(() => {
               type="button"
               class="fav-btn"
               :class="{ on: isFavModel(currentEmbedding) }"
-              :disabled="embeddingDisabled"
+              :disabled="isEmbeddingDisabled"
               title="Favori du modèle d'embeddings"
               aria-label="Favori du modèle d'embeddings"
               @click="toggleFavModel(currentEmbedding)"

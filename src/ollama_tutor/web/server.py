@@ -3379,9 +3379,10 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
     @app.post("/api/tutor/subjects/{subject_id}/path/generate-from-books")
     async def generate_path_from_books(subject_id: str, request: Request) -> dict[str, Any]:
         body = await request.json()
-        book_ids = body.get("book_ids", [])
-        if not book_ids:
-            raise HTTPException(400, "book_ids requis")
+        # An EMPTY book_ids is valid: with embeddings disabled the service
+        # generates the path from the model's knowledge (subject + goal);
+        # with RAG on it degrades to the explicit PathGenerationError (422).
+        book_ids = body.get("book_ids", []) or []
         if tutor_store.get_subject(subject_id) is None:
             raise HTTPException(404, "Sujet inconnu")
         raw_description = body.get("description")

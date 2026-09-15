@@ -88,6 +88,49 @@ def client_embed_fails(tmp_path: Path, monkeypatch):
         yield c
 
 
+def _make_path_rag_off_transport():
+    """Chat NDJSON avec des étapes valides, /api/embed LÈVE, /api/tags vide."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.rstrip("/")
+        if path.endswith("/api/embed"):
+            raise AssertionError(
+                "client.embed appelé alors que les embeddings sont désactivés"
+            )
+        if path.endswith("/api/tags"):
+            return httpx.Response(200, json={"models": []}, request=request)
+        steps = [
+            {"title": f"Leçon {i}", "type": "concept", "duration": 15}
+            for i in range(1, 7)
+        ]
+        ndjson = (
+            json.dumps({"message": {"content": json.dumps(steps)}, "done": False})
+            + "\n"
+            + json.dumps({"done": True})
+            + "\n"
+        )
+        return httpx.Response(
+            200,
+            content=ndjson.encode("utf-8"),
+            headers={"content-type": "application/x-ndjson"},
+            request=request,
+        )
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.fixture
+def client_path_rag_off(tmp_path: Path, monkeypatch):
+    class ScriptedClient(web_server.OllamaClient):
+        def __init__(self, *a, **k):
+            super().__init__(transport=_make_path_rag_off_transport())
+
+    monkeypatch.setattr(web_server, "OllamaClient", ScriptedClient)
+    app = web_server.create_app(config_dir=tmp_path / "config")
+    with TestClient(app) as c:
+        yield c
+
+
 def _wait_indexed(c: TestClient, timeout: float = 3.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -192,3 +235,44 @@ def test_search_rag_on_vector_path(client: TestClient, tmp_path: Path) -> None:
     for res in results:
         for key in _RESULT_KEYS:
             assert key in res, f"result field manquant: {key}"
+
+
+# ---------------------------------------------------------------------------
+# POST /path/generate-from-books — book_ids vide quand RAG off
+# ---------------------------------------------------------------------------
+
+def test_path_generate_from_books_empty_rag_off(
+    client_path_rag_off: TestClient,
+) -> None:
+    """book_ids=[] accepté quand les embeddings sont désactivés ⇒ 200 + steps."""
+    _put_embedding(client_path_rag_off, "disabled")
+    sid = client_path_rag_off.post(
+        "/api/tutor/subjects", json={"name": "Informatique"}
+    ).json()["id"]
+    r = client_path_rag_off.post(
+        f"/api/tutor/subjects/{sid}/path/generate-from-books",
+        json={"book_ids": [], "description": "réviser les boucles"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["fallback"] is False
+    assert body["filled"] is False
+    assert body["id"]
+    assert body["description"] == "réviser les boucles"
+    assert len(body["steps"]) == 6
+    assert all(s["title"].strip() for s in body["steps"])
+
+
+def test_path_generate_from_books_empty_rag_on_422(
+    client_embed_fails: TestClient,
+) -> None:
+    """book_ids=[] avec RAG on ⇒ 422 (TOC des livres requise)."""
+    sid = client_embed_fails.post(
+        "/api/tutor/subjects", json={"name": "Histoire"}
+    ).json()["id"]
+    r = client_embed_fails.post(
+        f"/api/tutor/subjects/{sid}/path/generate-from-books",
+        json={"book_ids": [], "description": "réviser la Révolution"},
+    )
+    assert r.status_code == 422, r.text
+    assert "insuffisants" in r.json().get("detail", "")
