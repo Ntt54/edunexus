@@ -41,9 +41,14 @@ class NotebookService:
         store: LibraryStore,
         llm: Any | None = None,
         rag_context: Callable[[str], list[dict[str, Any]]] | None = None,
+        embeddings_disabled: bool | None = None,
     ) -> None:
         self.store = store
         self.llm = llm
+        # RAG off: NO book excerpt ever reaches the LLM — the actions fall
+        # back to the model's own knowledge with an honest mention. None
+        # (default) keeps today's behavior (RAG context from indexed chunks).
+        self._embeddings_disabled = bool(embeddings_disabled)
         # Injectable RAG context builder (default: indexed chunks).
         self._rag_context = rag_context or self._default_rag_context
 
@@ -110,7 +115,14 @@ class NotebookService:
     # ------------------------------------------------------------------
 
     def _default_rag_context(self, subject_id: str) -> list[dict[str, Any]]:
-        """RAG context from indexed chunks (FR-034)."""
+        """RAG context from indexed chunks (FR-034).
+
+        RAG off (``embeddings_disabled``): returns ``[]`` — no book
+        excerpt reaches the LLM; actions fall back to the model's own
+        knowledge with an honest mention (no invented sources).
+        """
+        if self._embeddings_disabled:
+            return []
         chunks = self.store.get_indexed_chunks(subject_id)
         return [
             {
@@ -166,21 +178,36 @@ class NotebookService:
         context: list[dict[str, Any]],
         params: dict[str, Any],
     ) -> str:
-        excerpts = "\n".join(
-            f"- [{c.get('chapter') or c.get('section') or '?'}] {c.get('text')}"
-            for c in context[:8]
-        )
+        uses_sources = bool(context)
+        if uses_sources:
+            excerpts = "\n".join(
+                f"- [{c.get('chapter') or c.get('section') or '?'}] {c.get('text')}"
+                for c in context[:8]
+            )
+            context_block = f"Contexte (extraits):\n{excerpts}\n"
+            instruction = (
+                "Produis une réponse pédagogique en français, concise et "
+                "structurée, en t'appuyant sur ces extraits."
+            )
+        else:
+            context_block = "Contexte : aucun extrait de livre n'est disponible (RAG désactivé).\n"
+            instruction = (
+                "Produis une réponse pédagogique en français, concise et "
+                "structurée, depuis tes connaissances générales sur le sujet. "
+                "N'invente AUCUNE citation de livre, de chapitre ou de page."
+            )
         prompt = (
             f"Action carnet: {action}\n"
             f"Type de sortie: {kind}\n"
-            f"Contexte (extraits):\n{excerpts}\n"
-            "Produis une réponse pédagogique en français, concise et structurée."
+            f"{context_block}"
+            f"{instruction}"
         )
         messages = [{"role": "user", "content": prompt}]
-        text = await self.llm.chat_stream(messages, {})
+        text = self.llm.chat_stream(messages, {})
         if isinstance(text, str):
             return text
-        # chat_stream yields StreamEvent objects; extract content text.
+        # chat_stream is an async generator of StreamEvent objects;
+        # extract content text (never await the generator itself).
         parts = []
         async for chunk in text:
             if chunk.kind == "content" and chunk.text:
@@ -195,6 +222,14 @@ class NotebookService:
         params: dict[str, Any],
     ) -> str:
         """Deterministic fallback content (offline tests, no LLM)."""
+        if not context:
+            # RAG off / no indexed content: honest fallback, never fabricate
+            # book-derived statements from an empty context.
+            return (
+                "Aucun extrait de livre disponible (RAG désactivé ou matière "
+                "sans contenu indexé) : la réponse doit être générée depuis les "
+                "connaissances générales du modèle, sans source inventée."
+            )
         titles = [
             c.get("chapter") or c.get("section") or "notion"
             for c in context

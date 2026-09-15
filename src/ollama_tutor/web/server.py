@@ -2868,7 +2868,13 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
         """Build a NotebookService wired to the tutor LLM when available."""
         from ..tutor.notebook import NotebookService
         llm = getattr(tutor_service, "_llm_client", None)
-        return NotebookService(tutor_store, llm=llm)
+        return NotebookService(
+            tutor_store,
+            llm=llm,
+            # RAG off: no book excerpt reaches the LLM (honest knowledge
+            # fallback) — the toggle lives on the tutor service.
+            embeddings_disabled=tutor_service.is_embedding_disabled,
+        )
 
     @app.get("/api/tutor/subjects/{subject_id}/notebook")
     async def notebook_get(subject_id: str) -> dict[str, Any]:

@@ -1621,14 +1621,19 @@ class TutorService:
         Returns ``{"sheet": text, "subject_name": str}``.
         """
         subject = self.store.require_subject(subject_id)
-        if book_id:
+        if self.is_embedding_disabled:
+            # RAG off: NO book extract reaches the LLM — the sheet is
+            # generated from the model's own knowledge (honest fallback,
+            # ``build_revision_sheet_prompt`` serves an empty context).
+            texts: list[str] = []
+        elif book_id:
             raw_chunks = self.store.get_chunks_by_provenance(
                 subject_id, book_id, chapter
             )
+            texts = [c["text"] for c in raw_chunks if c.get("text")]
         else:
             raw_chunks = self.store.get_subject_chunks(subject_id)
-
-        texts = [c["text"] for c in raw_chunks if c.get("text")]
+            texts = [c["text"] for c in raw_chunks if c.get("text")]
 
         level = self.config.tutor_level or "intermediate"
         system_prompt = build_revision_sheet_prompt(texts, subject.name, level)
@@ -4816,12 +4821,18 @@ class TutorService:
         subject_id = self.store.get_book_subject_id(book_id)
         if subject_id is None:
             raise KeyError(f"Livre non rattaché à un sujet : {book_id}")
-        raw_chunks = self.store.get_chunks_by_provenance(
-            subject_id, book_id, chapter
-        )
-        texts = [c["text"] for c in raw_chunks if c.get("text")]
-        if not texts:
-            return {"summary": "Aucun contenu indexé pour ce livre.", "book_title": book.title}
+        if self.is_embedding_disabled:
+            # RAG off: NO book extract reaches the LLM — the summary is
+            # generated from the model's own knowledge (empty context,
+            # never a book TOC / excerpts citation).
+            texts: list[str] = []
+        else:
+            raw_chunks = self.store.get_chunks_by_provenance(
+                subject_id, book_id, chapter
+            )
+            texts = [c["text"] for c in raw_chunks if c.get("text")]
+            if not texts:
+                return {"summary": "Aucun contenu indexé pour ce livre.", "book_title": book.title}
         prompt = build_summary_prompt(texts[:30], book.title, chapter)
         model = self.config.tutor_model
         messages = [

@@ -414,11 +414,12 @@ function renderMarkdown(text: string): string {
       }
     }
     if(!tl){ out+='<div style="height:6px"></div>'; i++; continue; }
-    const hm = /^(#{1,3})\s+(.*)$/.exec(tl);
+    const hm = /^(#{1,6})\s+(.*)$/.exec(tl);
     if(hm){ out+=`<div class="md-h md-h${hm[1].length}">${renderInline(hm[2])}</div>`; i++; continue; }
+    if(/^---+\s*$/.test(tl)){ out+='<hr class="md-hr">'; i++; continue; }
     const ol = /^(\d+)[.)]\s+(.*)$/.exec(tl);
     if(ol){ out+=`<div style="margin-left:16px">${escHtml(ol[1])}. ${renderInline(ol[2])}</div>`; i++; continue; }
-    if(/^[-*]\s+/.test(tl)){ out+=`<div style="margin-left:16px">• ${renderInline(tl.replace(/^[-*]\s+/,""))}</div>`; i++; continue; }
+    if(/^[-*•]\s+/.test(tl)){ out+=`<div style="margin-left:16px">• ${renderInline(tl.replace(/^[-*•]\s+/,""))}</div>`; i++; continue; }
     out+=`<div>${renderInline(ln)}</div>`; i++;
   }
   return out;
@@ -1249,6 +1250,10 @@ export default { name: "LessonView" };
 .notebook-output-body :deep(.md-h1) { font-size: 18px; }
 .notebook-output-body :deep(.md-h2) { font-size: 15px; }
 .notebook-output-body :deep(.md-h3) { font-size: 13.5px; }
+.notebook-output-body :deep(.md-h4) { font-size: 13px; color: var(--ink-2); }
+.notebook-output-body :deep(.md-h5) { font-size: 12.5px; color: var(--muted); }
+.notebook-output-body :deep(.md-h6) { font-size: 12px; color: var(--muted); font-weight: 600; }
+.notebook-output-body :deep(.md-hr) { border: none; border-top: 1px solid var(--line); margin: 12px 0; }
 .notebook-output-src { margin-top: 8px; color: var(--muted); font-size: 11.5px; }
 /* Rendu markdown (v-html) : TOUT passe par :deep() — le contenu injecté
    ne porte pas l'attribut scopé, les règles nues ne s'appliqueraient JAMAIS. */

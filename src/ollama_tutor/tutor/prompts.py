@@ -407,6 +407,13 @@ def build_revision_sheet_prompt(
     lines.append("")
     lines.append("=== Extraits des livres de l'élève ===")
     lines.append(context_block)
+    if not chunks:
+        lines.append("")
+        lines.append(
+            "Aucun extrait de livre n'est disponible : produis la fiche depuis "
+            "tes connaissances générales sur la matière, sans inventer de "
+            "référence documentaire et sans prétendre citer des extraits."
+        )
     return "\n".join(lines)
 
 
@@ -419,17 +426,30 @@ def build_summary_prompt(chunks: list[str], book_title: str, chapter: str | None
     """Build system prompt for document summary generation."""
     context = "\n\n".join(f"[Extrait {i+1}]\n{c}" for i, c in enumerate(chunks))
     target = f"du chapitre '{chapter}' du livre" if chapter else "du livre"
+    if chunks:
+        extracts_block = f"Extraits du document :\n{context}\n"
+        closing = (
+            "Sois précis, cite les concepts importants. Toute la réponse en français."
+        )
+    else:
+        # RAG off: no extract available — honest knowledge-based fallback,
+        # never invent book/TOC citations.
+        extracts_block = "Aucun extrait du document n'est disponible (RAG désactivé).\n"
+        closing = (
+            "Rédige le résumé depuis tes connaissances générales sur le sujet, "
+            "sans citer ni inventer d'extraits ni de table des matières. "
+            "Toute la réponse en français."
+        )
     return f"""Tu es un assistant pédagogique expert. Résume {target} «{book_title}».
 
-Extraits du document :
-{context}
+{extracts_block}
 
 Produis un résumé structuré en markdown avec :
 1. **Résumé global** (2-3 paragraphes)
 2. **Sections clés** (liste à puces par thème)
 3. **Points essentiels** (5-10 points à retenir)
 
-Sois précis, cite les concepts importants. Toute la réponse en français."""
+{closing}"""
 
 
 # ---------------------------------------------------------------------------

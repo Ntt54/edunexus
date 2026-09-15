@@ -440,7 +440,16 @@ class LessonDiscussionService:
         tripled excerpts. Empty keyword matches still return [] (callers'
         contract preserved); the never-empty guarantee applies once chunks
         exist.
+
+        RAG off (embeddings désactivés, sentinelles ""/disabled/none/off) :
+        renvoie [] immédiatement — les chunks déjà vectorisés AVANT la
+        bascule ne doivent PAS alimenter les extraits LLM des leçons
+        (sinon citations livres + « Sources » malgré le toggle). Quand
+        ``tutor_service`` est None, on n'a pas l'information RAG : on
+        conserve le comportement historique (getattr → False, pas de crash).
         """
+        if getattr(self.tutor_service, "is_embedding_disabled", False):
+            return []
         if not subject_id:
             return []
         chunks = self.store.get_indexed_chunks(subject_id)
