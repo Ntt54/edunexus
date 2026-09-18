@@ -67,6 +67,9 @@ export function buildBooksUrl(subjectId?: string | null, all?: boolean): string 
 export function buildLearnersUrl(subjectId?: string | null): string {
   return subjectId ? `/learners?subject_id=${encodeURIComponent(subjectId)}` : "/learners";
 }
+export function buildRemindersUrl(subjectId?: string | null, learnerId?: string | null): string {
+  return `/reminders${qs({ subject_id: subjectId || undefined, learner_id: learnerId || undefined })}`;
+}
 
 // ── 011 fix · garde anti-spam + retour vide local ──────────────────
 function isEmptySubjectId(id: string | null | undefined): boolean {
@@ -76,6 +79,9 @@ const CACHED_EMPTY_DASHBOARD = { nextStep: null as null, counts: { sources: 0, n
 const CACHED_EMPTY_PATHS = { paths: [] as Array<{ id: string; title: string; description: string; status: string; progress?: number }> };
 const CACHED_EMPTY_LEARNERS: { learners: LearnerProfile[] } = { learners: [] };
 const CACHED_EMPTY_BOOKS: { books: SourceBook[] } = { books: [] };
+export interface ReminderItem { kind: string; id: string; title: string; overdue_days: number; }
+export interface RemindersPayload { due: ReminderItem[]; due_count: number; stale_plan: boolean; }
+const CACHED_EMPTY_REMINDERS: RemindersPayload = { due: [], due_count: 0, stale_plan: false };
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 async function requestWithSingleRetry<T>(path: string, init?: RequestInit): Promise<T> {
   try {
@@ -323,8 +329,9 @@ export const tutorApi = {
     const url = subjectId ? cacheBust(`/learners?subject_id=${encodeURIComponent(subjectId)}`) : cacheBust("/learners");
     return request<{ learners: LearnerProfile[] }>(url);
   },
-  async createLearner(name: string, avatar = ""): Promise<LearnerProfile> {
-    return request("/learners", { method: "POST", body: JSON.stringify({ name, avatar }) });
+  async createLearner(name: string, avatar = "", subjectId?: string | null): Promise<LearnerProfile> {
+    const qs = subjectId ? `?subject_id=${encodeURIComponent(subjectId)}` : "";
+    return request(`/learners${qs}`, { method: "POST", body: JSON.stringify({ name, avatar }) });
   },
   async activateLearner(learnerId: string): Promise<{ learner: LearnerProfile; subjects: unknown[] }> {
     return request(`/learners/${encodeURIComponent(learnerId)}/activate`, { method: "POST" });
@@ -692,6 +699,19 @@ export const tutorApi = {
   async gradeReview(flashcardId: string, success: boolean): Promise<Record<string, unknown>> {
     return request(`/reviews/${encodeURIComponent(flashcardId)}/grade`, { method: "POST", body: JSON.stringify({ success }) });
   },
+  // ── 012 · Rappels « À réviser » (FR-001) ────────────────────────
+  // Garde: si subject_id vide → retour vide local immédiat, sans fetch.
+  async getReminders(subjectId: string, learnerId?: string | null): Promise<RemindersPayload> {
+    if (isEmptySubjectId(subjectId)) return Promise.resolve({ ...CACHED_EMPTY_REMINDERS, due: [] });
+    const url = cacheBust(buildRemindersUrl(subjectId, learnerId || undefined));
+    try {
+      return await requestWithSingleRetry<RemindersPayload>(url);
+    } catch (e) {
+      const s = (e as { status?: number }).status;
+      if (s === 400 || s === 404) return { ...CACHED_EMPTY_REMINDERS, due: [] };
+      throw e;
+    }
+  },
   async prepareKnowledge(subjectId: string): Promise<Record<string, unknown>> {
     return request(`/subjects/${encodeURIComponent(subjectId)}/prepare`, { method: "POST" });
   },
@@ -906,5 +926,64 @@ export const tutorApi = {
   },
   async removeBookFromCorpus(bookId: string, corpusId: number): Promise<{ removed: boolean }> {
     return request(`/books/${encodeURIComponent(bookId)}/corpora/${corpusId}`, { method: "DELETE" });
+  },
+
+  // ── Feature 012 — Rappels « À réviser » (US1) : voir getReminders ──
+  // (garde vide + retry + 400/404 → vide, section Progression ci-dessus).
+
+  // ── Feature 012 — Packs curriculum (US2, lecture seule, shell) ────
+  async getPacks(): Promise<{ packs: Array<{ key: string; title: string; classe: string; version: string; statut: string }> }> {
+    return request(cacheBust("/packs"));
+  },
+  async getPack(key: string): Promise<{ schemaVersion: number; classes: unknown; matieres: unknown; chapitres: unknown }> {
+    return request(cacheBust(`/packs/${encodeURIComponent(key)}`));
+  },
+
+  // ── Feature 012 — Épreuves blanches /20 (US2, shell) ─────────────
+  async createBlueprintExam(payload: { blueprint: string; duree_min: number; subject_id?: string; size?: number }): Promise<Record<string, unknown>> {
+    return request("/exams", { method: "POST", body: JSON.stringify(payload) });
+  },
+
+  // ── Feature 012 — Partage parent, consentement (US2, shell) ──────
+  async grantLearnerShare(learnerId: string): Promise<{ share_token: string }> {
+    return request(`/learners/${encodeURIComponent(learnerId)}/share`, { method: "POST" });
+  },
+  async revokeLearnerShare(learnerId: string): Promise<{ revoked: boolean }> {
+    return request(`/learners/${encodeURIComponent(learnerId)}/share`, { method: "DELETE" });
+  },
+  async getParentOverview(token: string): Promise<{ temps_semaine_min: number; maitrise: Record<string, number>; erreurs_frequentes: unknown[]; prochain_jalon: string }> {
+    const url = cacheBust(`/parent/overview${qs({ token: token || undefined })}`);
+    return request(url);
+  },
+
+  // ── Feature 012 — Notes atomiques liées (US3, shell) ─────────────
+  async createAtomicNote(payload: { title: string; body: string; concept_ids?: string[]; source_refs?: unknown[] }): Promise<Record<string, unknown>> {
+    return request("/notes/atomic", { method: "POST", body: JSON.stringify(payload) });
+  },
+  async getAtomicNotes(): Promise<{ notes: unknown[] }> {
+    return request(cacheBust("/notes/atomic"));
+  },
+  async linkAtomicNote(id: string, payload: { to_id: string; rel: string }): Promise<Record<string, unknown>> {
+    return request(`/notes/atomic/${encodeURIComponent(id)}/links`, { method: "POST", body: JSON.stringify(payload) });
+  },
+  async deleteAtomicNote(id: string): Promise<{ deleted: boolean }> {
+    return request(`/notes/atomic/${encodeURIComponent(id)}`, { method: "DELETE" });
+  },
+  async assembleAtomicPlan(question: string): Promise<Record<string, unknown>> {
+    const url = cacheBust(`/notes/atomic/plan${qs({ question: question || undefined })}`);
+    return request(url);
+  },
+
+  // ── Feature 012 — Planning semestre ECTS (US3, shell) ────────────
+  async planSemester(payload: { ues: Array<{ subject_id: string; heures?: number; ects?: number }>; epreuves?: Array<{ date: string; subject_id: string }>; title?: string; start_date?: string; weeks?: number; max_heures_semaine?: number; learner_id?: string }): Promise<Record<string, unknown>> {
+    return request("/planner/semester", { method: "POST", body: JSON.stringify(payload) });
+  },
+
+  // ── Feature 012 — Lisibilité WCAG 2.2 AA, profil apprenant (US4, shell) ──
+  async getReadability(): Promise<{ fontScale: number; lineHeight: number; letterSpacing: string; theme: string; dyslexia: boolean }> {
+    return request(cacheBust("/readability"));
+  },
+  async saveReadability(prefs: { fontScale?: number; lineHeight?: number; letterSpacing?: string; theme?: string; dyslexia?: boolean }): Promise<Record<string, unknown>> {
+    return request("/readability", { method: "PUT", body: JSON.stringify(prefs) });
   },
 };

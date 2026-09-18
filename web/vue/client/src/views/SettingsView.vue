@@ -13,6 +13,7 @@ import {
 } from "lucide-vue-next";
 import { tutorApi } from "@/services/api";
 import { usePreferences } from "@/stores/preferences";
+import ReadabilityPanel from "@/components/ReadabilityPanel.vue";
 
 const { t } = usePreferences();
 
@@ -638,6 +639,10 @@ async function restartServer() {
 
         <!-- ═══════════════ Sidebar ═══════════════ -->
         <aside class="settings-aside">
+          <!-- 012 US4 (FR-013) · presets lisibilité WCAG 2.2 AA -->
+          <article class="content-panel" style="margin-bottom:16px;">
+            <ReadabilityPanel />
+          </article>
           <article class="content-panel">
             <ShieldCheck :size="22" aria-hidden="true" />
             <p class="eyebrow">{{ t('settings.privacy') }}</p>

@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 2,
+  "packKey": "cm/bepc",
+  "packVersion": "0.1.0",
+  "minAppVersion": "0.1.0",
+  "source": "OBC/MINESEC à confirmer",
+  "statut": "squelette_à_valider",
+  "title": "BEPC — Brevet d'études du premier cycle (Cameroun)",
+  "classe": "Troisième",
+  "examen": "BEPC",
+  "note": "Squelette à valider : titres, objectifs, durées et prérequis uniquement. Coefficients non confirmés (null) — relecture humaine de l'arrêté MINESEC requise (T031). Aucun texte d'épreuve copié.",
+  "matieres": [
+    {
+      "code": "francais",
+      "titre": "Français",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Grammaire : phrase simple et phrase complexe", "objectifs": ["Distinguer phrase simple et phrase complexe", "Identifier propositions principales et subordonnées"], "duree_min": 120, "prerequis": []},
+        {"titre": "Conjugaison : temps du récit", "objectifs": ["Employer passé simple et imparfait à bon escient", "Conjuguer les verbes usuels aux temps du récit"], "duree_min": 120, "prerequis": ["Grammaire : phrase simple et phrase complexe"]},
+        {"titre": "Rédaction : texte narratif et argumentatif", "objectifs": ["Structurer un récit en paragraphes", "Formuler une thèse et des arguments simples"], "duree_min": 150, "prerequis": ["Conjugaison : temps du récit"]}
+      ]
+    },
+    {
+      "code": "mathematiques",
+      "titre": "Mathématiques",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Nombres rationnels et calcul numérique", "objectifs": ["Effectuer des calculs avec fractions et puissances", "Résoudre des problèmes de proportionnalité"], "duree_min": 150, "prerequis": []},
+        {"titre": "Théorème de Pythagore et trigonométrie", "objectifs": ["Appliquer le théorème de Pythagore", "Utiliser cosinus, sinus et tangente dans le triangle rectangle"], "duree_min": 150, "prerequis": ["Nombres rationnels et calcul numérique"]},
+        {"titre": "Équations et inéquations du premier degré", "objectifs": ["Résoudre une équation du premier degré", "Représenter les solutions d'une inéquation"], "duree_min": 120, "prerequis": ["Nombres rationnels et calcul numérique"]}
+      ]
+    },
+    {
+      "code": "pct",
+      "titre": "Physique-Chimie-Technologie",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Électricité : tension, intensité et loi d'Ohm", "objectifs": ["Mesurer tension et intensité", "Appliquer la loi d'Ohm"], "duree_min": 120, "prerequis": []},
+        {"titre": "Chimie : atomes, molécules et réactions", "objectifs": ["Décrire le modèle atomique simple", "Équilibrer une équation de réaction simple"], "duree_min": 120, "prerequis": []}
+      ]
+    },
+    {
+      "code": "svt",
+      "titre": "Sciences de la Vie et de la Terre",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Nutrition et digestion chez l'humain", "objectifs": ["Décrire le trajet des aliments", "Expliquer l'absorption des nutriments"], "duree_min": 90, "prerequis": []},
+        {"titre": "Reproduction et hérédité", "objectifs": ["Décrire la reproduction humaine", "Expliquer la transmission des caractères"], "duree_min": 90, "prerequis": []}
+      ]
+    },
+    {
+      "code": "histoire-geo-ecm",
+      "titre": "Histoire-Géographie et ECM",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Le Cameroun : milieu naturel et activités", "objectifs": ["Localiser les grands ensembles naturels", "Relier milieu et activités économiques"], "duree_min": 90, "prerequis": []},
+        {"titre": "Citoyenneté et institutions", "objectifs": ["Décrire les institutions nationales", "Expliquer les droits et devoirs du citoyen"], "duree_min": 90, "prerequis": []}
+      ]
+    },
+    {
+      "code": "anglais",
+      "titre": "Anglais",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Temps verbaux : present, past, future", "objectifs": ["Conjuguer aux temps usuels", "Choisir le temps adapté au contexte"], "duree_min": 120, "prerequis": []},
+        {"titre": "Compréhension et production écrite", "objectifs": ["Comprendre un texte court", "Rédiger un paragraphe simple et cohérent"], "duree_min": 120, "prerequis": ["Temps verbaux : present, past, future"]}
+      ]
+    },
+    {
+      "code": "informatique",
+      "titre": "Informatique",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Traitement de texte et tableur", "objectifs": ["Mettre en forme un document", "Utiliser les formules simples d'un tableur"], "duree_min": 90, "prerequis": []},
+        {"titre": "Algorithmique : notions de base", "objectifs": ["Décrire un algorithme en langage courant", "Représenter un algorithme par organigramme"], "duree_min": 90, "prerequis": []}
+      ]
+    }
+  ]
+}

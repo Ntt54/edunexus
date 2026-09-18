@@ -7,7 +7,7 @@ import { usePreferences } from "@/stores/preferences";
 import { tutorApi } from "@/services/api";
 
 const { state } = useLearningStore();
-const { t } = usePreferences();
+const { t, locale } = usePreferences();
 
 const selected = ref("diagnostic");
 const subjectId = computed(() => state.data?.subject.id ?? "");
@@ -102,6 +102,20 @@ async function doAnalyze() {
   finally { analyzingExam.value = false; }
 }
 
+function qCorrection(q: QuizQuestion): string {
+  // open/recall : answer est {text} — String(answer) donnerait "[object Object]".
+  const a = q.answer as Record<string, unknown> | null | undefined;
+  if (a != null && typeof a === "object" && typeof a.text === "string") return a.text;
+  return String(a);
+}
+function qFeedback(qid: string): string {
+  // Feedback per-question du juge (012 US1 AS-2) via le report soumis.
+  const r = report.value as { per_question?: Array<{ question_id?: string; feedback?: unknown }> } | null;
+  const list = r?.per_question;
+  if (!Array.isArray(list)) return "";
+  const entry = list.find(e => e?.question_id === qid);
+  return typeof entry?.feedback === "string" ? entry.feedback : "";
+}
 function qTitle(q: QuizQuestion): string {
   const p = q.payload as Record<string, unknown>;
   return (p.question as string) ?? (p.statement as string) ?? (p.prompt as string) ?? `Question (${q.type})`;
@@ -208,6 +222,17 @@ const quizProgress = computed(() => {
                 <label class="q-option"><input type="radio" :name="`q-${q.id}`" value="true" :checked="answers[q.id]==='true'" :disabled="quiz.status==='completed'" @change="answers[q.id]='true'" /><span>Vrai</span></label>
                 <label class="q-option"><input type="radio" :name="`q-${q.id}`" value="false" :checked="answers[q.id]==='false'" :disabled="quiz.status==='completed'" @change="answers[q.id]='false'" /><span>Faux</span></label>
               </div>
+              <!-- 012 US1 (FR-002) : rappel rédigé — réponse cachée, rédaction de mémoire -->
+              <div v-else-if="q.type==='recall_written'" class="recall-block">
+                <p class="recall-hint">{{ locale === 'fr' ? "Réponse attendue cachée — rédigez de mémoire, sans consulter vos notes." : "Model answer hidden — write your answer from memory." }}</p>
+                <textarea
+                  :value="(answers[q.id] as string) ?? ''"
+                  :disabled="quiz.status==='completed'"
+                  rows="4"
+                  placeholder="Rédigez votre réponse de mémoire… / Write your answer from memory…"
+                  @input="answers[q.id]=($event.target as HTMLTextAreaElement).value"
+                />
+              </div>
               <!-- open -->
               <textarea
                 v-else
@@ -217,7 +242,8 @@ const quizProgress = computed(() => {
                 placeholder="Votre réponse…"
                 @input="answers[q.id]=($event.target as HTMLTextAreaElement).value"
               />
-              <p v-if="quiz.status==='completed' && q.answer != null" class="q-answer"><Eye :size="12" aria-hidden="true" /> Correction : {{ String(q.answer) }}</p>
+              <p v-if="quiz.status==='completed' && q.answer != null" class="q-answer"><Eye :size="12" aria-hidden="true" /> Correction : {{ qCorrection(q) }}</p>
+              <p v-if="qFeedback(q.id)" class="q-feedback">{{ qFeedback(q.id) }}</p>
             </div>
           </div>
 
@@ -328,6 +354,10 @@ const quizProgress = computed(() => {
 .q-option:hover { border-color: #cbd1ff; background: #f8f8ff; }
 .q-option input { accent-color: var(--indigo); }
 .q-answer { margin: 0; font-size: 12.5px; color: var(--green); font-weight: 600; line-height: 1.4; }
+.q-feedback { margin: 0; font-size: 12.5px; color: var(--muted); font-style: italic; line-height: 1.4; }
+.recall-block { display: grid; gap: 8px; }
+.recall-hint { margin: 0; font-size: 12px; font-weight: 600; color: var(--indigo-deep); background: var(--indigo-soft); border-radius: 8px; padding: 8px 10px; line-height: 1.4; }
+.recall-block textarea, .question-card textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--line-soft); border-radius: 10px; padding: 10px 12px; font: inherit; font-size: 13.5px; line-height: 1.5; resize: vertical; }
 .quiz-actions { display: flex; gap: 8px; }
 .report-box { display: flex; gap: 10px; padding: 14px; border: 1px solid #b9e9d0; border-radius: 12px; background: var(--green-soft); }
 .report-box strong { font-size: 14px; }

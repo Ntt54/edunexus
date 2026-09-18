@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 2,
+  "packKey": "cm/premiere-a",
+  "packVersion": "0.1.0",
+  "minAppVersion": "0.1.0",
+  "source": "OBC/MINESEC à confirmer",
+  "statut": "squelette_à_valider",
+  "title": "Probatoire A — Première littéraire (Cameroun)",
+  "classe": "Première A",
+  "examen": "Probatoire A",
+  "note": "Squelette à valider : titres, objectifs, durées et prérequis uniquement. Coefficients non confirmés (null) — relecture humaine de l'arrêté MINESEC requise (T031). Aucun texte d'épreuve copié.",
+  "matieres": [
+    {
+      "code": "francais",
+      "titre": "Français et littérature",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Genres littéraires : roman et théâtre", "objectifs": ["Identifier les caractéristiques du roman et du théâtre", "Analyser un extrait court"], "duree_min": 150, "prerequis": []},
+        {"titre": "Dissertation et commentaire composé", "objectifs": ["Bâtir un plan de dissertation", "Rédiger une introduction et une conclusion"], "duree_min": 180, "prerequis": ["Genres littéraires : roman et théâtre"]}
+      ]
+    },
+    {
+      "code": "philosophie",
+      "titre": "Philosophie (initiation)",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Qu'est-ce que philosopher ?", "objectifs": ["Distinguer opinion, science et philosophie", "Formuler un problème philosophique simple"], "duree_min": 90, "prerequis": []},
+        {"titre": "Conscience et vérité", "objectifs": ["Définir conscience et vérité", "Confronter deux thèses opposées"], "duree_min": 120, "prerequis": ["Qu'est-ce que philosopher ?"]}
+      ]
+    },
+    {
+      "code": "histoire-geo",
+      "titre": "Histoire-Géographie",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Colonisation et indépendances en Afrique", "objectifs": ["Situer les étapes de la décolonisation", "Expliquer les enjeux des indépendances"], "duree_min": 120, "prerequis": []},
+        {"titre": "Mondialisation et développement", "objectifs": ["Décrire les flux de la mondialisation", "Analyser les inégalités de développement"], "duree_min": 120, "prerequis": []}
+      ]
+    },
+    {
+      "code": "anglais",
+      "titre": "Anglais",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Voix passive et discours rapporté", "objectifs": ["Former la voix passive", "Rapporter des propos au discours indirect"], "duree_min": 120, "prerequis": []},
+        {"titre": "Essai argumenté", "objectifs": ["Structurer un essai en paragraphes", "Employer les connecteurs logiques"], "duree_min": 120, "prerequis": ["Voix passive et discours rapporté"]}
+      ]
+    },
+    {
+      "code": "mathematiques",
+      "titre": "Mathématiques",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Fonctions numériques : généralités", "objectifs": ["Déterminer un domaine de définition", "Étudier variations et limites simples"], "duree_min": 150, "prerequis": []},
+        {"titre": "Statistiques descriptives", "objectifs": ["Calculer moyenne, médiane et quartiles", "Interpréter une série statistique"], "duree_min": 90, "prerequis": []}
+      ]
+    }
+  ]
+}

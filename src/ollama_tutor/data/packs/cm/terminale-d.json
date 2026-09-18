@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 2,
+  "packKey": "cm/terminale-d",
+  "packVersion": "0.1.0",
+  "minAppVersion": "0.1.0",
+  "source": "OBC/MINESEC à confirmer",
+  "statut": "squelette_à_valider",
+  "title": "Baccalauréat D — Terminale SVT (Cameroun)",
+  "classe": "Terminale D",
+  "examen": "Bac D",
+  "note": "Squelette à valider : titres, objectifs, durées et prérequis uniquement. Barème et coefficients à confirmer par relecture humaine de l'arrêté MINESEC (T031). Aucun texte d'épreuve copié.",
+  "matieres": [
+    {
+      "code": "svt",
+      "titre": "SVT",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Génétique : brassage et cartes", "objectifs": ["Expliquer le brassage inter et intrachromosomique", "Interpréter une carte génétique simple"], "duree_min": 180, "prerequis": []},
+        {"titre": "Immunologie : réponse adaptative", "objectifs": ["Décrire la sélection clonale", "Expliquer mémoire immunitaire et vaccins"], "duree_min": 150, "prerequis": []},
+        {"titre": "Géologie : tectonique et ressources", "objectifs": ["Expliquer la tectonique des plaques", "Relier géologie et ressources locales"], "duree_min": 150, "prerequis": []}
+      ]
+    },
+    {
+      "code": "mathematiques",
+      "titre": "Mathématiques",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Analyse : fonctions et primitives", "objectifs": ["Étudier une fonction (limites, variations)", "Calculer une intégrale simple"], "duree_min": 210, "prerequis": []},
+        {"titre": "Probabilités et statistiques", "objectifs": ["Appliquer les lois discrètes usuelles", "Interpréter un intervalle de confiance simple"], "duree_min": 150, "prerequis": []}
+      ]
+    },
+    {
+      "code": "physique-chimie",
+      "titre": "Physique-Chimie",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Ondes et optique", "objectifs": ["Décrire une onde (période, longueur d'onde)", "Appliquer les lois de l'optique géométrique"], "duree_min": 150, "prerequis": []},
+        {"titre": "Chimie : acides, bases et organique", "objectifs": ["Prévoir le pH d'une solution simple", "Identifier une fonction organique"], "duree_min": 150, "prerequis": []}
+      ]
+    },
+    {
+      "code": "philosophie",
+      "titre": "Philosophie",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Le vivant et la nature", "objectifs": ["Interroger le statut du vivant", "Discuter la responsabilité envers la nature"], "duree_min": 120, "prerequis": []},
+        {"titre": "Liberté et déterminisme", "objectifs": ["Confronter thèses déterministes et libre arbitre", "Argumenter sur la responsabilité morale"], "duree_min": 120, "prerequis": []}
+      ]
+    },
+    {
+      "code": "francais-anglais",
+      "titre": "Français et Anglais",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Synthèse et argumentation (FR)", "objectifs": ["Contracter un texte", "Rédiger une dissertation courte"], "duree_min": 120, "prerequis": []},
+        {"titre": "Compréhension et essai (EN)", "objectifs": ["Comprendre un texte long", "Rédiger un essai structuré"], "duree_min": 120, "prerequis": []}
+      ]
+    }
+  ]
+}

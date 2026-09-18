@@ -204,6 +204,15 @@ class LibraryStore:
                 FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS subject_learners (
+                subject_id TEXT NOT NULL,
+                learner_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (subject_id, learner_id),
+                FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
+                FOREIGN KEY (learner_id) REFERENCES learner_profiles(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS chunks (
                 id TEXT PRIMARY KEY,
                 subject_id TEXT NOT NULL,
@@ -908,6 +917,11 @@ class LibraryStore:
         # Feature 010 P2-Pédagogie (US7) : table feedback HITL.
         self._migrate_p2_pedagogy()
 
+        # Feature 012 — real learning packs (T004) : tables packs, notes
+        # atomiques, planning semestre, partage parent + colonnes
+        # readability / streak / score_20 / blueprint_key.
+        self._migrate_012_learning_packs()
+
         # Feature 009 — leçon discussion centrée
         # lesson_* tables for existing DBs ( _create_schema already handles fresh DBs )
         cur.executescript(
@@ -1323,7 +1337,7 @@ class LibraryStore:
         if "<" in name or ">" in name:
             raise ValueError("Caractères <> interdits")
         if len(name) > 64:
-            raise ValueError("Nom déjà utilisé")
+            raise ValueError("Nom trop long (64 caractères maximum)")
         subject = self._get_subject(subject_id)  # KeyError if unknown
         # Per-learner uniqueness, case-insensitive (Q2, FR-002, FR-008)
         row = self._conn.execute(
@@ -1469,6 +1483,137 @@ class LibraryStore:
             """
         )
         cur.commit()
+
+    # ------------------------------------------------------------------
+    # Feature 012 — real learning packs (T004, data-model.md)
+    #
+    # 4 tables minimales + 4 colonnes sur tables existantes. Idempotent
+    # (CREATE TABLE IF NOT EXISTS + PRAGMA table_info, double-appel sûr),
+    # FK cascades, PRAGMA foreign_keys=ON respecté (jamais désactivé ici).
+    # ------------------------------------------------------------------
+
+    def _migrate_012_learning_packs(self) -> None:
+        """Create 012 tables and backfill 012 columns (idempotent)."""
+        cur = self._conn
+        cur.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS packs (
+                id TEXT PRIMARY KEY,
+                pack_key TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL DEFAULT '',
+                classe TEXT NOT NULL DEFAULT '',
+                examen TEXT NOT NULL DEFAULT '',
+                version TEXT NOT NULL DEFAULT '',
+                schema_version INTEGER NOT NULL DEFAULT 2,
+                min_app_version TEXT NOT NULL DEFAULT '',
+                sha256 TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                statut TEXT NOT NULL DEFAULT 'squelette_à_valider',
+                installed_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS atomic_notes (
+                id TEXT PRIMARY KEY,
+                learner_id TEXT NOT NULL DEFAULT '',
+                subject_id TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                body_own_words TEXT NOT NULL DEFAULT '',
+                concept_ids TEXT NOT NULL DEFAULT '[]',
+                source_refs TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY (learner_id) REFERENCES learner_profiles(id) ON DELETE CASCADE,
+                FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS atomic_note_links (
+                from_id TEXT NOT NULL,
+                to_id TEXT NOT NULL,
+                rel TEXT NOT NULL,
+                PRIMARY KEY (from_id, to_id),
+                FOREIGN KEY (from_id) REFERENCES atomic_notes(id) ON DELETE CASCADE,
+                FOREIGN KEY (to_id) REFERENCES atomic_notes(id) ON DELETE CASCADE,
+                CHECK (rel IN ('précise', 'contredit', 'mécanisme-de', 'exemple-de'))
+            );
+
+            CREATE TABLE IF NOT EXISTS semester_plans (
+                id TEXT PRIMARY KEY,
+                learner_id TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                start_date TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY (learner_id) REFERENCES learner_profiles(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS plan_slots (
+                plan_id TEXT NOT NULL,
+                week_index INTEGER NOT NULL,
+                subject_id TEXT NOT NULL DEFAULT '',
+                minutes INTEGER NOT NULL DEFAULT 0,
+                kind TEXT NOT NULL DEFAULT 'révision',
+                PRIMARY KEY (plan_id, week_index, subject_id),
+                FOREIGN KEY (plan_id) REFERENCES semester_plans(id) ON DELETE CASCADE,
+                FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
+                CHECK (kind IN ('révision', 'simulation', 'cours'))
+            );
+
+            CREATE TABLE IF NOT EXISTS parent_shares (
+                learner_id TEXT PRIMARY KEY,
+                consent TEXT NOT NULL DEFAULT 'révoqué',
+                share_token TEXT UNIQUE,
+                revoked_at TEXT,
+                FOREIGN KEY (learner_id) REFERENCES learner_profiles(id) ON DELETE CASCADE,
+                CHECK (consent IN ('accordé', 'révoqué'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_atomic_notes_learner
+                ON atomic_notes(learner_id);
+            CREATE INDEX IF NOT EXISTS idx_atomic_notes_subject
+                ON atomic_notes(subject_id);
+            CREATE INDEX IF NOT EXISTS idx_atomic_note_links_to
+                ON atomic_note_links(to_id);
+            CREATE INDEX IF NOT EXISTS idx_semester_plans_learner
+                ON semester_plans(learner_id);
+            CREATE INDEX IF NOT EXISTS idx_plan_slots_plan
+                ON plan_slots(plan_id);
+            """
+        )
+        cur.commit()
+        # Extensions de tables existantes (PRAGMA table_info, ajout si absent).
+        for table, column, ddl in (
+            ("learner_profiles", "readability_json", "TEXT"),
+            ("learner_profiles", "streak_freeze_json", "TEXT"),
+            ("learner_profile", "readability_json", "TEXT"),
+            ("learner_profile", "streak_freeze_json", "TEXT"),
+            ("quizzes", "score_20", "REAL"),
+            ("quizzes", "blueprint_key", "TEXT"),
+        ):
+            try:
+                existing = {
+                    r["name"] for r in cur.execute(f"PRAGMA table_info({table})")
+                }
+            except Exception:
+                continue
+            if existing and column not in existing:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+                cur.commit()
+        # Guarded: the ALTER loop above is best-effort (a missing table or a
+        # failed ALTER must not abort boot). Create the index only when the
+        # column actually exists; readers use SELECT * + from_dict .get()
+        # so a missing/NULL column is already None-safe.
+        try:
+            qcols = {r["name"] for r in cur.execute("PRAGMA table_info(quizzes)")}
+        except Exception:
+            qcols = set()
+        if "blueprint_key" in qcols:
+            try:
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_quizzes_blueprint "
+                    "ON quizzes(blueprint_key)"
+                )
+            except sqlite3.OperationalError:
+                pass
+            cur.commit()
 
     def submit_feedback(
         self,
@@ -4161,7 +4306,9 @@ class LibraryStore:
     def list_learners_by_subject(self, subject_id: str) -> list[LearnerProfile]:
         """Learners having at least one (subject_id, learner_id) couple data (Q3=B, FR-005).
 
-        Derived via EXISTS on learning_paths OR lesson_discussions.
+        Derived via EXISTS on learning_paths OR lesson_discussions OR the
+        explicit subject_learners membership recorded at creation (011/T031),
+        so a newly created learner is visible immediately, before any activity.
         """
         # Ensure tables exist before querying (migration may not have run for learner_id cols)
         rows = self._conn.execute(
@@ -4171,12 +4318,30 @@ class LibraryStore:
                 SELECT 1 FROM learning_paths path WHERE path.subject_id = ? AND path.learner_id = lp.id
             ) OR EXISTS (
                 SELECT 1 FROM lesson_discussions disc WHERE disc.subject_id = ? AND disc.learner_id = lp.id
+            ) OR EXISTS (
+                SELECT 1 FROM subject_learners sl WHERE sl.subject_id = ? AND sl.learner_id = lp.id
             )
             ORDER BY lp.created_at
             """,
-            (subject_id, subject_id),
+            (subject_id, subject_id, subject_id),
         ).fetchall()
         return [LearnerProfile.from_dict(dict(r)) for r in rows]
+
+    def add_learner_to_subject(self, subject_id: str, learner_id: str) -> None:
+        """Record explicit learner membership of a subject (011/T031, FR-005).
+
+        Raises KeyError if the subject or learner is unknown.
+        """
+        if self.get_subject(subject_id) is None:
+            raise KeyError(f"Unknown subject: {subject_id}")
+        if self.get_learner(learner_id) is None:
+            raise KeyError(f"Unknown learner: {learner_id}")
+        self._conn.execute(
+            "INSERT OR IGNORE INTO subject_learners (subject_id, learner_id, created_at)"
+            " VALUES (?, ?, ?)",
+            (subject_id, learner_id, _now_iso()),
+        )
+        self._conn.commit()
 
     # --- Subject profiles (US1) ---
 

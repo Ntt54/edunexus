@@ -21,6 +21,51 @@ MIN_DISTINCT_PROOFS = 3
 WINDOW_SIZE = 3
 
 
+def build_interleaved_session(
+    size: int,
+    n_concepts: int,
+    kinds: list[str],
+    failed: list[tuple[int, int]] | None = None,
+) -> list[tuple[int, int]]:
+    """Plan de séance entremêlée (012 US1, FR-003 ; recherche D3).
+
+    Retourne ``[(concept_idx, kind_idx), ...]`` : les types sont mélangés
+    (jamais deux questions adjacentes du même type quand k > 1 — avec un
+    seul type, k == 1, la non-adjacence est impossible par définition), les
+    concepts sont cyclés, et les ``failed`` (paires ``(concept_idx,
+    kind_idx)`` ratées précédemment, plafonnées à ``size``) refont surface
+    en fin de séance (pivotées si elles recréeraient un bloc mono-type).
+
+    Pur et déterministe (aucun appel LLM) — testable offline.
+    """
+    n = max(1, int(size))
+    n_concepts = max(1, int(n_concepts))
+    kinds = list(kinds or ["open"])
+    k = len(kinds)
+    plan: list[tuple[int, int]] = []
+    for i in range(n):
+        if k < 3:
+            # 1-2 types : simple alternance (jamais deux adjacents identiques
+            # quand k > 1 ; k == 1 : un seul type, non-adjacence impossible).
+            kind_idx = i % k
+        else:
+            # kind_idx = (i + i // k) % k : la retenue de la division
+            # garantit deux types adjacents toujours distincts (k ≥ 3).
+            kind_idx = (i + i // k) % k
+        plan.append((i % n_concepts, kind_idx))
+    # Ratés en fin de séance : plafonnés à n pour que size reste une taille
+    # (bonus borné, pas de croissance illimitée) ; pivot si le type raté
+    # égale le type de queue (k > 1) pour préserver la non-adjacence.
+    for pair in list(failed or [])[:n]:
+        ci, ki = pair
+        ci = int(ci) % n_concepts
+        ki = int(ki) % k
+        if k > 1 and plan and ki == plan[-1][1]:
+            ki = (ki + 1) % k
+        plan.append((ci, ki))
+    return plan
+
+
 class AdaptationService:
     """Local, windowed adaptation of the learning path."""
 

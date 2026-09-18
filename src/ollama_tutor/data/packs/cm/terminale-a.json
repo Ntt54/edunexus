@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 2,
+  "packKey": "cm/terminale-a",
+  "packVersion": "0.1.0",
+  "minAppVersion": "0.1.0",
+  "source": "OBC/MINESEC à confirmer",
+  "statut": "squelette_à_valider",
+  "title": "Baccalauréat A — Terminale littéraire (Cameroun)",
+  "classe": "Terminale A",
+  "examen": "Bac A",
+  "note": "Squelette à valider : titres, objectifs, durées et prérequis uniquement. Barème et coefficients à confirmer par relecture humaine de l'arrêté MINESEC (T031). Aucun texte d'épreuve copié.",
+  "matieres": [
+    {
+      "code": "philosophie",
+      "titre": "Philosophie",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "La conscience et l'inconscient", "objectifs": ["Problématiser le sujet conscient", "Discuter l'hypothèse de l'inconscient"], "duree_min": 180, "prerequis": []},
+        {"titre": "L'État et la justice", "objectifs": ["Interroger la légitimité du pouvoir", "Confronter conceptions de la justice"], "duree_min": 180, "prerequis": ["La conscience et l'inconscient"]},
+        {"titre": "Méthode : dissertation philosophique", "objectifs": ["Problématiser un sujet", "Organiser un développement dialectique"], "duree_min": 150, "prerequis": ["La conscience et l'inconscient"]}
+      ]
+    },
+    {
+      "code": "francais",
+      "titre": "Français et littérature",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Poésie et engagement", "objectifs": ["Analyser formes poétiques et effets", "Relier poésie et contexte historique"], "duree_min": 150, "prerequis": []},
+        {"titre": "Commentaire composé et dissertation", "objectifs": ["Construire un plan de commentaire", "Rédiger un développement structuré"], "duree_min": 180, "prerequis": ["Poésie et engagement"]}
+      ]
+    },
+    {
+      "code": "histoire-geo",
+      "titre": "Histoire-Géographie",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Le Cameroun contemporain", "objectifs": ["Retracer les grandes étapes depuis 1960", "Analyser les défis actuels"], "duree_min": 150, "prerequis": []},
+        {"titre": "L'Afrique dans la mondialisation", "objectifs": ["Décrire l'insertion de l'Afrique", "Évaluer atouts et dépendances"], "duree_min": 120, "prerequis": []}
+      ]
+    },
+    {
+      "code": "anglais",
+      "titre": "Anglais",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Synthèse et essai", "objectifs": ["Synthétiser plusieurs documents", "Rédiger un essai de 300 mots"], "duree_min": 150, "prerequis": []},
+        {"titre": "Faux-amis et registre littéraire", "objectifs": ["Éviter les faux-amis courants", "Adapter le registre au genre"], "duree_min": 90, "prerequis": []}
+      ]
+    },
+    {
+      "code": "mathematiques",
+      "titre": "Mathématiques",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Suites et fonctions : synthèse", "objectifs": ["Étudier une suite ou fonction usuelle", "Résoudre un problème d'optimisation simple"], "duree_min": 150, "prerequis": []},
+        {"titre": "Probabilités discrètes", "objectifs": ["Dénombrer cas favorables et possibles", "Calculer une probabilité conditionnelle simple"], "duree_min": 120, "prerequis": []}
+      ]
+    }
+  ]
+}

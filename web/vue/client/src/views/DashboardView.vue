@@ -8,7 +8,7 @@ import { usePreferences } from "@/stores/preferences";
 import { tutorApi, invalidateSubjectCaches } from "@/services/api";
 
 const { state, nextStep: legacyNextStep, masteredCount, weakestConcept, hydrate } = useLearningStore();
-const { t, activeSubjectId, activeLearnerId } = usePreferences();
+const { t, locale, activeSubjectId, activeLearnerId } = usePreferences();
 const data = computed(() => state.data);
 
 // ── 011 · Dashboard filtré par couple (FR-001/006/007/009) ────────────
@@ -16,6 +16,9 @@ const filtered = ref<{ nextStep: { id: string; title: string; progress: number; 
 const filteredLoading = ref(false);
 const filteredError = ref<string | null>(null);
 const filteredSubjectName = ref("");
+// ── 012 US1 · Badge « À réviser » (FR-001) ─────────────────────────
+const dueCount = ref(0);
+const dueStale = ref(false);
 let dashGen = 0;
 
 const RING_C = 326.73;
@@ -44,6 +47,8 @@ async function loadFiltered() {
     filtered.value = { nextStep: null, counts: { sources: 0, notions: 0 }, paths: [] };
     filteredSubjectName.value = "";
     filteredError.value = null;
+    dueCount.value = 0;
+    dueStale.value = false;
     return;
   }
   // No-flash: clear previous matter data immediately, show loader
@@ -62,12 +67,15 @@ async function loadFiltered() {
     }
   }
   try {
-    const [dash, subjRes] = await Promise.all([
+    const [dash, subjRes, rem] = await Promise.all([
       fetchDashWithGuard(sid, lid || undefined).catch(() => ({ nextStep: null, counts: { sources: 0, notions: 0 }, paths: [] } as unknown as { nextStep: null; counts: { sources: number; notions: number }; paths: unknown[] })),
       tutorApi.getSubjects().catch(() => ({ subjects: [] as Array<{ id: string; name: string }>, active_id: null })),
+      tutorApi.getReminders(sid, lid || undefined).catch(() => ({ due: [], due_count: 0, stale_plan: false })),
     ]);
     if (gen !== dashGen) return;
     filtered.value = dash as unknown as typeof filtered.value;
+    dueCount.value = rem.due_count ?? 0;
+    dueStale.value = rem.stale_plan ?? false;
     const found = (subjRes.subjects || []).find(s => s.id === sid);
     filteredSubjectName.value = found?.name || "";
   } catch (e) {
@@ -113,7 +121,7 @@ onUnmounted(() => {
   <section v-if="filteredLoading" class="page loading-state"><p>{{ t('app.loadingWorkshop') }}</p></section>
 
   <!-- État vide filtré (FR-007) : matière sans parcours -->
-  <section v-else-if="isEmptyFiltered" class="page dashboard-page">
+  <section v-else-if="isEmptyFiltered" class="page dashboard-page reading-surface">
     <header class="page-intro dashboard-intro">
       <div>
         <p class="eyebrow">{{ t('dashboard.kicker') }}</p>
@@ -133,7 +141,7 @@ onUnmounted(() => {
     </div>
   </section>
 
-  <section v-else-if="hasFiltered && filtered?.nextStep" class="page dashboard-page">
+  <section v-else-if="hasFiltered && filtered?.nextStep" class="page dashboard-page reading-surface">
     <header class="page-intro dashboard-intro">
       <div>
         <p class="eyebrow">{{ t('dashboard.kicker') }}</p>
@@ -152,7 +160,9 @@ onUnmounted(() => {
         <circle cx="95" cy="148" r="4" style="fill:var(--green-soft);stroke:var(--green)" stroke-width="2.5" />
       </svg>
       <div class="next-step-main">
-        <div class="next-step-label"><span></span> {{ t('dashboard.next') }}</div>
+        <div class="next-step-label"><span></span> {{ t('dashboard.next') }}
+          <RouterLink v-if="dueCount > 0" to="/rappels" class="due-badge" :class="{ stale: dueStale }" role="status">⚠ {{ dueCount }} {{ locale === 'fr' ? 'à réviser' : 'to review' }}</RouterLink>
+        </div>
         <p v-if="filtered?.nextStep" class="next-step-path">{{ nextTitle }}</p>
         <p v-else class="next-step-path">{{ data?.path.title ?? '' }} · {{ data ? t('dashboard.stepNumber', { current: data.path.steps.findIndex((item) => item.id === legacyNextStep?.id) + 1, total: data.path.steps.length }) : '' }}</p>
         <h2>{{ nextTitle }}</h2>
@@ -202,7 +212,7 @@ onUnmounted(() => {
     </section>
   </section>
 
-  <section v-else-if="data" class="page dashboard-page">
+  <section v-else-if="data" class="page dashboard-page reading-surface">
     <header class="page-intro dashboard-intro">
       <div>
         <p class="eyebrow">{{ t('dashboard.kicker') }}</p>
@@ -288,6 +298,9 @@ export default { components: { CompassIcon } };
 </script>
 
 <style scoped>
+.due-badge { display: inline-block; margin-left: 10px; font-size: 11.5px; font-weight: 800; padding: 3px 10px; border-radius: 999px; background: var(--orange-soft); color: var(--orange-deep, #9a3412); text-decoration: none; }
+.due-badge.stale { background: #fde2c8; }
+.due-badge:hover { text-decoration: underline; }
 .next-step-deco { position: absolute; top: 0; right: 0; width: 68%; height: 100%; opacity: .5; pointer-events: none; }
 .hero-ring { position: relative; z-index: 1; width: 104px; height: 104px; flex: none; }
 .hero-ring svg { width: 100%; height: 100%; display: block; }

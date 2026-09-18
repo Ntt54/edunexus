@@ -1,11 +1,11 @@
 <!-- EduNexus UI direction: Atelier de progression — la gestion des apprenants rend l'activité collective visible et simple. -->
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import { Check, LoaderCircle, Plus, Trash2, User } from "lucide-vue-next";
+import { Check, Eye, LoaderCircle, Plus, Trash2, User, X } from "lucide-vue-next";
 import { tutorApi, invalidateSubjectCaches } from "@/services/api";
 import { usePreferences } from "@/stores/preferences";
 
-const { t, activeSubjectId, activeLearnerId, setActiveLearnerId } = usePreferences();
+const { t, locale, activeSubjectId, activeLearnerId, setActiveLearnerId } = usePreferences();
 
 interface Learner {
   id: string;
@@ -19,13 +19,53 @@ const learners = ref<Learner[]>([]);
 const loading = ref(false);
 const creating = ref(false);
 const error = ref<string | null>(null);
+const success = ref<string | null>(null);
 const newName = ref("");
 const subjectName = ref("");
 let learnersGen = 0;
+let successTimer: ReturnType<typeof setTimeout> | null = null;
 
 // Confirm delete modal (reuse pattern AppShell)
 const showDelete = ref(false);
 const deleteTarget = ref<Learner | null>(null);
+
+// ── 012 US2 (FR-008) · Partage parent à consentement ──────────────
+const shareTokens = ref<Record<string, string>>({});
+const sharingBusy = ref<Record<string, boolean>>({});
+
+async function grantShare(learner: Learner) {
+  error.value = null; success.value = null;
+  sharingBusy.value[learner.id] = true;
+  try {
+    const res = await tutorApi.grantLearnerShare(learner.id);
+    shareTokens.value[learner.id] = res.share_token;
+    success.value = locale.value === "fr"
+      ? `Partage accordé pour « ${learner.name} » — transmettez ce jeton au parent.`
+      : `Sharing granted for "${learner.name}" — pass this token to the parent.`;
+    if (successTimer) clearTimeout(successTimer);
+    successTimer = setTimeout(() => { success.value = null; }, 8000);
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Partage impossible — réessayez.";
+  } finally {
+    sharingBusy.value[learner.id] = false;
+  }
+}
+
+async function revokeShare(learner: Learner) {
+  error.value = null;
+  sharingBusy.value[learner.id] = true;
+  try {
+    await tutorApi.revokeLearnerShare(learner.id);
+    delete shareTokens.value[learner.id];
+    success.value = locale.value === "fr" ? "Partage révoqué." : "Sharing revoked.";
+    if (successTimer) clearTimeout(successTimer);
+    successTimer = setTimeout(() => { success.value = null; }, 5000);
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Révocation impossible — réessayez.";
+  } finally {
+    sharingBusy.value[learner.id] = false;
+  }
+}
 
 const activeSubject = computed(() => activeSubjectId.value || localStorage.getItem("edunexus.space") || localStorage.getItem("edunexus:subject") || "");
 const activeLearner = computed(() => activeLearnerId.value || localStorage.getItem("edunexus.learner") || "");
@@ -83,12 +123,17 @@ async function createLearner() {
   if (!activeSubject.value) { error.value = "Aucune matière active"; return; }
   creating.value = true;
   error.value = null;
+  success.value = null;
   try {
-    await tutorApi.createLearner(name);
-    // backend does not auto-scope by subject_id for create, but list filtered will show if coupled via paths; for 011 spec, create is for active subject
+    // 011/T031: create bound to the active subject so the learner is
+    // immediately visible in the filtered list (FR-005 / US3-AC1).
+    const created = await tutorApi.createLearner(name, "", activeSubject.value);
     newName.value = "";
     invalidateSubjectCaches();
     await fetchLearners();
+    if (successTimer) clearTimeout(successTimer);
+    success.value = `Apprenant « ${created.name} » créé pour ${subjectName.value || "la matière active"}.`;
+    successTimer = setTimeout(() => { success.value = null; }, 5000);
   } catch (e) {
     const st = (e as { status?: number }).status;
     const msg = e instanceof Error ? e.message : String(e);
@@ -178,6 +223,7 @@ onUnmounted(() => {
     </header>
 
     <p v-if="error" class="error-notice">{{ error }}</p>
+    <p v-if="success" class="success-notice" role="status">{{ success }}</p>
 
     <article class="content-panel create-learner-panel">
       <div class="panel-heading">
@@ -251,6 +297,28 @@ onUnmounted(() => {
               {{ t('learners.activate') }}
             </button>
             <button
+              v-if="!shareTokens[learner.id]"
+              type="button"
+              class="secondary-action"
+              :disabled="sharingBusy[learner.id]"
+              :title="locale === 'fr' ? 'Accorder le partage parent (jeton)' : 'Grant parent sharing (token)'"
+              @click="grantShare(learner)"
+            >
+              <Eye :size="16" aria-hidden="true" />
+              {{ locale === 'fr' ? 'Partager' : 'Share' }}
+            </button>
+            <button
+              v-else
+              type="button"
+              class="secondary-action"
+              :disabled="sharingBusy[learner.id]"
+              :title="locale === 'fr' ? 'Révoquer le partage parent' : 'Revoke parent sharing'"
+              @click="revokeShare(learner)"
+            >
+              <X :size="16" aria-hidden="true" />
+              {{ locale === 'fr' ? 'Révoquer' : 'Revoke' }}
+            </button>
+            <button
               type="button"
               class="text-button danger"
               :aria-label="t('learners.deleteAria', { name: learner.name })"
@@ -259,6 +327,11 @@ onUnmounted(() => {
               <Trash2 :size="16" aria-hidden="true" />
             </button>
           </div>
+          <p v-if="shareTokens[learner.id]" class="share-token" role="status">
+            <Eye :size="12" aria-hidden="true" />
+            <code>{{ shareTokens[learner.id] }}</code>
+            <small>{{ locale === 'fr' ? 'Jeton à transmettre au parent (espace parent).' : 'Token to pass to the parent (parent space).' }}</small>
+          </p>
         </article>
       </div>
     </section>
@@ -278,7 +351,10 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.share-token { display: grid; gap: 4px; margin: 8px 0 0; padding: 10px 12px; border: 1px dashed var(--line); border-radius: 10px; background: var(--indigo-soft, #eef0ff); font-size: 12px; }
+.share-token code { font-size: 12px; word-break: break-all; user-select: all; }
 .modal-overlay{position:fixed;inset:0;z-index:100;display:grid;place-items:center;background:rgba(15,15,25,.45);backdrop-filter:blur(4px)}
 .modal-panel{border-radius:16px;background:#fff;box-shadow:0 24px 80px rgba(0,0,0,.18)}
 .error-notice{margin:12px 0;color:#b42318;background:#fef3f2;border:1px solid #fecaca;border-radius:10px;padding:8px 12px;font-size:13px}
+.success-notice{margin:12px 0;color:#067647;background:#ecfdf3;border:1px solid #abefc6;border-radius:10px;padding:8px 12px;font-size:13px}
 </style>

@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 2,
+  "packKey": "cm/premiere-d",
+  "packVersion": "0.1.0",
+  "minAppVersion": "0.1.0",
+  "source": "OBC/MINESEC à confirmer",
+  "statut": "squelette_à_valider",
+  "title": "Probatoire D — Première scientifique SVT (Cameroun)",
+  "classe": "Première D",
+  "examen": "Probatoire D",
+  "note": "Squelette à valider : titres, objectifs, durées et prérequis uniquement. Coefficients non confirmés (null) — relecture humaine de l'arrêté MINESEC requise (T031). Aucun texte d'épreuve copié.",
+  "matieres": [
+    {
+      "code": "svt",
+      "titre": "SVT",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Génétique : mitose, méiose et hérédité", "objectifs": ["Comparer mitose et méiose", "Résoudre un exercice de croisement simple"], "duree_min": 150, "prerequis": []},
+        {"titre": "Écologie : écosystèmes et environnement", "objectifs": ["Décrire les relations trophiques", "Analyser un impact humain local"], "duree_min": 120, "prerequis": []},
+        {"titre": "Physiologie nerveuse", "objectifs": ["Décrire le neurone et la synapse", "Expliquer le réflexe myotatique"], "duree_min": 120, "prerequis": ["Génétique : mitose, méiose et hérédité"]}
+      ]
+    },
+    {
+      "code": "mathematiques",
+      "titre": "Mathématiques",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Second degré et fonctions", "objectifs": ["Résoudre une équation du second degré", "Étudier une fonction polynôme simple"], "duree_min": 150, "prerequis": []},
+        {"titre": "Dérivation : bases", "objectifs": ["Calculer une dérivée usuelle", "Déterminer le sens de variation"], "duree_min": 150, "prerequis": ["Second degré et fonctions"]}
+      ]
+    },
+    {
+      "code": "physique-chimie",
+      "titre": "Physique-Chimie",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Travail, énergie et puissance", "objectifs": ["Calculer travail et énergie cinétique", "Appliquer le théorème de l'énergie cinétique"], "duree_min": 150, "prerequis": []},
+        {"titre": "Solutions aqueuses : pH et dosages", "objectifs": ["Mesurer et interpréter un pH", "Réaliser un dosage acido-basique simple"], "duree_min": 120, "prerequis": []}
+      ]
+    },
+    {
+      "code": "francais",
+      "titre": "Français",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Argumentation et dissertation", "objectifs": ["Repérer thèse et arguments", "Rédiger un paragraphe argumenté"], "duree_min": 120, "prerequis": []},
+        {"titre": "Lecture méthodique d'œuvres", "objectifs": ["Situer une œuvre dans son contexte", "Analyser procédés et effets"], "duree_min": 120, "prerequis": ["Argumentation et dissertation"]}
+      ]
+    },
+    {
+      "code": "anglais",
+      "titre": "Anglais",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Conditionnels et hypothèses", "objectifs": ["Former les trois conditionnels", "Exprimer l'hypothèse et le regret"], "duree_min": 90, "prerequis": []},
+        {"titre": "Compréhension de texte scientifique", "objectifs": ["Repérer l'information essentielle", "Résumer un texte court"], "duree_min": 90, "prerequis": ["Conditionnels et hypothèses"]}
+      ]
+    }
+  ]
+}

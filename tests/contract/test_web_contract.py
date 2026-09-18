@@ -140,6 +140,25 @@ IGNORED_ROUTES: set[tuple[str, str]] = {
     ("GET", "/api/tutor/learning-paths"),
     ("GET", "/api/tutor/dashboard"),
     ("GET", "/api/tutor/stats"),
+    # --- 012 US1 Rappels (SPA Vue RemindersView + badge DashboardView via api.ts getReminders, pas tutor.html legacy) ---
+    ("GET", "/api/tutor/reminders"),
+    # --- 012 US2 Épreuves blanches + partage parent (SPA Vue ExamView via
+    # api.ts createBlueprintExam, ParentView via getParentOverview,
+    # LearnersView via grant/revokeLearnerShare ; pas tutor.html legacy) ---
+    ("POST", "/api/tutor/exams"),
+    ("POST", "/api/tutor/learners/{}/share"),
+    ("DELETE", "/api/tutor/learners/{}/share"),
+    ("GET", "/api/tutor/parent/overview"),
+    # --- 012 US3 Notes atomiques + planning semestre (SPA Vue PlannerView
+    # via api.ts planSemester, NotebookView via create/get/link/deleteAtomicNote
+    # + assembleAtomicPlan, LessonView citations inline sur payloads existants
+    # {answer, sources} ; pas tutor.html legacy) ---
+    ("POST", "/api/tutor/notes/atomic"),
+    ("GET", "/api/tutor/notes/atomic"),
+    ("DELETE", "/api/tutor/notes/atomic/{}"),
+    ("POST", "/api/tutor/notes/atomic/{}/links"),
+    ("GET", "/api/tutor/notes/atomic/plan"),
+    ("POST", "/api/tutor/planner/semester"),
     ("PATCH", "/api/tutor/subjects/{}"),
     # --- Catégories : verbes PUT/move (CRUD catégories enrichi, back-end
     # seulement pour l'instant — api.ts ne fetche que create/rename/delete ;

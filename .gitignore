@@ -18,9 +18,13 @@ venv/
 *.log
 .DS_Store
 
-# Données utilisateur (base SQLite, transcripts, uploads, config)
-data/
+# Données utilisateur (base SQLite, transcripts, uploads, config) — racine uniquement :
+# src/ollama_tutor/data/ contient les packs curriculum livrés (012) et DOIT être versionné.
+/data/
 
 # binaires llama.cpp versionnés + modèles GGUF (009)
 vendor/
 models/
+
+# état local deepwork (sessions OpenCode, non versionné)
+.slim/deepwork/

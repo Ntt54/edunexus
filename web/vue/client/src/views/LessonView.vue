@@ -14,6 +14,8 @@ import {
   AlertTriangle,
   RotateCcw,
   Info,
+  Square,
+  Volume2,
   X,
 } from "lucide-vue-next";
 import StatusPill from "@/components/StatusPill.vue";
@@ -28,7 +30,7 @@ import { renderMarkdown as renderMarkdownShared } from "@/lib/markdown";
 const route = useRoute();
 const router = useRouter();
 const { state } = useLearningStore();
-const { t } = usePreferences();
+const { t, locale } = usePreferences();
 
 const routeId = computed(() => String(route.params.id ?? (route.params as Record<string, unknown>).discussionId ?? ""));
 const notionLabel = computed(() => discussion.value?.notion_id ?? t("lesson.discussion"));
@@ -54,6 +56,7 @@ interface ExerciseAttempt { id: string; questions: ExerciseQuestion[]; score?: n
 /* ── State ────────────────────────────────────────────────── */
 const loading = ref(true);
 const error = ref<string | null>(null);
+const errorHint = ref<string | null>(null); // remède actionnable (event SSE structuré)
 const discussion = ref<LessonDiscussion | null>(null);
 const messages = ref<LessonMsg[]>([]);
 const contents = ref<LessonContent[]>([]);
@@ -91,6 +94,9 @@ onUnmounted(() => {
   courseAbort?.abort();
   askAbort?.abort();
   askRunId++;
+  if (ttsSupported) {
+    try { window.speechSynthesis.cancel(); } catch { /* ignore */ }
+  }
 });
 
 /* ── Helpers ──────────────────────────────────────────────── */
@@ -199,6 +205,47 @@ function sourcesLabel(sources: unknown): string {
   return parts.join(", ");
 }
 
+// ── 012 US3 (FR-009) · Citations inline ─────────────────────────────
+// Chaque affirmation factuelle porte sa source cliquable : même patron
+// que notebook.py:138 (une référence par livre avec extrait exact).
+// Un clic sur la pastille révèle le paragraphe exact indexé.
+interface MsgSource { book_id?: unknown; book?: unknown; chapter?: unknown; page?: unknown; excerpt?: unknown; }
+
+function msgSources(m: LessonMsg): MsgSource[] {
+  if (!Array.isArray(m.sources)) return [];
+  return (m.sources as MsgSource[]).filter((s) =>
+    s != null && typeof s === "object" &&
+    (s.book != null || s.book_id != null || s.chapter != null || s.excerpt != null));
+}
+
+function msgSourceTitle(s: MsgSource): string {
+  const title = String(s.book ?? "").trim() || bookTitles.value.get(String(s.book_id ?? "")) || "";
+  const chap = String(s.chapter ?? "").trim();
+  if (title) return title + (chap ? " · " + chap : "");
+  if (chap) return chap;
+  return String(s.book_id ?? "").trim();
+}
+
+function msgSourceExcerpt(s: MsgSource): string {
+  return String(s.excerpt ?? "").trim();
+}
+
+function msgSourcePage(s: MsgSource): string {
+  const p = s.page;
+  if (typeof p === "number" && Number.isFinite(p)) return String(p);
+  const t = String(p ?? "").trim();
+  return t;
+}
+
+const openExcerpts = ref(new Set<string>());
+function excerptKey(mid: string, i: number): string { return `${mid}#${i}`; }
+function toggleExcerpt(k: string): void {
+  const next = new Set(openExcerpts.value);
+  if (next.has(k)) next.delete(k);
+  else next.add(k);
+  openExcerpts.value = next;
+}
+
 /* ── Rendu markdown : délégation au module partagé ─────────────────
    Le moteur complet (titres, listes imbriquées + tâches, tableaux GFM,
    fences, citations, liens sûrs, images http(s), échappements, maths KaTeX)
@@ -286,7 +333,7 @@ function parseFeedback(raw: unknown): Array<{ statement?: string; question_id?: 
 
 /* ── Fetch discussion ─────────────────────────────────────── */
 async function loadDiscussion() {
-  loading.value = true; error.value = null;
+  loading.value = true; error.value = null; errorHint.value = null;
   const id = routeId.value;
   if (!id) { error.value = t("lesson.badId"); loading.value=false; return; }
   const lid = learnerId();
@@ -335,8 +382,9 @@ onMounted(loadDiscussion);
 /* ── Generation actions ───────────────────────────────────── */
 async function generateCourse() {
   if (generating.value || !discussionId.value) return;
+  ttsStop(); // le texte lu change : on coupe la lecture en cours
   generating.value = true;
-  error.value = null;
+  error.value = null; errorHint.value = null;
   courseStreamText.value = "";
   courseStreaming.value = false;
   const coursesBefore = courseContents.value.length;
@@ -396,7 +444,7 @@ async function tryStreamCourse(): Promise<boolean> {
   const decoder = new TextDecoder();
   let buf = "";
   let finished = false;
-  let streamError: string | null = null;
+  let streamError: { message: string; hint: string | null } | null = null;
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -407,7 +455,7 @@ async function tryStreamCourse(): Promise<boolean> {
       for (const ev of fed.events) {
         if (ev.type === "delta") courseStreamText.value += ev.text;
         else if (ev.type === "done") finished = true;
-        else if (ev.type === "error") streamError = ev.message;
+        else if (ev.type === "error") streamError = { message: ev.message, hint: ev.hint ?? null };
       }
       if (finished || streamError) break;
     }
@@ -419,7 +467,8 @@ async function tryStreamCourse(): Promise<boolean> {
   if (streamError) {
     // Le serveur a parlé (erreur explicite) : on l'affiche, sans
     // régénération aveugle derrière.
-    error.value = streamError;
+    error.value = streamError.message;
+    errorHint.value = streamError.hint;
     return true;
   }
   return false;
@@ -515,7 +564,7 @@ async function deleteContent(contentId: string) {
     return;
   }
   deletingContentId.value = contentId;
-  error.value = null;
+  error.value = null; errorHint.value = null;
   try {
     await tutorApi.deleteLessonContent(discussionId.value, contentId);
     contents.value = contents.value.filter((c) => c.id !== contentId);
@@ -564,7 +613,7 @@ async function sendLessonMessage() {
   const text = composerText.value.trim();
   if (!text || !discussionId.value || answering.value || isDeleted.value) return;
   composerText.value = "";
-  error.value = null;
+  error.value = null; errorHint.value = null;
   const lid = learnerId();
   const runId = ++askRunId;
   askAbort?.abort();
@@ -607,7 +656,7 @@ async function tryStreamAnswer(text: string, lid: string, t0: number, runId: num
   let doneThinking: string | null = null;
   let doneSources: unknown[] = [];
   let finished = false;
-  let streamError: string | null = null;
+  let streamError: { message: string; hint: string | null } | null = null;
   let lastScroll = 0;
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -631,7 +680,7 @@ async function tryStreamAnswer(text: string, lid: string, t0: number, runId: num
           doneThinking = ev.thinking ?? null;
           doneSources = Array.isArray(ev.sources) ? ev.sources : [];
         } else if (ev.type === "error") {
-          streamError = ev.message;
+          streamError = { message: ev.message, hint: ev.hint ?? null };
         }
       }
       const now = Date.now();
@@ -656,7 +705,8 @@ async function tryStreamAnswer(text: string, lid: string, t0: number, runId: num
   }
   if (streamError) {
     drop();
-    error.value = streamError; // erreur explicite du serveur…
+    error.value = streamError.message; // erreur explicite du serveur…
+    errorHint.value = streamError.hint;
     return false; // …suivie du repli one-shot
   }
   // Coupure sans done : re-sync — si le serveur a persisté une réponse on
@@ -690,7 +740,7 @@ async function oneShotAnswer(text: string, lid: string, t0: number) {
         ...messages.value,
         { id: "assistant-" + Date.now(), role: "assistant", content: answer, sources, thinking, thinkMs: thinking ? Date.now() - t0 : null },
       ];
-      error.value = null;
+      error.value = null; errorHint.value = null;
     } else {
       // Empty answer: re-sync from server (messages are persisted there)
       const payload = await tutorApi.getLessonDiscussion(discussionId.value) as unknown as { messages: LessonMsg[] };
@@ -703,6 +753,140 @@ async function oneShotAnswer(text: string, lid: string, t0: number) {
       if (Array.isArray(payload.messages) && payload.messages.length) messages.value = payload.messages;
     } catch { /* keep optimistic user message */ }
   }
+}
+
+/* ── 012 US4 (T029) · Lecture audio du cours ───────────────────────
+   Sur le chemin speechSynthesis existant (voix du navigateur, 100 % local) :
+   vitesse réglable 0,5×–2× persistée, surlignage mot-à-mot via onboundary
+   (charIndex → mot courant). Quand le navigateur ne donne pas de frontières
+   (ex. Firefox), le bandeau de progression reste affiché sans surlignage.
+   Le texte lu est la version brute du premier cours (sans balises markdown) ;
+   le rendu riche reste affiché au-dessus, commandes compactes style existant. */
+const TTS_RATE_KEY = "edunexus:ttsRate";
+const ttsSupported = typeof window !== "undefined" && "speechSynthesis" in window;
+const ttsPlaying = ref(false);
+const ttsRate = ref(1);
+const ttsWords = ref<Array<{ text: string; start: number }>>([]);
+const ttsActiveWord = ref(-1);
+const ttsText = ref("");
+let ttsUtterance: SpeechSynthesisUtterance | null = null;
+let ttsCursor = 0;
+try {
+  const stored = Number(localStorage.getItem(TTS_RATE_KEY));
+  if (Number.isFinite(stored)) ttsRate.value = Math.min(2, Math.max(0.5, stored));
+} catch { /* stockage indisponible : 1× */ }
+
+const ttsCourseText = computed(() => {
+  const first = courseContents.value[0];
+  return first ? plainTextOf(first.content) : "";
+});
+
+function plainTextOf(md: string): string {
+  return String(md ?? "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/^#{1,6}\s*/gm, "")
+    .replace(/[*_~]{1,3}(\S(?:.*?\S)?)[*_~]{1,3}/g, "$1")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/^\s*[-*+]\s+/gm, "")
+    .replace(/^\s*\d+[.)]\s+/gm, "")
+    .replace(/^\s*>\s?/gm, "")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function buildWords(text: string): Array<{ text: string; start: number }> {
+  const out: Array<{ text: string; start: number }> = [];
+  const re = /\S+/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) out.push({ text: m[0], start: m.index });
+  return out;
+}
+
+function scrollActiveWord(): void {
+  nextTick(() => {
+    try {
+      document.querySelector(".tts-words .tts-word.is-active")
+        ?.scrollIntoView({ behavior: "auto", block: "nearest" });
+    } catch { /* ignore */ }
+  });
+}
+
+function ttsStop(): void {
+  if (ttsSupported) {
+    try { window.speechSynthesis.cancel(); } catch { /* ignore */ }
+  }
+  ttsPlaying.value = false;
+  ttsActiveWord.value = -1;
+  ttsUtterance = null;
+}
+
+function ttsSpeakFrom(wordIndex: number): void {
+  if (!ttsSupported) return;
+  const words = ttsWords.value;
+  if (!words.length) return;
+  try { window.speechSynthesis.cancel(); } catch { /* ignore */ }
+  const from = Math.min(Math.max(0, wordIndex), words.length - 1);
+  const startChar = words[from].start;
+  const u = new SpeechSynthesisUtterance(ttsText.value.slice(startChar));
+  u.lang = locale.value === "fr" ? "fr-FR" : "en-US";
+  u.rate = ttsRate.value;
+  ttsCursor = from;
+  ttsActiveWord.value = from;
+  u.onboundary = (ev: SpeechSynthesisEvent) => {
+    const abs = startChar + (ev.charIndex ?? 0);
+    while (ttsCursor + 1 < words.length && words[ttsCursor + 1].start <= abs) ttsCursor++;
+    ttsActiveWord.value = ttsCursor;
+    scrollActiveWord();
+  };
+  u.onend = () => {
+    if (ttsUtterance !== u) return;
+    ttsPlaying.value = false;
+    ttsActiveWord.value = -1;
+    ttsUtterance = null;
+  };
+  u.onerror = () => {
+    if (ttsUtterance !== u) return;
+    ttsPlaying.value = false;
+    ttsActiveWord.value = -1;
+    ttsUtterance = null;
+  };
+  ttsUtterance = u;
+  ttsPlaying.value = true;
+  try {
+    window.speechSynthesis.speak(u);
+  } catch {
+    ttsPlaying.value = false;
+    ttsUtterance = null;
+  }
+}
+
+function ttsToggle(): void {
+  if (ttsPlaying.value) { ttsStop(); return; }
+  const text = ttsCourseText.value;
+  if (!text) return;
+  ttsText.value = text;
+  ttsWords.value = buildWords(text);
+  ttsActiveWord.value = -1;
+  ttsSpeakFrom(0);
+}
+
+function ttsSetRate(v: number): void {
+  const r = Math.min(2, Math.max(0.5, Math.round(v * 10) / 10));
+  ttsRate.value = r;
+  try { localStorage.setItem(TTS_RATE_KEY, String(r)); } catch { /* ignore */ }
+  // Appliquée aussitôt : on reprend au mot courant (pas de saut au début).
+  if (ttsPlaying.value) ttsSpeakFrom(Math.max(0, ttsActiveWord.value));
+}
+
+function ttsRateLabel(): string {
+  return ttsRate.value.toLocaleString(locale.value === "fr" ? "fr-FR" : "en-US", {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  }) + "×";
 }
 
 function goBack() { router.push("/parcours"); }
@@ -744,7 +928,7 @@ function goBack() { router.push("/parcours"); }
 
     <!-- Content -->
     <template v-else>
-      <section class="content-panel lecon-main">
+      <section class="content-panel lecon-main reading-surface">
         <!-- Banners -->
         <div v-if="isDeleted" class="banner banner-gold">
           <Info :size="14" aria-hidden="true" />
@@ -797,6 +981,27 @@ function goBack() { router.push("/parcours"); }
 
         <!-- Tab: generated course -->
         <div v-show="activeTab === 'course'" role="tabpanel" class="lecon-contents">
+          <!-- 012 US4 (T029) · lecteur audio compact : vitesse + surlignage mot-à-mot -->
+          <div v-if="ttsSupported && courseContents.length" class="tts-player" role="group" :aria-label="t('lesson.listen')">
+            <button type="button" class="secondary-action tts-btn" :aria-pressed="ttsPlaying" @click="ttsToggle">
+              <Volume2 v-if="!ttsPlaying" :size="14" aria-hidden="true" />
+              <Square v-else :size="14" aria-hidden="true" />
+              {{ ttsPlaying ? t("lesson.stopListen") : t("lesson.listen") }}
+            </button>
+            <label class="tts-rate">
+              <span>{{ t("lesson.speed") }}</span>
+              <input
+                type="range" min="0.5" max="2" step="0.1" :value="ttsRate"
+                :aria-label="t('lesson.speed')"
+                @input="ttsSetRate(Number(($event.target as HTMLInputElement).value))"
+              />
+              <output>{{ ttsRateLabel() }}</output>
+            </label>
+            <span v-if="ttsPlaying && ttsActiveWord >= 0" class="tts-status" role="status">{{ ttsActiveWord + 1 }} / {{ ttsWords.length }}</span>
+          </div>
+          <p v-if="ttsPlaying && ttsWords.length" class="tts-words reading-surface" aria-hidden="true"><template v-for="(w, i) in ttsWords" :key="i"><span
+              class="tts-word" :class="{ 'is-active': i === ttsActiveWord }"
+            >{{ w.text }}</span>{{ " " }}</template></p>
           <article
             v-if="generating && courseStreamText"
             class="notebook-output streaming-card"
@@ -985,6 +1190,26 @@ function goBack() { router.push("/parcours"); }
                 </details>
                 <span v-if="m.streaming && !m.content && !m.thinking" class="stream-dots" aria-hidden="true"><i></i><i></i><i></i></span>
                 <div v-if="m.content" class="bubble-md" v-html="renderMarkdown(m.content)" @click="onMarkdownClick"></div>
+                <!-- 012 US3 (FR-009) · citations inline : affirmation → source cliquable -->
+                <div v-if="msgSources(m).length" class="msg-sources">
+                  <span class="msg-sources-label">{{ t("lesson.sources") }}</span>
+                  <span class="msg-sources-chips">
+                    <button
+                      v-for="(s, i) in msgSources(m)"
+                      :key="i"
+                      type="button"
+                      class="source-chip"
+                      :title="msgSourceExcerpt(s) || msgSourceTitle(s)"
+                      :aria-expanded="openExcerpts.has(excerptKey(m.id, i))"
+                      @click="toggleExcerpt(excerptKey(m.id, i))"
+                    >
+                      <BookOpen :size="12" aria-hidden="true" /> {{ msgSourceTitle(s) }}<span v-if="msgSourcePage(s)">&nbsp;· p.&nbsp;{{ msgSourcePage(s) }}</span>
+                    </button>
+                  </span>
+                  <template v-for="(s, i) in msgSources(m)" :key="'ex' + i">
+                    <p v-if="openExcerpts.has(excerptKey(m.id, i)) && msgSourceExcerpt(s)" class="source-excerpt">« {{ msgSourceExcerpt(s) }} »</p>
+                  </template>
+                </div>
               </div>
             </div>
             <div v-if="answering" class="msg-row from-tutor">
@@ -1008,7 +1233,7 @@ function goBack() { router.push("/parcours"); }
           </button>
         </form>
         </div><!-- /tab discussion -->
-        <p v-if="error" class="field-error" style="margin-top:8px;">{{ error }}</p>
+        <p v-if="error" class="field-error" style="margin-top:8px;">{{ error }}<br v-if="errorHint" /><span v-if="errorHint" class="notebook-output-src">{{ errorHint }}</span></p>
       </section>
     </template>
   </section>
@@ -1194,6 +1419,19 @@ export default { name: "LessonView" };
 .bubble-student { padding: 10px 14px; border-radius: 16px 16px 4px 16px; background: linear-gradient(135deg, #eef0ff, #e3e0f8); border: 1px solid #cfcaf1; font-size: 13.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .bubble-tutor { padding: 10px 14px; border-radius: 4px 16px 16px 16px; background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow-soft); font-size: 13.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
 .empty-copy { text-align: center; color: var(--muted); font-size: 13px; padding: 12px; }
+
+/* 012 US3 (FR-009) · citations inline : affirmation → source cliquable */
+.msg-sources { display: grid; gap: 6px; margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--line); }
+.msg-sources-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.msg-sources-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.source-chip { display: inline-flex; align-items: center; gap: 5px; min-height: 30px; padding: 4px 10px; font-size: 12px; font-weight: 600; color: var(--indigo-deep); background: var(--indigo-soft); border: 1px solid transparent; border-radius: 999px; cursor: pointer; }
+.source-chip:hover { border-color: var(--indigo-deep); }
+.source-chip:focus-visible { outline: 2px solid var(--indigo-deep); outline-offset: 2px; }
+.source-chip[aria-expanded="true"] { background: var(--indigo-deep); color: #fff; }
+.source-excerpt { margin: 2px 0 0; padding: 8px 10px; font-size: 12.5px; line-height: 1.55; font-style: italic; color: var(--ink); background: var(--panel-soft); border-left: 3px solid var(--indigo-deep); border-radius: 0 8px 8px 0; white-space: normal; }
+
+/* 012 US4 (T029) · lecteur audio : bouton compact assorti aux actions */
+.tts-btn { min-height: 36px; padding: 7px 12px; font-size: 13px; }
 
 .lecon-composer { display: flex; gap: 8px; align-items: flex-end; padding: 12px; border: 1px solid var(--line-soft); border-radius: 14px; background: #fbfcff; }
 .lecon-composer textarea { flex: 1; min-height: 44px; max-height: 120px; resize: vertical; }

@@ -19,6 +19,7 @@ from typing import Any
 import re
 
 from ..models import Message, MessageRole, OllamaOptions
+from .adaptation import build_interleaved_session
 from .sandbox import RunResult
 from .models import (
     ExamSession,
@@ -383,7 +384,7 @@ def parse_prepare_response(text: str) -> dict[str, Any]:
 # Quiz / exam question generation (US5 / T040)
 # ---------------------------------------------------------------------------
 
-_VALID_Q_KINDS = {"mcq", "true_false", "open", "matching", "code"}
+_VALID_Q_KINDS = {"mcq", "true_false", "open", "matching", "code", "recall_written"}
 
 
 def build_quiz_question_prompt(
@@ -403,6 +404,9 @@ def build_quiz_question_prompt(
         "code": (
             '{"question": "...", "language": "python", "model_answer": "..."}'
         ),
+        # 012 US1 (FR-002) : rappel rédigé — énoncé + réponse attendue
+        # cachée, corrigée par le juge LLM (fallback exact offline).
+        "recall_written": '{"question": "...", "model_answer": "..."}',
     }
     spec = kind_spec.get(kind, kind_spec["open"])
     system = (
@@ -491,14 +495,27 @@ class QuizReport:
     strengths: list[str] = field(default_factory=list)
     weaknesses: list[str] = field(default_factory=list)
     per_question: list[dict[str, Any]] = field(default_factory=list)
+    # 012 US2 (FR-006) : barème /20 des épreuves blanches à blueprint —
+    # renseignés uniquement pour les examens à blueprint (None sinon, les
+    # clés sont alors absentes du dict sérialisé : contrat inchangé).
+    score_20: float | None = None
+    detail_competences: list[dict[str, Any]] | None = None
+    mention: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "score": self.score,
             "strengths": self.strengths,
             "weaknesses": self.weaknesses,
             "per_question": self.per_question,
         }
+        if self.score_20 is not None:
+            out["score_20"] = self.score_20
+        if self.detail_competences is not None:
+            out["detail_competences"] = self.detail_competences
+        if self.mention is not None:
+            out["mention"] = self.mention
+        return out
 
 
 # D7 mastery deltas for quiz/exam correction (research D7: ±10 quiz, ±8 exam).
@@ -810,14 +827,17 @@ class QuizEngine:
         kinds: list[str],
         *,
         concepts: list[Any] | None = None,
+        failed: list[tuple[int, int]] | None = None,
     ) -> Quiz:
         """Generate a quiz of ``size`` questions across ``kinds`` bound to concepts.
 
         ``concepts`` (keyword-only) overrides the subject's full concept list
         (used by exam scoping); ``None`` keeps the legacy behavior.
+        ``failed`` appends ``(concept_idx, kind_idx)`` pairs at the end of the
+        interleaved session so misses resurface (012 US1, FR-003).
         """
         return await self._create_assessment(
-            subject_id, size, kinds, kind="quiz", concepts=concepts
+            subject_id, size, kinds, kind="quiz", concepts=concepts, failed=failed
         )
 
     async def create_exam(
@@ -843,6 +863,140 @@ class QuizEngine:
             report=quiz.report,
         )
 
+    async def create_blueprint_exam(
+        self,
+        subject_id: str,
+        blueprint_key: str,
+        pack: dict[str, Any],
+        concepts: list[Any],
+        size: int,
+        time_limit_s: int,
+    ) -> dict[str, Any]:
+        """Generate a timed blueprint exam (012 US2, FR-006).
+
+        Reuses :meth:`_create_assessment` with the exam kinds (objectifs +
+        open, hors ``recall_written``), then stamps ``blueprint_key`` and
+        weights each question's ``points`` by its matière coefficient
+        (``null`` → 1.0, jamais inventé). Any previous ``in_progress`` exam
+        for the same ``(subject_id, blueprint_key)`` is marked
+        ``interrompue`` (reprise après coupure).
+        """
+        from .exams import (
+            EXAM_KINDS,
+            EXAM_STATUS_INTERRUPTED,
+            concept_weight,
+        )
+
+        if not concepts:
+            raise KeyError(f"No concepts in subject: {subject_id}")
+        self.store._conn.execute(
+            "UPDATE quizzes SET status = ? "
+            "WHERE subject_id = ? AND kind = 'exam' AND status = 'in_progress' "
+            "AND (blueprint_key = ? OR blueprint_key IS NULL AND ? = '')",
+            (EXAM_STATUS_INTERRUPTED, subject_id, blueprint_key, blueprint_key),
+        )
+        self.store._conn.commit()
+        quiz = await self._create_assessment(
+            subject_id, max(1, int(size)), list(EXAM_KINDS),
+            kind="exam", time_limit_s=time_limit_s, concepts=concepts,
+        )
+        names = {c.id: (c.name or "") for c in concepts}
+        for q in self._get_questions(quiz.id):
+            weight = concept_weight(names.get(q.get("concept_id") or "", ""), pack)
+            self.store._conn.execute(
+                "UPDATE quiz_questions SET points = ? WHERE id = ?",
+                (float(weight), q["id"]),
+            )
+        self.store._conn.execute(
+            "UPDATE quizzes SET blueprint_key = ? WHERE id = ?",
+            (blueprint_key, quiz.id),
+        )
+        self.store._conn.commit()
+        snapshot = self.get_exam_snapshot(quiz.id)
+        if snapshot is None:
+            raise KeyError(f"Exam just created but unreadable: {quiz.id}")
+        return snapshot
+
+    def get_exam_snapshot(self, quiz_id: str) -> dict[str, Any] | None:
+        """Enriched exam view: quiz + blueprint, /20, verrouillage, reprise."""
+        from .exams import is_locked, remaining_s
+
+        row = self._get_quiz_row(quiz_id)
+        if row is None or row.get("kind") != "exam":
+            return None
+        data = self.get_quiz(quiz_id) or {}
+        report = data.get("report") or {}
+        locked = bool(is_locked(row.get("started_at"), row.get("time_limit_s")))
+        time_limit = row.get("time_limit_s")
+        try:
+            duree_min = int(float(time_limit) // 60) if time_limit else 0
+        except (TypeError, ValueError):
+            duree_min = 0
+        data["blueprint"] = row.get("blueprint_key")
+        data["duree_min"] = duree_min
+        data["score_20"] = row.get("score_20")
+        if report.get("score_20") is not None and data["score_20"] is None:
+            data["score_20"] = report.get("score_20")
+        data["detail_competences"] = report.get("detail_competences", [])
+        data["mention"] = report.get("mention")
+        data["statut"] = row.get("status")
+        data["locked"] = locked
+        data["remaining_s"] = remaining_s(row.get("started_at"), time_limit)
+        return data
+
+    def lock_exam(self, quiz_id: str) -> dict[str, Any]:
+        """Verrouille l'épreuve si le temps imparti est écoulé (FR-006)."""
+        from .exams import EXAM_STATUS_LOCKED, is_locked
+
+        row = self._get_quiz_row(quiz_id)
+        if row is None or row.get("kind") != "exam":
+            raise KeyError(f"Unknown exam: {quiz_id}")
+        if row.get("status") not in ("completed", EXAM_STATUS_LOCKED) and is_locked(
+            row.get("started_at"), row.get("time_limit_s")
+        ):
+            self.store._conn.execute(
+                "UPDATE quizzes SET status = ? WHERE id = ?",
+                (EXAM_STATUS_LOCKED, quiz_id),
+            )
+            self.store._conn.commit()
+        snapshot = self.get_exam_snapshot(quiz_id)
+        if snapshot is None:
+            raise KeyError(f"Unknown exam: {quiz_id}")
+        return snapshot
+
+    def resume_exam(self, quiz_id: str) -> dict[str, Any]:
+        """Reprend une épreuve interrompue, temps restant recalculé (FR-006).
+
+        Lève ``ValueError`` si l'épreuve est déjà corrigée ; re-verrouille
+        (``verrouillée``) quand le temps est totalement écoulé.
+        """
+        from .exams import (
+            EXAM_STATUS_INTERRUPTED,
+            EXAM_STATUS_LOCKED,
+            is_locked,
+        )
+
+        row = self._get_quiz_row(quiz_id)
+        if row is None or row.get("kind") != "exam":
+            raise KeyError(f"Unknown exam: {quiz_id}")
+        if row.get("status") == "completed":
+            raise ValueError("épreuve déjà corrigée")
+        if is_locked(row.get("started_at"), row.get("time_limit_s")):
+            self.store._conn.execute(
+                "UPDATE quizzes SET status = ? WHERE id = ?",
+                (EXAM_STATUS_LOCKED, quiz_id),
+            )
+        else:
+            self.store._conn.execute(
+                "UPDATE quizzes SET status = ? WHERE id = ?",
+                (EXAM_STATUS_INTERRUPTED, quiz_id),
+            )
+        self.store._conn.commit()
+        snapshot = self.get_exam_snapshot(quiz_id)
+        if snapshot is None:
+            raise KeyError(f"Unknown exam: {quiz_id}")
+        return snapshot
+
     async def _create_assessment(
         self,
         subject_id: str,
@@ -851,6 +1005,7 @@ class QuizEngine:
         kind: str = "quiz",
         time_limit_s: int | None = None,
         concepts: list[Any] | None = None,
+        failed: list[tuple[int, int]] | None = None,
     ) -> Quiz:
         if concepts is None:
             concepts = self.store.list_concepts(subject_id)
@@ -868,9 +1023,14 @@ class QuizEngine:
         )
         self._insert_quiz(quiz)
         total_points = 0.0
-        for i in range(max(1, size)):
-            concept = concepts[i % len(concepts)]
-            qkind = kinds[i % len(kinds)]
+        # 012 US1 (FR-003) : séance entremêlée via adaptation.py — mix des
+        # types sans bloc mono-type, ratés en fin de séance.
+        plan = build_interleaved_session(
+            max(1, size), len(concepts), kinds, failed=failed
+        )
+        for concept_idx, kind_idx in plan:
+            concept = concepts[concept_idx % len(concepts)]
+            qkind = kinds[kind_idx % len(kinds)]
             try:
                 data = await self._llm_json(
                     build_quiz_question_prompt(concept.name, qkind)
@@ -922,28 +1082,33 @@ class QuizEngine:
           diagnostiquées (5 catégories offline) et enregistrées avec
           ``error_category`` + ``knowledge_points`` + ``diagnosis`` ; défaut
           False = comportement historique inchangé.
+        - idempotence : un quiz/examen déjà ``completed`` renvoie le rapport
+          persisté sans re-corriger (pas de doublons ``error_history`` /
+          ``quiz_answers``, pas de ``record_progress`` rejoué).
         """
         quiz = self._get_quiz_row(quiz_id)
         if quiz is None:
             raise KeyError(f"Unknown quiz: {quiz_id}")
+        if str(quiz.get("status") or "") == "completed":
+            stored = _coerce_json(quiz.get("report"), None)
+            if isinstance(stored, dict) and stored:
+                return QuizReport(
+                    score=float(stored.get("score", 0.0)),
+                    strengths=list(stored.get("strengths", []) or []),
+                    weaknesses=list(stored.get("weaknesses", []) or []),
+                    per_question=list(stored.get("per_question", []) or []),
+                    score_20=stored.get("score_20"),
+                    detail_competences=stored.get("detail_competences"),
+                    mention=stored.get("mention"),
+                )
+            return QuizReport(score=float(quiz.get("score") or 0.0))
         if quiz["kind"] == "exam" and hint_requested:
             raise ExamHelpError("L'aide est interdite pendant un examen.")
         questions = self._get_questions(quiz_id)
         if not questions:
             raise KeyError(f"Quiz has no questions: {quiz_id}")
 
-        # Exam expiry: unanswered questions score as incorrect.
-        expired = False
-        if quiz["kind"] == "exam" and quiz.get("time_limit_s"):
-            try:
-                from datetime import datetime
-                started = datetime.fromisoformat(quiz["started_at"])
-                elapsed = (datetime.now(started.tzinfo) - started).total_seconds() \
-                    if started.tzinfo else (datetime.now() - started).total_seconds()
-                if elapsed > float(quiz["time_limit_s"]):
-                    expired = True
-            except Exception:
-                expired = False
+        # Unanswered questions score as incorrect (auto-submit semantics).
 
         concept_verdicts: dict[str, list[bool]] = {}
         per_question: list[dict[str, Any]] = []
@@ -969,11 +1134,12 @@ class QuizEngine:
             concept_id = q.get("concept_id")
             response = answers.get(qid)
             if response is None:
-                # unanswered: incorrect (explicit for expired exams, implicit otherwise)
+                # unanswered: incorrect (auto-submit semantics)
                 verdict = "incorrect"
                 awarded = 0.0
+                feedback = ""
             else:
-                verdict, awarded = await self._correct_question(q, response)
+                verdict, awarded, feedback = await self._correct_question(q, response)
             earned += awarded
             if concept_id:
                 concept_verdicts.setdefault(concept_id, []).append(verdict == "correct")
@@ -984,6 +1150,7 @@ class QuizEngine:
                 "verdict": verdict,
                 "awarded": awarded,
                 "points": points,
+                "feedback": feedback,
             })
             # T062: record error for incorrect/partial answers in error_history.
             if verdict in ("incorrect", "partial") and concept_id:
@@ -1040,6 +1207,29 @@ class QuizEngine:
             weaknesses=weaknesses,
             per_question=per_question,
         )
+        # 012 US2 (FR-006) : épreuve à blueprint → barème /20 par compétence.
+        if quiz.get("blueprint_key"):
+            from .exams import grade_from_entries
+
+            entries = [
+                {
+                    "question_id": item["question_id"],
+                    "competence": concept_name_map.get(
+                        item.get("concept_id") or "", item.get("concept_id") or ""
+                    ),
+                    "points": item["points"],
+                    "awarded": item["awarded"],
+                }
+                for item in per_question
+            ]
+            score_20, detail, mention_str = grade_from_entries(entries)
+            report.score_20 = score_20
+            report.detail_competences = detail
+            report.mention = mention_str
+            self.store._conn.execute(
+                "UPDATE quizzes SET score_20 = ? WHERE id = ?",
+                (score_20, quiz_id),
+            )
         self.store._conn.execute(
             "UPDATE quizzes SET status = 'completed', finished_at = ?, "
             "score = ?, report = ? WHERE id = ?",
@@ -1050,8 +1240,14 @@ class QuizEngine:
 
     async def _correct_question(
         self, q: dict[str, Any], response: Any
-    ) -> tuple[str, float]:
-        """Return ``(verdict, awarded_points)`` for one question."""
+    ) -> tuple[str, float, str]:
+        """Return ``(verdict, awarded_points, feedback)`` for one question.
+
+        ``feedback`` is the judge LLM's ``feedback`` text for open/code/
+        recall_written questions ("" when the judge is unreachable or for
+        objective types) — threaded into ``per_question`` by
+        :meth:`submit_answers` (012 US1, AS-2).
+        """
         qtype = q["type"]
         points = float(q.get("points") or 0.0)
         answer = q.get("answer") or {}
@@ -1063,8 +1259,9 @@ class QuizEngine:
             correct = bool(response) == bool(answer.get("value"))
         elif qtype == "matching":
             correct = list(response) == list(answer.get("order", []))
-        else:  # open / code → LLM-judged
+        else:  # open / code / recall_written → LLM-judged
             model_answer = answer.get("text", "")
+            feedback = ""
             try:
                 data = await self._llm_json(
                     build_open_judge_prompt(
@@ -1072,20 +1269,33 @@ class QuizEngine:
                     )
                 )
                 verdict = str(data.get("verdict", "incorrect")).lower()
+                feedback = str(data.get("feedback", "") or "")
             except Exception:
                 verdict = "incorrect"
+            # 012 US1 (FR-002) : rappel rédigé — le verdict LLM prime ;
+            # repli exact-match offline (normalisé, insensible casse/espaces).
+            # Le feedback du juge est écarté ici : il contredirait le verdict
+            # (le juge s'est trompé puisque réponse == réponse modèle).
+            if (
+                qtype == "recall_written"
+                and verdict != "correct"
+                and str(model_answer or "").strip()
+                and _normalize_answer(str(response))
+                == _normalize_answer(str(model_answer))
+            ):
+                return "correct", points, ""
             if verdict == "correct":
                 correct = True
                 awarded = points
             elif verdict == "partial":
                 correct = False
                 awarded = points * 0.5
-                return "partial", awarded
+                return "partial", awarded, feedback
             else:
                 correct = False
                 awarded = 0.0
-            return ("correct" if correct else "incorrect"), awarded
-        return ("correct" if correct else "incorrect"), (points if correct else 0.0)
+            return ("correct" if correct else "incorrect"), awarded, feedback
+        return ("correct" if correct else "incorrect"), (points if correct else 0.0), ""
 
     def _strengths_weaknesses(
         self, concept_verdicts: dict[str, list[bool]]

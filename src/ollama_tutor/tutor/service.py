@@ -186,7 +186,8 @@ from .prompts import (
 from .providers.openai_compat import OpenAICompatProvider
 from .retrieval import Retriever, validate_citations
 from .reranker import SimpleReranker
-from .review import ReviewScheduler
+from .review import ReviewScheduler, STALE_PLAN_DAYS
+from . import rewards as rewards_mod
 from .store import LibraryStore
 from .vector import ScoredChunk
 
@@ -262,10 +263,85 @@ def _build_lesson_prompts(
     answer to the learner's ``question``, 100–200 words). The model must
     stay grounded in the provided excerpts and never cite technical
     identifiers.
+
+    RAG off (no usable excerpt — e.g. ``_filtered_chunks`` returns []) : a
+    dedicated variant per kind teaches from the model's own knowledge, in
+    French, with the SAME length/structure constraints but WITHOUT the
+    grounding rules (contradictory with no excerpts) and WITHOUT any talk
+    about excerpts/sources — otherwise the model produces hollow content
+    (« selon les extraits, aucune définition n'est fournie… »).
     """
+    has_excerpts = bool([e for e in excerpts if str(e).strip()])
     src = "\n".join(f"- {e}" for e in excerpts[:6] if str(e).strip())
     if not src:
         src = "- (aucun extrait indexé)"
+    if not has_excerpts:
+        # RAG off : enseigner depuis les connaissances propres du modèle.
+        # Mêmes contraintes de longueur/structure, jamais un mot sur les
+        # extraits/sources (ni leur absence), pas de _LESSON_GROUNDING_RULES,
+        # interdiction des identifiants techniques conservée.
+        if kind == "lesson_summary":
+            system = (
+                "Tu es un tuteur pédagogique francophone. Tu rédiges une "
+                "synthèse de cours concise, en français, en texte libre "
+                "(titres Markdown autorisés), à partir de tes propres "
+                "connaissances sur la notion demandée. Enseigne directement "
+                "le contenu : définitions, explications et exemples, sans "
+                "préambule ni remarque sur l'origine des informations. "
+                "Longueur stricte : 150 à 250 mots. Ne cite jamais "
+                "d'identifiants techniques, uniquement des titres lisibles."
+            )
+            user = (
+                f"Rédige une synthèse de 150 à 250 mots sur la notion "
+                f"« {notion} » à partir de tes connaissances. Enseigne "
+                f"directement, sans préambule."
+            )
+        elif kind == "lesson_answer":
+            system = (
+                "Tu es un tuteur pédagogique francophone. Tu réponds à la "
+                "question de l'élève de façon courte et ciblée, en français, "
+                "en texte libre, à partir de tes propres connaissances sur "
+                "la notion. Enseigne directement : réponds à la question "
+                "sans préambule ni remarque sur l'origine des informations. "
+                "Longueur stricte : 100 à 200 mots. Reste ancré à la notion "
+                "; ne cite jamais d'identifiants techniques, uniquement des "
+                "titres lisibles."
+            )
+            asked = (question or "").strip() or "(question vide)"
+            user = (
+                f"Notion de la leçon : « {notion} ».\n"
+                f"Question de l'élève : {asked}\n"
+                f"Réponds en 100 à 200 mots à partir de tes connaissances, "
+                f"sans préambule."
+            )
+        else:
+            system = (
+                "Tu es un tuteur pédagogique francophone. Tu rédiges un cours "
+                "complet et structuré, en français, à partir de tes propres "
+                "connaissances sur la notion demandée. Enseigne directement "
+                "le contenu, sans préambule ni remarque sur l'origine des "
+                "informations. "
+                "Structure IMPOSÉE, dans cet ordre exact : "
+                "1. Titre du cours puis « Objectif du cours » (1-2 phrases). "
+                "2. Sections numérotées (1., 1.1, 1.2, …) : définitions, "
+                "explications, exemples détaillés. "
+                "3. Exemples de code en blocs ```python (syntaxe valide). "
+                "4. Tableau « Points clés à retenir ». "
+                "5. « Cas d'usage concrets » (Cas 1, Cas 2, …). "
+                "6. « Erreurs fréquentes à éviter », chaque item préfixé ❌. "
+                "7. « Conclusion ». "
+                "8. « Mots-clés » (liste). "
+                "Longueur stricte : 800 à 1200 mots. "
+                "INTERDIT : méta-remarques (« Mot total : … », redite des "
+                "contraintes) et ids bruts dans le corps. Ne cite jamais "
+                "d'identifiants techniques, uniquement des titres lisibles."
+            )
+            user = (
+                f"Rédige un cours structuré de 800 à 1200 mots sur la notion "
+                f"« {notion} » à partir de tes connaissances. Enseigne "
+                f"directement, sans préambule."
+            )
+        return system, user
     if kind == "lesson_summary":
         system = (
             "Tu es un tuteur pédagogique francophone. Tu rédiges une synthèse "
@@ -318,6 +394,22 @@ def _build_lesson_prompts(
             f"« {notion} » à partir de ces extraits :\n{src}"
         )
     return system, user
+
+
+class LessonPreflightError(Exception):
+    """Fail-fast lesson pre-generation check failure (structured).
+
+    ``code`` is ``model_unknown`` (model absent from a non-empty provider
+    catalog) or ``provider_unreachable`` (the check itself cannot reach
+    the provider). The message is French and names provider + model;
+    ``hint`` is the actionable remedy. Caught by the lesson streamers
+    (duck-typed — no import cycle with ``lesson_discussion``).
+    """
+
+    def __init__(self, code: str, message: str, hint: str = "") -> None:
+        super().__init__(message)
+        self.code = code
+        self.hint = hint
 
 
 class TutorService:
@@ -1929,6 +2021,95 @@ class TutorService:
             if ev.kind == "content" and ev.text:
                 yield ev.text
 
+    async def preflight_lesson_model(self) -> None:
+        """Fail-fast: is ``config.tutor_model`` servable? (Constitution VI).
+
+        Quick catalog check (~10 s, no generation, no 91 s silence):
+        openai (+ base_url) via ``OpenAICompatProvider.list_models()``,
+        otherwise the local Ollama listing via the service client (test
+        seam: mocked httpx transport). Raises :exc:`LessonPreflightError`
+        with ``code="model_unknown"`` when the model is absent from a
+        NON-EMPTY catalog, ``code="provider_unreachable"`` when the check
+        itself cannot reach the provider. An EMPTY catalog (offline
+        daemon/gateway — both listers swallow errors into []) is
+        unverifiable: return silently and let the generation attempt fail
+        with a mapped structured event (offline-first: preflight never
+        blocks generation for lack of network). Empty model ⇒ nothing
+        to check. Never raises anything else.
+        """
+        from .providers.openai_compat import OpenAICompatProvider
+
+        provider = str(getattr(self.config, "llm_provider", "") or "").strip() or "ollama"
+        model = str(getattr(self.config, "tutor_model", "") or "").strip()
+        if not model:
+            return
+        hint = (
+            "Choisissez un modèle de la liste Réglages — la bascule est "
+            "automatique — ou réessayez plus tard."
+        )
+        if provider == "openai" and getattr(self.config, "llm_base_url", ""):
+            probe = OpenAICompatProvider(
+                base_url=self.config.llm_base_url,
+                api_key=getattr(self.config, "llm_api_key", "") or None,
+            )
+            try:
+                try:
+                    names = [m.name for m in await probe.list_models()]
+                except Exception as exc:
+                    raise LessonPreflightError(
+                        "provider_unreachable",
+                        f"Fournisseur « openai » injoignable pour vérifier le "
+                        f"modèle « {model} » ({exc}).",
+                        hint,
+                    ) from exc
+                if not names:
+                    raise LessonPreflightError(
+                        "provider_unreachable",
+                        f"Fournisseur « openai » injoignable ou catalogue vide "
+                        f"(0 modèle listé) pour le modèle « {model} ».",
+                        hint,
+                    )
+                lowered = {str(n).lower() for n in names}
+                if model not in names and model.lower() not in lowered:
+                    raise LessonPreflightError(
+                        "model_unknown",
+                        f"Modèle « {model} » inconnu du fournisseur « openai ». "
+                        f"Choisissez un modèle de la liste Réglages — la "
+                        f"bascule est automatique.",
+                        hint,
+                    )
+            finally:
+                try:
+                    await probe.close()
+                except Exception:
+                    pass
+            return
+        # Ollama (default): local listing via the service client. Bounded
+        # wait — the client is timeout-free by construction (streaming).
+        lister = getattr(getattr(self, "client", None), "list_models", None)
+        if not callable(lister):
+            return
+        try:
+            names = [m.name for m in await asyncio.wait_for(lister(), timeout=10.0)]
+        except Exception as exc:
+            raise LessonPreflightError(
+                "provider_unreachable",
+                f"Fournisseur « ollama » injoignable pour vérifier le "
+                f"modèle « {model} » ({exc}).",
+                hint,
+            ) from exc
+        if not names:
+            return  # démon hors ligne : invérifiable, la génération mappera
+        lowered = {str(n).lower() for n in names}
+        if model not in names and model.lower() not in lowered:
+            raise LessonPreflightError(
+                "model_unknown",
+                f"Modèle « {model} » inconnu du fournisseur « ollama ». "
+                f"Choisissez un modèle de la liste Réglages — la "
+                f"bascule est automatique.",
+                hint,
+            )
+
     def _collect_past_errors(self, concept_id: str) -> list[str]:
         """Recent incorrect/partial attempt feedback for a concept (context)."""
         attempts = self.store.list_attempts_by_concept(concept_id)
@@ -2004,7 +2185,7 @@ class TutorService:
             options = self._generation_options()
             text = await self._llm_collect(messages, options)
             verdict, feedback = parse_grade_response(text)
-            self.store.add_attempt(
+            recorded = self.store.add_attempt(
                 ExerciseAttempt(
                     id=_uid(),
                     exercise_id=exercise_id,
@@ -2028,8 +2209,15 @@ class TutorService:
                 )
             if verdict == "correct":
                 self.store.update_exercise(exercise_id, status="solved")
-                # US15 / T088: +15 XP for a correct exercise answer.
-                self.store.add_xp(15)
+                # 012 US4 (FR-012, T027) : XP anti-grinding via tutor/rewards
+                # (base difficulte x decay repetition <7j, re-do meme jour
+                # <=25 %, cap journalier).
+                rewards_mod.award_exercise_xp(
+                    self.store,
+                    exercise_id=exercise_id,
+                    difficulty=exercise.difficulty,
+                    attempt_id=recorded.id,
+                )
             # Feature 008 — US4 (FR-016): after each activity, recompute only a
             # window of path steps, not the whole path.
             try:
@@ -2403,6 +2591,40 @@ class TutorService:
         """Return due flashcards for a subject (pure SQL, no LLM — SC-008)."""
         return self.review.due_reviews(subject_id)
 
+    def get_reminders(
+        self, subject_id: str, learner_id: str | None = None
+    ) -> dict[str, Any]:
+        """Vue « À réviser » (012 US1, FR-001) — pure SQL, no LLM.
+
+        Returns ``{"due": [{kind, id, title, overdue_days}], "due_count",
+        "stale_plan"}``. ``stale_plan`` is True when the worst lateness
+        exceeds ``STALE_PLAN_DAYS`` (recompaction proposed). ``learner_id`` scopes the
+        couple like :meth:`get_dashboard` (unknown learner ⇒ ``KeyError``);
+        flashcards themselves are subject-scoped.
+        """
+        self.store.require_subject(subject_id)
+        if learner_id and self.store.get_learner(learner_id) is None:
+            raise KeyError(f"Unknown learner: {learner_id}")
+        detailed = self.review.due_reviews_detailed(subject_id)
+        due = [
+            {
+                "kind": "carte",
+                "id": d["id"],
+                "title": d.get("question", ""),
+                "overdue_days": d["overdue_days"],
+            }
+            for d in detailed
+        ]
+        worst = max((d["overdue_days"] for d in detailed), default=0)
+        return {"due": due, "due_count": len(due), "stale_plan": worst > STALE_PLAN_DAYS}
+
+    def _due_count(self, subject_id: str) -> int:
+        """Due-review counter for the dashboard (012 US1, pure SQL)."""
+        try:
+            return len(self.review.due_reviews(subject_id))
+        except Exception:
+            return 0
+
     def grade_review(self, flashcard_id: str, success: bool) -> dict[str, Any]:
         """Grade a flashcard review, walking the D8 ladder; returns new schedule."""
         return self.review.grade_review(flashcard_id, success)
@@ -2445,6 +2667,169 @@ class TutorService:
         return await self.quiz_engine.create_exam(
             subject_id, size, time_limit_s, concepts=concepts
         )
+
+    # ------------------------------------------------------------------
+    # Épreuves blanches à blueprint + partage parent (012 US2, FR-006→FR-008)
+    # ------------------------------------------------------------------
+
+    async def create_blueprint_exam(
+        self,
+        blueprint: str,
+        duree_min: int,
+        *,
+        subject_id: str | None = None,
+        size: int | None = None,
+    ) -> dict[str, Any]:
+        """Create a timed mock exam from a Cameroon blueprint (``cm/*``).
+
+        Resolves (or creates from the pack title) the subject, seeds its
+        concepts from the pack skeleton when empty, then delegates to
+        :meth:`QuizEngine.create_blueprint_exam` (reuses
+        ``_create_assessment``, kinds objectifs/open hors recall_written).
+        ``ValueError`` → 400 (blueprint inconnu, durée invalide) ;
+        ``KeyError`` → 404 (matière inconnue).
+        """
+        from .exams import (
+            DEFAULT_EXAM_SIZE,
+            get_blueprint,
+            seed_concepts_from_pack,
+            validate_duree,
+        )
+
+        pack = get_blueprint(blueprint)  # ValueError → 400
+        minutes = validate_duree(duree_min)  # ValueError → 400
+        key = str(pack["packKey"])
+        if subject_id is not None:
+            self.store.require_subject(subject_id)  # KeyError → 404
+        else:
+            title = str(pack.get("title") or key)[:80].strip() or key
+            subject_id = self._resolve_subject(title)
+        concepts = self.store.list_concepts(subject_id)
+        if not concepts:
+            concepts = seed_concepts_from_pack(self.store, subject_id, pack)
+        return await self.quiz_engine.create_blueprint_exam(
+            subject_id,
+            key,
+            pack,
+            concepts,
+            max(1, int(size or DEFAULT_EXAM_SIZE)),
+            minutes * 60,
+        )
+
+    def get_exam(self, exam_id: str) -> dict[str, Any] | None:
+        """Enriched exam snapshot (blueprint, /20, verrouillage, reprise)."""
+        return self.quiz_engine.get_exam_snapshot(exam_id)
+
+    def lock_exam(self, exam_id: str) -> dict[str, Any]:
+        """Verrouille l'épreuve si le temps imparti est écoulé (FR-006)."""
+        return self.quiz_engine.lock_exam(exam_id)
+
+    def resume_exam(self, exam_id: str) -> dict[str, Any]:
+        """Reprend une épreuve interrompue, temps restant recalculé (FR-006)."""
+        return self.quiz_engine.resume_exam(exam_id)
+
+    def grant_learner_share(self, learner_id: str) -> dict[str, str]:
+        """Accorde le partage parent (consentement explicite, FR-008)."""
+        from .sharing import grant_share
+
+        return {"share_token": grant_share(self.store, learner_id)}
+
+    def revoke_learner_share(self, learner_id: str) -> dict[str, bool]:
+        """Révoque le partage parent (token mort immédiat, FR-008)."""
+        from .sharing import revoke_share
+
+        return revoke_share(self.store, learner_id)
+
+    def parent_overview(self, token: str) -> dict[str, Any]:
+        """Vue parent agrégée, lecture seule (FR-008, 403 si sans consentement)."""
+        from .sharing import parent_overview
+
+        return parent_overview(self.store, token)
+
+    # ------------------------------------------------------------------
+    # Notes atomiques liées + planning semestre (012 US3, FR-010/FR-011)
+    # ------------------------------------------------------------------
+
+    def create_atomic_note(
+        self,
+        title: str,
+        body: str,
+        *,
+        learner_id: str = "",
+        subject_id: str = "",
+        concept_ids: list[str] | None = None,
+        source_refs: list[Any] | None = None,
+    ) -> dict[str, Any]:
+        """Crée une note atomique (``ValueError`` → 400, ``KeyError`` → 404).
+
+        Rattachement apprenant/matière (FK) résolu dans ``tutor.notes`` :
+        premier apprenant (ou « Apprenant ») et matière « Général » par
+        défaut ; un id explicite inconnu lève ``KeyError``.
+        """
+        from .notes import create_note
+
+        return create_note(
+            self.store, title, body, learner_id=learner_id,
+            subject_id=subject_id, concept_ids=concept_ids,
+            source_refs=source_refs,
+        )
+
+    def list_atomic_notes(
+        self, *, learner_id: str | None = None, subject_id: str | None = None
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Liste les notes atomiques (filtres optionnels)."""
+        from .notes import list_notes
+
+        return {"notes": list_notes(self.store, learner_id=learner_id, subject_id=subject_id)}
+
+    def delete_atomic_note(self, note_id: str) -> dict[str, bool]:
+        """Supprime une note atomique (``KeyError`` → 404 côté transport)."""
+        from .notes import delete_note
+
+        if not delete_note(self.store, note_id):
+            raise KeyError(f"Note inconnue : {note_id}")
+        return {"deleted": True}
+
+    def link_atomic_notes(self, from_id: str, to_id: str, rel: str) -> dict[str, Any]:
+        """Relie deux notes (``ValueError`` → 400, ``KeyError`` → 404)."""
+        from .notes import add_link
+
+        return {"link": add_link(self.store, from_id, to_id, rel)}
+
+    def assemble_note_plan(
+        self, question: str, *, learner_id: str | None = None
+    ) -> dict[str, Any]:
+        """Assemble un plan depuis les liens (lecture seule, ``ValueError`` → 400)."""
+        from .notes import assemble_plan
+
+        return assemble_plan(self.store, question, learner_id=learner_id)
+
+    def plan_semester(
+        self,
+        ues: list[dict[str, Any]],
+        epreuves: list[dict[str, Any]] | None = None,
+        *,
+        start_date: str | None = None,
+        weeks: int | None = None,
+        max_heures_semaine: float | None = None,
+        title: str = "",
+    ) -> dict[str, Any]:
+        """Planifie un semestre ECTS (``ValueError`` → 400 côté transport)."""
+        from .planner import plan_semester as _plan
+
+        return _plan(
+            ues, epreuves, start_date=start_date, weeks=weeks,
+            max_heures_semaine=max_heures_semaine, title=title,
+        )
+
+    def recompact_semester_plan(
+        self, plan: dict[str, Any], missed_weeks: list[int],
+        *, fragile_subject_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Recompacte un plan après absence (plafonné, fragiles d'abord)."""
+        from .planner import recompact_plan
+
+        return recompact_plan(plan, missed_weeks, fragile_subject_ids=fragile_subject_ids)
 
     def _concepts_in_scope(
         self,
@@ -2496,17 +2881,20 @@ class TutorService:
     ) -> QuizReport:
         """Correct a quiz/exam submission; enforces exam rules (T040).
 
-        US15 / T088: Awards +20 XP for quiz completion and a +10 XP streak
-        bonus when the learner has been active on consecutive days.
+        012 US4 (FR-012, T027) : +20 XP de quiz +10 XP de bonus de serie
+        via ``tutor.rewards`` (cap journalier). Suivi G3 : un re-submit
+        idempotent d'un quiz deja ``completed`` rejoue le rapport persiste
+        SANS re-attribuer d'XP (ni rejouer la serie).
         """
+        # G3 : la correction moteur est idempotente (rapport persiste) ;
+        # l'XP ne doit etre attribuee qu'au premier submit.
+        already_completed = rewards_mod.is_quiz_completed(self.store, quiz_id)
         report = await self.quiz_engine.submit_answers(
             quiz_id, answers, hint_requested=hint_requested
         )
-        # US15 / T088: gamification — XP for quiz completion + streak bonus.
-        self.store.add_xp(20)
-        streak = self.store.update_streak()
-        if streak > 1:
-            self.store.add_xp(10)
+        if already_completed:
+            return report
+        rewards_mod.award_quiz_xp(self.store)
         return report
 
     def get_quiz(self, quiz_id: str, include_answers: bool = False) -> Any:
@@ -4039,7 +4427,7 @@ class TutorService:
         try:
             self.store.require_subject(subject_id)
         except KeyError:
-            return {"nextStep": None, "counts": {"sources": 0, "notions": 0}, "paths": []}
+            return {"nextStep": None, "counts": {"sources": 0, "notions": 0}, "paths": [], "due_count": 0}
         paths = self.store.list_learning_paths(subject_id, learner_id=learner_id) if learner_id else self.store.list_learning_paths(subject_id)
         # counts: sources = books for subject, notions = concepts for subject
         try:
@@ -4053,7 +4441,7 @@ class TutorService:
         except Exception:
             notions_cnt = 0
         if not paths:
-            return {"nextStep": None, "counts": {"sources": sources_cnt, "notions": notions_cnt}, "paths": []}
+            return {"nextStep": None, "counts": {"sources": sources_cnt, "notions": notions_cnt}, "paths": [], "due_count": self._due_count(subject_id)}
         # Pick first active or first path; find next not_completed step
         # For dashboard we enrich with steps to find nextStep
         next_step = None
@@ -4073,13 +4461,13 @@ class TutorService:
         if next_step is None:
             # All completed -> no next step but still have paths
             # Return last path's last step as completed? spec wants nextStep null only when empty; when completed, return None as well? keep null
-            return {"nextStep": None, "counts": {"sources": sources_cnt, "notions": notions_cnt}, "paths": [p.to_dict() for p in paths]}
+            return {"nextStep": None, "counts": {"sources": sources_cnt, "notions": notions_cnt}, "paths": [p.to_dict() for p in paths], "due_count": self._due_count(subject_id)}
         progress = 0.0
         if chosen_path is not None:
             steps = self.store.list_path_steps(chosen_path.id)
             completed = sum(1 for s in steps if s.status == "completed")
             progress = round(completed / len(steps) * 100, 1) if steps else 0.0
-        return {"nextStep": {**next_step, "progress": progress}, "counts": {"sources": sources_cnt, "notions": notions_cnt}, "paths": [p.to_dict() for p in paths]}
+        return {"nextStep": {**next_step, "progress": progress}, "counts": {"sources": sources_cnt, "notions": notions_cnt}, "paths": [p.to_dict() for p in paths], "due_count": self._due_count(subject_id)}
 
     def get_path(self, path_id: str) -> dict | None:
         """Get a learning path with its steps and progress."""

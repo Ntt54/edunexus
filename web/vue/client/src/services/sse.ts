@@ -17,7 +17,7 @@ export type SSEStreamEvent =
   | { type: "delta"; text: string }
   | { type: "thinking"; text: string }
   | { type: "done"; fallback: boolean; thinking?: string | null; sources?: unknown[] }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string; code?: string; hint?: string; provider?: string; model?: string };
 
 export interface SSEFeed {
   events: SSEStreamEvent[];
@@ -56,7 +56,14 @@ export function feedSSE(buffer: string): SSEFeed {
         sources: Array.isArray(obj.sources) ? obj.sources : [],
       });
     } else if (typeof obj.error === "string" && obj.error) {
-      events.push({ type: "error", message: obj.error });
+      // Structured backend error (Constitution VI): message seul reste
+      // valide (compat) ; code/hint/provider/model passés quand présents.
+      const err: Extract<SSEStreamEvent, { type: "error" }> = { type: "error", message: obj.error };
+      if (typeof obj.code === "string" && obj.code) err.code = obj.code;
+      if (typeof obj.hint === "string" && obj.hint) err.hint = obj.hint;
+      if (typeof obj.provider === "string" && obj.provider) err.provider = obj.provider;
+      if (typeof obj.model === "string" && obj.model) err.model = obj.model;
+      events.push(err);
     }
   }
   return { events, rest };

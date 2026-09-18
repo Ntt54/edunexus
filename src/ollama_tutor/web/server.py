@@ -248,6 +248,15 @@ class TutorExamRequest(BaseModel):
     corpus_ids: list[int] | None = None
 
 
+class TutorBlueprintExamRequest(BaseModel):
+    # 012 US2 (FR-006) : épreuve blanche BEPC/probatoire/bac depuis un
+    # blueprint curriculum (cm/bepc, cm/premiere-*, cm/terminale-*).
+    blueprint: str = ""
+    duree_min: int = 0
+    subject_id: str | None = None
+    size: int = 10
+
+
 class TutorModelsUpdate(BaseModel):
     embedding: str | None = None
     llm: str | None = None
@@ -331,6 +340,45 @@ class TutorNotebookNoteRequest(BaseModel):
 class TutorNotebookActionRequest(BaseModel):
     action: str
     params: dict[str, Any] = {}
+
+
+class TutorAtomicNoteRequest(BaseModel):
+    # 012 US3 (FR-010) : title = affirmation (≤120), body = propres mots.
+    title: str = ""
+    body: str = ""
+    concept_ids: list[str] = []
+    source_refs: list[Any] = []
+    learner_id: str | None = None
+    subject_id: str | None = None
+
+
+class TutorAtomicLinkRequest(BaseModel):
+    # 012 US3 (FR-010) : rel ∈ précise/contredit/mécanisme-de/exemple-de.
+    to_id: str = ""
+    rel: str = ""
+
+
+class TutorUEItem(BaseModel):
+    # 012 US3 (FR-011) : charge directe (heures) ou ECTS (×27,5 h).
+    subject_id: str = ""
+    heures: float | None = None
+    ects: float | None = None
+
+
+class TutorEpreuveItem(BaseModel):
+    date: str = ""
+    subject_id: str = ""
+
+
+class TutorSemesterRequest(BaseModel):
+    # 012 US3 (FR-011) : planning semestre, règle 150 %.
+    ues: list[TutorUEItem] = []
+    epreuves: list[TutorEpreuveItem] = []
+    learner_id: str | None = None
+    title: str = ""
+    start_date: str | None = None
+    weeks: int | None = None
+    max_heures_semaine: float | None = None
 
 
 class TutorAutoClassifyRequest(BaseModel):
@@ -1858,6 +1906,32 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             out.append(d)
         return {"due": out}
 
+    @app.get("/api/tutor/reminders")
+    async def tutor_reminders(request: Request) -> dict[str, Any]:
+        """Vue « À réviser » (012 US1, FR-001) — thin delegate to TutorService.get_reminders."""
+        sid = request.query_params.get("subject_id")
+        lid = request.query_params.get("learner_id") or request.headers.get("x-learner-id")
+        if sid is not None:
+            sid = sid.strip()
+            if sid == "":
+                _log_error(config, "reminders", "subject_id vide")
+                raise HTTPException(status_code=400, detail="subject_id requis")
+            if tutor_store.get_subject(sid) is None:
+                raise HTTPException(status_code=404, detail="sujet inconnu")
+        else:
+            sid = _active_subject_id()
+            if not sid:
+                return {"due": [], "due_count": 0, "stale_plan": False}
+        if lid is not None:
+            lid = lid.strip() or None
+        if request.query_params.get("learner_id") == "":
+            _log_error(config, "reminders", "learner_id vide")
+            raise HTTPException(status_code=400, detail="learner_id invalide")
+        try:
+            return tutor_service.get_reminders(sid, learner_id=lid)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="sujet inconnu")
+
     @app.post("/api/tutor/reviews/{flashcard_id}/grade")
     async def tutor_grade_review(flashcard_id: str, payload: TutorGradeRequest) -> dict[str, Any]:
         """Grade a flashcard review; walks the D8 ladder.
@@ -2000,6 +2074,28 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             "corpus_ids": list(payload.corpus_ids or []),
         }
         return data
+
+    @app.post("/api/tutor/exams")
+    async def tutor_blueprint_exam(payload: TutorBlueprintExamRequest) -> dict[str, Any]:
+        """Épreuve blanche BEPC/probatoire/bac (012 US2, FR-006).
+
+        Thin transport : ``{blueprint, duree_min}`` (+ ``subject_id``/``size``
+        optionnels) délégué à ``TutorService.create_blueprint_exam``.
+        400 blueprint inconnu/durée invalide, 404 matière inconnue.
+        """
+        try:
+            return await tutor_service.create_blueprint_exam(
+                payload.blueprint,
+                payload.duree_min,
+                subject_id=payload.subject_id,
+                size=payload.size,
+            )
+        except ValueError as exc:
+            _log_error(config, "exams", f"épreuve blanche invalide: {exc}")
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError:
+            _log_error(config, "exams", "sujet inconnu pour épreuve blanche")
+            raise HTTPException(status_code=404, detail="sujet inconnu")
 
     @app.post("/api/tutor/quizzes/{quiz_id}/submit")
     async def tutor_submit_quiz(quiz_id: str, payload: TutorQuizSubmitRequest) -> dict[str, Any]:
@@ -2277,13 +2373,16 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                     "message": str(exc)[:200],
                 }
 
-    async def _tutor_models_payload() -> dict[str, Any]:
-        # Toujours lister les modèles Ollama locaux (groupe "ollama" en premier)
-        # ET les modèles du fournisseur cloud configuré, pour pouvoir basculer
-        # entre les deux depuis la liste déroulante.
-        # NB : quand llm_provider == "openai", tutor_client est un
-        # OpenAICompatProvider — il faut donc un client Ollama dédié pour
-        # lister les modèles locaux.
+    async def _tutor_model_sources() -> tuple[list[str], list[str]]:
+        """Listes ``(ollama_names, cloud_names)`` — logique partagée GET/PUT models.
+
+        Toujours lister les modèles Ollama locaux (groupe "ollama" en
+        premier) ET les modèles du fournisseur cloud configuré, pour pouvoir
+        basculer entre les deux depuis la liste déroulante.
+        NB : quand llm_provider == "openai", tutor_client est un
+        OpenAICompatProvider — il faut donc un client Ollama dédié pour
+        lister les modèles locaux.
+        """
         ollama_names: list[str] = []
         try:
             # Module-level OllamaClient : respecte la couture d'injection
@@ -2310,6 +2409,45 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                 cloud_names = []
             finally:
                 await probe.close()
+        return ollama_names, cloud_names
+
+    async def _hot_reload_llm_client(
+        prev_triplet: tuple[str | None, str | None, str | None],
+    ) -> None:
+        """Bascule à chaud du backend LLM sur changement effectif de
+        (provider, base_url, api_key) — jamais de raise.
+
+        Factorisé pour le PUT settings ET le PUT /api/tutor/models :
+        reconstruit via ``_build_tutor_client(config)``, rebranche le
+        service vivant (pas de restart), ferme l'ancien client dédié
+        best-effort (log ``provider-switch`` sans raise en cas d'échec
+        build). Triplet inchangé ⇒ aucune reconstruction.
+        """
+        if (
+            config.llm_provider,
+            config.llm_base_url,
+            config.llm_api_key,
+        ) != prev_triplet:
+            try:
+                _new_client = _build_tutor_client(config)
+            except Exception as exc:
+                _log_error(
+                    config, "provider-switch",
+                    f"reconstruction client LLM impossible : {exc}",
+                )
+            else:
+                _old_client = tutor_service.switch_llm_client(_new_client)
+                if _old_client is not None:
+                    try:
+                        await _old_client.close()
+                    except Exception:
+                        pass
+
+    async def _tutor_models_payload() -> dict[str, Any]:
+        # Toujours lister les modèles Ollama locaux (groupe "ollama" en premier)
+        # ET les modèles du fournisseur cloud configuré, pour pouvoir basculer
+        # entre les deux depuis la liste déroulante.
+        ollama_names, cloud_names = await _tutor_model_sources()
 
         # Fusion sans doublons : Ollama d'abord, puis cloud.
         names = list(dict.fromkeys(ollama_names + cloud_names))
@@ -2364,7 +2502,27 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
                 raise HTTPException(
                     status_code=400, detail="llm doit être une chaîne non vide"
                 )
-            config.tutor_model = payload.llm.strip()
+            wanted_model = payload.llm.strip()
+            # Avoir les deux fournisseurs : la sélection d'un modèle
+            # auto-bascule le provider vers sa source (priorité Ollama en
+            # cas de doublon, comme la fusion du GET). Source inconnue ou
+            # listages vides/offline ⇒ provider inchangé, nom persisté
+            # comme aujourd'hui (jamais de 400 ici).
+            _prev_llm = (
+                config.llm_provider, config.llm_base_url, config.llm_api_key
+            )
+            ollama_names, cloud_names = await _tutor_model_sources()
+            if wanted_model in ollama_names:
+                wanted_provider = "ollama"
+            elif wanted_model in cloud_names:
+                wanted_provider = "openai"
+            else:
+                wanted_provider = config.llm_provider
+            config.tutor_model = wanted_model
+            if wanted_provider != config.llm_provider:
+                config.llm_provider = wanted_provider
+                config.save()
+            await _hot_reload_llm_client(_prev_llm)
         return await _tutor_models_payload()
 
     _FLAT_CATEGORY_MSG = "Sous-catégories désactivées — catégories à plat uniquement"
@@ -2826,12 +2984,27 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
 
     @app.post("/api/tutor/learners")
     async def learners_create(request: Request, payload: TutorLearnerRequest) -> dict[str, Any]:
-        """Create a learner profile for active subject (FR-005/038), thin delegate, 400 on invalid."""
+        """Create a learner profile for active subject (FR-005/038), thin delegate, 400 on invalid.
+
+        Optional `?subject_id=` binds the new learner to that subject so it is
+        immediately visible in the filtered list (011/T031); without it the
+        creation stays global (compat).
+        """
         from ..tutor.learners import LearnerService
-        # Optional active subject via query/header for logging, but creation is global
+        subject_id = request.query_params.get("subject_id")
+        if subject_id is not None:
+            subject_id = subject_id.strip()
+            if subject_id == "":
+                _log_error(config, "learners-create", "subject_id vide")
+                raise HTTPException(status_code=400, detail="subject_id requis")
+            if tutor_store.get_subject(subject_id) is None:
+                _log_error(config, "learners-create", f"subject_id inconnu: {subject_id}")
+                raise HTTPException(status_code=404, detail="sujet inconnu")
         # Validate via service (length, unique)
         try:
-            return LearnerService(tutor_store).create(payload.name, avatar=payload.avatar)
+            return LearnerService(tutor_store).create(
+                payload.name, avatar=payload.avatar, subject_id=subject_id
+            )
         except ValueError as exc:
             msg = str(exc)
             _log_error(config, "learners-create", f"invalid: {msg}")
@@ -2859,6 +3032,43 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             return LearnerService(tutor_store).delete(learner_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Apprenant inconnu") from exc
+
+    # ------------------------------------------------------------------
+    # Feature 012 — Partage parent à consentement (US2, FR-008) — thin transport
+    # ------------------------------------------------------------------
+
+    @app.post("/api/tutor/learners/{learner_id}/share")
+    async def learners_share_grant(learner_id: str) -> dict[str, Any]:
+        """Accorde le partage parent : génère un share_token (FR-008)."""
+        try:
+            return tutor_service.grant_learner_share(learner_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Apprenant inconnu") from exc
+
+    @app.delete("/api/tutor/learners/{learner_id}/share")
+    async def learners_share_revoke(learner_id: str) -> dict[str, Any]:
+        """Révoque le partage parent : token mort immédiat (FR-008)."""
+        try:
+            return tutor_service.revoke_learner_share(learner_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Apprenant inconnu") from exc
+
+    @app.get("/api/tutor/parent/overview")
+    async def parent_overview(request: Request) -> dict[str, Any]:
+        """Vue parent agrégée, lecture seule (FR-008, parents seuls v1).
+
+        403 si le token est absent, inconnu, révoqué ou sans consentement.
+        Aucune écriture sur cette route.
+        """
+        from ..tutor.sharing import SharePermissionError
+        token = (request.query_params.get("token") or "").strip()
+        try:
+            return tutor_service.parent_overview(token)
+        except SharePermissionError as exc:
+            _log_error(config, "parent-overview", f"accès parent refusé: {exc}")
+            raise HTTPException(
+                status_code=403, detail="partage parent indisponible"
+            ) from exc
 
     # ------------------------------------------------------------------
     # Feature 008 — Carnet de matière (US8) — thin transport only
@@ -2914,6 +3124,86 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
     async def notebook_delete_output(output_id: str) -> dict[str, Any]:
         """Delete a notebook output (FR-035)."""
         return _notebook_service().delete_output(output_id)
+
+    # ------------------------------------------------------------------
+    # Feature 012 — Notes atomiques liées + planning semestre (US3,
+    # FR-010/FR-011) — thin transport only (parse → delegate).
+    # ------------------------------------------------------------------
+
+    @app.post("/api/tutor/notes/atomic", status_code=201)
+    async def notes_atomic_create(payload: TutorAtomicNoteRequest) -> dict[str, Any]:
+        """Crée une note atomique (titre = affirmation, corps en propres mots)."""
+        try:
+            return {"note": tutor_service.create_atomic_note(
+                payload.title,
+                payload.body,
+                learner_id=(payload.learner_id or "").strip(),
+                subject_id=(payload.subject_id or "").strip(),
+                concept_ids=list(payload.concept_ids or []),
+                source_refs=list(payload.source_refs or []),
+            )}
+        except ValueError as exc:
+            _log_error(config, "notes-atomic", f"note invalide: {exc}")
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/tutor/notes/atomic")
+    async def notes_atomic_list(
+        learner_id: str | None = None, subject_id: str | None = None
+    ) -> dict[str, Any]:
+        """Liste les notes atomiques (filtres optionnels)."""
+        return tutor_service.list_atomic_notes(
+            learner_id=(learner_id or "").strip() or None,
+            subject_id=(subject_id or "").strip() or None,
+        )
+
+    @app.delete("/api/tutor/notes/atomic/{note_id}")
+    async def notes_atomic_delete(note_id: str) -> dict[str, Any]:
+        """Supprime une note atomique (liens en cascade)."""
+        try:
+            return tutor_service.delete_atomic_note(note_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="note introuvable") from exc
+
+    @app.post("/api/tutor/notes/atomic/{note_id}/links")
+    async def notes_atomic_link(note_id: str, payload: TutorAtomicLinkRequest) -> dict[str, Any]:
+        """Relie deux notes (rel typée, 400 sinon)."""
+        try:
+            return tutor_service.link_atomic_notes(note_id, payload.to_id, payload.rel)
+        except ValueError as exc:
+            _log_error(config, "notes-atomic", f"lien invalide: {exc}")
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="note introuvable") from exc
+
+    @app.get("/api/tutor/notes/atomic/plan")
+    async def notes_atomic_plan(request: Request) -> dict[str, Any]:
+        """Assemble un plan depuis les liens (lecture seule)."""
+        question = (request.query_params.get("question") or "").strip()
+        if not question:
+            _log_error(config, "notes-atomic", "question vide pour assemble-plan")
+            raise HTTPException(status_code=400, detail="question requise")
+        learner_id = (request.query_params.get("learner_id") or "").strip() or None
+        try:
+            return tutor_service.assemble_note_plan(question, learner_id=learner_id)
+        except ValueError as exc:
+            _log_error(config, "notes-atomic", f"plan invalide: {exc}")
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/tutor/planner/semester")
+    async def planner_semester(payload: TutorSemesterRequest) -> dict[str, Any]:
+        """Planifie un semestre ECTS (règle 150 %, 400 si impossible)."""
+        try:
+            return tutor_service.plan_semester(
+                [u.model_dump() for u in payload.ues],
+                [e.model_dump() for e in payload.epreuves],
+                start_date=payload.start_date,
+                weeks=payload.weeks,
+                max_heures_semaine=payload.max_heures_semaine,
+                title=payload.title or "",
+            )
+        except ValueError as exc:
+            _log_error(config, "planner", f"semestre impossible: {exc}")
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # ------------------------------------------------------------------
     # REST: Lesson discussion centrée (Feature 009, US1) — thin transport
@@ -3684,29 +3974,8 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         config.save()  # persistance immédiate (préférence utilisateur)
         # Bascule à chaud du backend LLM sur changement effectif de
-        # (provider, base_url, api_key) : reconstruit via le même helper
-        # que create_app, rebranche le service vivant (pas de restart),
-        # ferme l'ancien client dédié best-effort (jamais de raise).
-        # Triplet inchangé ⇒ aucune reconstruction.
-        if (
-            config.llm_provider,
-            config.llm_base_url,
-            config.llm_api_key,
-        ) != _prev_llm:
-            try:
-                _new_client = _build_tutor_client(config)
-            except Exception as exc:
-                _log_error(
-                    config, "provider-switch",
-                    f"reconstruction client LLM impossible : {exc}",
-                )
-            else:
-                _old_client = tutor_service.switch_llm_client(_new_client)
-                if _old_client is not None:
-                    try:
-                        await _old_client.close()
-                    except Exception:
-                        pass
+        # (provider, base_url, api_key) — helper partagé avec PUT models.
+        await _hot_reload_llm_client(_prev_llm)
         if config.tutor_nightly_enabled:
             await tutor_service.start_nightly_scheduler()
         else:

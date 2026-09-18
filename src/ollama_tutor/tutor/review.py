@@ -21,6 +21,20 @@ from .models import Flashcard
 
 # D8 spaced-repetition ladder (days). Index = consecutive-success count (0-4).
 LADDER_DAYS = [1, 2, 5, 12, 30]
+# Maximum overdue (days) before the plan is considered stale (012 US1, FR-001).
+# Beyond this, the UI proposes recompaction instead of piling up reviews.
+STALE_PLAN_DAYS = 7
+
+
+def overdue_days(next_due_iso: str | None, today: date | None = None) -> int:
+    """Days a review is overdue (0 when due today or in the future)."""
+    if not next_due_iso:
+        return 0
+    try:
+        due = date.fromisoformat(str(next_due_iso)[:10])
+    except ValueError:
+        return 0
+    return max(0, ((today or date.today()) - due).days)
 _MAX_INDEX = len(LADDER_DAYS) - 1  # 4
 
 
@@ -117,6 +131,69 @@ class ReviewScheduler:
             (subject_id, today_iso),
         ).fetchall()
         return [Flashcard.from_dict(dict(r)) for r in rows]
+
+    def due_reviews_detailed(
+        self, subject_id: str, today: date | None = None
+    ) -> list[dict[str, Any]]:
+        """Due reviews enriched with counters/lateness (012 US1, FR-001).
+
+        Pure SQL + date arithmetic — no model/LLM involvement. Each item
+        carries the card fields plus ``next_due``, ``streak_index`` and
+        ``overdue_days`` (0 when due today). Ordered by soonest due first.
+        """
+        today = today or date.today()
+        rows = self.store._conn.execute(
+            "SELECT f.*, rs.next_due AS next_due, rs.streak_index AS streak_index "
+            "FROM flashcards f "
+            "JOIN review_schedule rs ON rs.flashcard_id = f.id "
+            "WHERE f.subject_id = ? AND rs.next_due <= ? "
+            "ORDER BY rs.next_due ASC",
+            (subject_id, today.isoformat()),
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = Flashcard.from_dict(dict(r)).to_dict()
+            d["next_due"] = r["next_due"]
+            d["streak_index"] = r["streak_index"]
+            d["overdue_days"] = overdue_days(r["next_due"], today)
+            out.append(d)
+        return out
+
+    def due_summary(
+        self, subject_id: str, today: date | None = None
+    ) -> dict[str, Any]:
+        """``{due_count, overdue_max, stale_plan}`` for a subject (012 US1).
+
+        ``stale_plan`` is True when the worst lateness exceeds
+        :data:`STALE_PLAN_DAYS` (recompaction proposed, never stacked).
+        """
+        detailed = self.due_reviews_detailed(subject_id, today)
+        worst = max((d["overdue_days"] for d in detailed), default=0)
+        return {
+            "due_count": len(detailed),
+            "overdue_max": worst,
+            "stale_plan": worst > STALE_PLAN_DAYS,
+        }
+
+    def recompacted_due(
+        self,
+        subject_id: str,
+        today: date | None = None,
+        *,
+        cap_factor: float = 1.5,
+        max_days: int = 7,
+    ) -> dict[str, Any]:
+        """Replanification plafonnée des rappels dus (012 US3, follow-up G2).
+
+        Réutilise :func:`tutor.planner.replan_reminders_capped` (import
+        paresseux : ``planner`` ne dépend jamais de ``review``) : les dus
+        — triés par retard décroissant — sont étalés sur les prochains
+        jours sous un plafond journalier, au lieu d'être empilés.
+        """
+        from .planner import replan_reminders_capped
+
+        detailed = self.due_reviews_detailed(subject_id, today)
+        return replan_reminders_capped(detailed, cap_factor=cap_factor, max_days=max_days)
 
     def get_review(self, flashcard_id: str) -> dict[str, Any] | None:
         """Return the ``review_schedule`` row for a flashcard, or ``None``."""
@@ -275,9 +352,11 @@ class ReviewScheduler:
 __all__ = [
     "LADDER_DAYS",
     "MAX_STREAK_INDEX",
+    "STALE_PLAN_DAYS",
     "interval_for_streak",
     "interval_for",
     "next_due_for",
+    "overdue_days",
     "ReviewScheduler",
 ]
 

@@ -14,6 +14,10 @@ import NotebookView from "@/views/NotebookView.vue";
 import CaptureView from "@/views/CaptureView.vue";
 import ProfileView from "@/views/ProfileView.vue";
 import LearnersView from "@/views/LearnersView.vue";
+import RemindersView from "@/views/RemindersView.vue";
+import ExamView from "@/views/ExamView.vue";
+import ParentView from "@/views/ParentView.vue";
+import PlannerView from "@/views/PlannerView.vue";
 
 export const router = createRouter({
   history: createWebHashHistory(),
@@ -34,6 +38,13 @@ export const router = createRouter({
     { path: "/capture", name: "capture", component: CaptureView },
     { path: "/profil", name: "profile", component: ProfileView },
     { path: "/apprenants", name: "learners", component: LearnersView },
+    // 012 US1 — rappels « À réviser »
+    { path: "/rappels", name: "reminders", component: RemindersView },
+    // 012 US2 — épreuve blanche + suivi parent
+    { path: "/examen", name: "exam", component: ExamView },
+    { path: "/parent", name: "parent", component: ParentView },
+    // 012 US3 — planning semestre ECTS
+    { path: "/planning", name: "planner", component: PlannerView },
     // Explorer & Leçon — manquants (migration totale tutor.html → Vue)
     { path: "/explorer", name: "explorer", component: () => import("@/views/ExplorerView.vue") },
     { path: "/lecon/:id", name: "lecon", component: () => import("@/views/LessonView.vue"), props: true },

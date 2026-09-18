@@ -3,7 +3,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { RouterLink, RouterView } from "vue-router";
 import {
-  BarChart3, BookOpen, Bot, BrainCircuit, Camera, CheckSquare, Compass,
+  BarChart3, BellRing, BookOpen, Bot, BrainCircuit, CalendarDays, Camera, CheckSquare, ClipboardCheck, Compass,
   FolderOpen, GraduationCap, House, LibraryBig, LineChart, Menu, NotebookPen,
   Plus, Settings2, Sparkles, Star, Users,
 } from "lucide-vue-next";
@@ -146,10 +146,12 @@ const groups = [
     { labelKey: "nav.home", to: "/", icon: House },
     { labelKey: "nav.path", to: "/parcours", icon: Compass },
     { labelKey: "nav.revise", to: "/reviser", icon: BrainCircuit },
+    { labelKey: "nav.reminders", to: "/rappels", icon: BellRing },
   ] },
   { label: "S'entraîner", items: [
     { labelKey: "nav.practice", to: "/exercices", icon: CheckSquare },
     { labelKey: "nav.quiz", to: "/quiz", icon: GraduationCap },
+    { labelKey: "nav.exam", to: "/examen", icon: ClipboardCheck },
     { labelKey: "nav.progress", to: "/progression", icon: BarChart3 },
   ] },
   { label: "Explorer", items: [
@@ -158,9 +160,11 @@ const groups = [
     { labelKey: "nav.graph", to: "/graphe", icon: LineChart },
     { labelKey: "nav.subjectDash", to: "/tableau", icon: BarChart3 },
     { labelKey: "nav.notebook", to: "/carnet", icon: NotebookPen },
+    { labelKey: "nav.planner", to: "/planning", icon: CalendarDays },
     { labelKey: "nav.capture", to: "/capture", icon: Camera },
     { labelKey: "nav.profile", to: "/profil", icon: Compass },
     { labelKey: "nav.learners", to: "/apprenants", icon: Users },
+    { labelKey: "nav.parent", to: "/parent", icon: Star },
   ] },
   { label: "Espace", items: [
     { labelKey: "nav.settings", to: "/reglages", icon: Settings2 },

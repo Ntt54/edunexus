@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 2,
+  "packKey": "cm/terminale-c",
+  "packVersion": "0.1.0",
+  "minAppVersion": "0.1.0",
+  "source": "OBC/MINESEC à confirmer",
+  "statut": "squelette_à_valider",
+  "title": "Baccalauréat C — Terminale maths-physique (Cameroun)",
+  "classe": "Terminale C",
+  "examen": "Bac C",
+  "note": "Squelette à valider : titres, objectifs, durées et prérequis uniquement. Barème et coefficients à confirmer par relecture humaine de l'arrêté MINESEC (T031). Aucun texte d'épreuve copié.",
+  "matieres": [
+    {
+      "code": "mathematiques",
+      "titre": "Mathématiques",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Analyse : limites, continuité, dérivation", "objectifs": ["Calculer limites et asymptotes", "Étudier une fonction complète"], "duree_min": 240, "prerequis": []},
+        {"titre": "Nombres complexes", "objectifs": ["Manipuler formes algébrique et trigonométrique", "Résoudre une équation dans C"], "duree_min": 180, "prerequis": ["Analyse : limites, continuité, dérivation"]},
+        {"titre": "Probabilités et arithmétique", "objectifs": ["Appliquer dénombrement et lois usuelles", "Utiliser divisibilité et congruences"], "duree_min": 180, "prerequis": []}
+      ]
+    },
+    {
+      "code": "physique",
+      "titre": "Physique",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Mécanique : dynamique et énergie", "objectifs": ["Appliquer les lois de Newton", "Exploiter la conservation de l'énergie"], "duree_min": 210, "prerequis": []},
+        {"titre": "Électromagnétisme : bases", "objectifs": ["Décrire champ magnétique et force de Laplace", "Analyser un circuit RL/RC simple"], "duree_min": 180, "prerequis": ["Mécanique : dynamique et énergie"]}
+      ]
+    },
+    {
+      "code": "chimie",
+      "titre": "Chimie",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Cinétique et équilibres chimiques", "objectifs": ["Déterminer une vitesse de réaction", "Exploiter une constante d'équilibre"], "duree_min": 150, "prerequis": []},
+        {"titre": "Chimie organique : fonctions", "objectifs": ["Identifier les fonctions usuelles", "Prévoir les produits d'une réaction simple"], "duree_min": 150, "prerequis": []}
+      ]
+    },
+    {
+      "code": "svt",
+      "titre": "SVT",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Génétique formelle et moléculaire", "objectifs": ["Résoudre un exercice de dihybridisme", "Expliquer réplication et transcription"], "duree_min": 150, "prerequis": []},
+        {"titre": "Régulation nerveuse et hormonale", "objectifs": ["Décrire la synapse et l'arc réflexe", "Expliquer une boucle de régulation"], "duree_min": 120, "prerequis": []}
+      ]
+    },
+    {
+      "code": "philosophie",
+      "titre": "Philosophie",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Science et vérité", "objectifs": ["Interroger la méthode scientifique", "Distinguer vérité et certitude"], "duree_min": 120, "prerequis": []},
+        {"titre": "Travail et technique", "objectifs": ["Analyser le rapport au travail", "Discuter les effets de la technique"], "duree_min": 120, "prerequis": []}
+      ]
+    },
+    {
+      "code": "francais-anglais",
+      "titre": "Français et Anglais",
+      "coefficient": null,
+      "source_coeffs": "OBC/MINESEC à confirmer",
+      "chapitres": [
+        {"titre": "Synthèse et argumentation (FR)", "objectifs": ["Contracter un texte", "Rédiger une dissertation courte"], "duree_min": 120, "prerequis": []},
+        {"titre": "Compréhension et essai (EN)", "objectifs": ["Comprendre un texte long", "Rédiger un essai structuré"], "duree_min": 120, "prerequis": []}
+      ]
+    }
+  ]
+}
