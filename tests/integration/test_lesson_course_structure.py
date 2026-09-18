@@ -25,7 +25,7 @@ from src.ollama_tutor.tutor.store import LibraryStore
 
 def _course_system() -> str:
     system, _ = _build_lesson_prompts(
-        "lesson_course", "Boucles", ["Les boucles for itèrent."]
+        "lesson_course", "Les boucles en Python", ["Les boucles for itèrent."]
     )
     return system
 

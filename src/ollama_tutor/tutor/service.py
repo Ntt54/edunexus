@@ -238,23 +238,72 @@ LESSON_COURSE_TIMEOUT_S = 360.0
 IMPORT_SUBJECT_LLM_TIMEOUT_S = 30.0
 
 
+#: Computing-domain markers: a lesson whose notion (or excerpts) mentions
+#: these gets a ```python code section; literary/unknown notions default
+#: to written step-by-step examples with NO code (deterministic, offline).
+_CODE_DOMAIN_MARKS = (
+    "informatique",
+    "programmation",
+    "python",
+    "algorithme",
+    "réseau",
+    "reseau",
+    "système",
+    "systeme",
+    "base de donnée",
+    "base de donnee",  # + "bases ..." : singulier/pluriel, accentué ou non
+    "bases de donnée",
+    "bases de donnee",
+    "développement",
+    "developpement",
+    "logiciel",
+)
+
+#: Strong Python code tokens signalling code-bearing excerpts (standalone
+#: tokens virtually absent from French literary prose).
+_CODE_EXCERPT_TOKENS = ("```", "def ", "import ", "print(", ">>>", "class ", "lambda ")
+
+
+def _notion_wants_code(notion: str, excerpts: list[str]) -> bool:
+    """Deterministic computing-domain detection (offline, no LLM).
+
+    True when ``notion`` names a computing topic (informatique,
+    programmation, python, algorithme, réseau, système, base de données,
+    développement, logiciel) OR ``excerpts`` carry code (fences or Python
+    tokens). Unknown/literary notions default to False — written
+    step-by-step examples, no code section.
+    """
+    if any(m in str(notion or "").lower() for m in _CODE_DOMAIN_MARKS):
+        return True
+    body = "\n".join(str(e) for e in (excerpts or [])).lower()
+    if not body.strip():
+        return False
+    if any(m in body for m in _CODE_DOMAIN_MARKS):
+        return True
+    return any(t in body for t in _CODE_EXCERPT_TOKENS)
+
+
 #: Règles d'ancrage STRICTES anti-hallucination (petit LLM local :
 #: termes inventés, faussetés, exemples génériques non ancrés). Suffixe
 #: commun aux 3 prompts de leçon — mêmes kinds/signatures, contrat inchangé.
 _LESSON_GROUNDING_RULES = (
     " Règles d'ancrage strictes : n'affirme que ce qui figure "
-    "explicitement dans les extraits fournis. Exemples de code : uniquement "
-    "ceux tirés ou directement dérivés des extraits, ne jamais inventer "
-    "d'API, de fonction ni de syntaxe. Définitions : reprends exactement la "
-    "terminologie des extraits, ne jamais inventer de terme technique. En "
-    "cas d'incertitude ou d'information absente des extraits, signale-le "
-    "par « selon les extraits » plutôt que d'affirmer. Réponds strictement "
-    "en français."
+    "explicitement dans les extraits fournis. S'il y a des exemples de "
+    "code : uniquement ceux tirés ou directement dérivés des extraits, "
+    "ne jamais inventer d'API, de fonction ni de syntaxe. Définitions : "
+    "reprends exactement la terminologie des extraits, ne jamais inventer "
+    "de terme technique. En cas d'incertitude ou d'information absente "
+    "des extraits, signale-le par « selon les extraits » plutôt que "
+    "d'affirmer. Réponds strictement en français."
 )
 
 
 def _build_lesson_prompts(
-    kind: str, notion: str, excerpts: list[str], question: str | None = None
+    kind: str,
+    notion: str,
+    excerpts: list[str],
+    question: str | None = None,
+    code_examples: bool | None = None,
 ) -> tuple[str, str]:
     """Strict French prompts for lesson generation (free text, never JSON).
 
@@ -263,6 +312,11 @@ def _build_lesson_prompts(
     answer to the learner's ``question``, 100–200 words). The model must
     stay grounded in the provided excerpts and never cite technical
     identifiers.
+
+    ``code_examples`` forces (True) or suppresses (False) the ```python
+    code section of ``lesson_course``; None (default) auto-detects via
+    :func:`_notion_wants_code` — computing notions get code, literary
+    notions get written step-by-step examples with no code.
 
     RAG off (no usable excerpt — e.g. ``_filtered_chunks`` returns []) : a
     dedicated variant per kind teaches from the model's own knowledge, in
@@ -275,6 +329,19 @@ def _build_lesson_prompts(
     src = "\n".join(f"- {e}" for e in excerpts[:6] if str(e).strip())
     if not src:
         src = "- (aucun extrait indexé)"
+    if code_examples is None:
+        code_examples = _notion_wants_code(notion, excerpts)
+    if code_examples:
+        code_item = (
+            "3. Exemples de code en blocs ```python (syntaxe valide, "
+            "bibliothèques standard uniquement, exécutables sans "
+            "privilèges admin). "
+        )
+    else:
+        code_item = (
+            "3. Exemples rédigés pas-à-pas (situations concrètes, "
+            "sans code). "
+        )
     if not has_excerpts:
         # RAG off : enseigner depuis les connaissances propres du modèle.
         # Mêmes contraintes de longueur/structure, jamais un mot sur les
@@ -325,8 +392,8 @@ def _build_lesson_prompts(
                 "1. Titre du cours puis « Objectif du cours » (1-2 phrases). "
                 "2. Sections numérotées (1., 1.1, 1.2, …) : définitions, "
                 "explications, exemples détaillés. "
-                "3. Exemples de code en blocs ```python (syntaxe valide). "
-                "4. Tableau « Points clés à retenir ». "
+                + code_item
+                + "4. Tableau « Points clés à retenir ». "
                 "5. « Cas d'usage concrets » (Cas 1, Cas 2, …). "
                 "6. « Erreurs fréquentes à éviter », chaque item préfixé ❌. "
                 "7. « Conclusion ». "
@@ -377,8 +444,8 @@ def _build_lesson_prompts(
             "1. Titre du cours puis « Objectif du cours » (1-2 phrases). "
             "2. Sections numérotées (1., 1.1, 1.2, …) : définitions, "
             "explications, exemples détaillés. "
-            "3. Exemples de code en blocs ```python (syntaxe valide). "
-            "4. Tableau « Points clés à retenir ». "
+            + code_item
+            + "4. Tableau « Points clés à retenir ». "
             "5. « Cas d'usage concrets » (Cas 1, Cas 2, …). "
             "6. « Erreurs fréquentes à éviter », chaque item préfixé ❌. "
             "7. « Conclusion ». "
