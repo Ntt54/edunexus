@@ -45,6 +45,20 @@ def test_rename_empty_400(tmp_path: Path):
         assert r.status_code == 400
 
 
+def test_rename_too_long_400_with_length_message(tmp_path: Path):
+    """T032: >64 chars must 400 with an exploitable length message (not 'Nom déjà utilisé')."""
+    store = LibraryStore(tmp_path / "config")
+    s = store.create_subject("Non classé")
+    client = _client(tmp_path)
+    with client:
+        r = client.patch(f"/api/tutor/subjects/{s.id}", json={"name": "x" * 65})
+        assert r.status_code == 400, r.text
+        assert "64" in r.json()["detail"]
+        assert "déjà utilisé" not in r.json()["detail"]
+        # name unchanged
+        assert store.get_subject(s.id).name == "Non classé"
+
+
 def test_delete_non_classe_with_fallback(tmp_path: Path):
     store = LibraryStore(tmp_path / "config")
     s1 = store.create_subject("Non classé")

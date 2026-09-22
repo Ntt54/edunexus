@@ -14,9 +14,11 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
+from src.ollama_tutor.client import OllamaClient
 from src.ollama_tutor.tutor import lesson_discussion as ld_module
 from src.ollama_tutor.tutor.lesson_discussion import LessonDiscussionService
 from src.ollama_tutor.tutor.service import TutorService
@@ -70,9 +72,27 @@ async def _collect(gen):
     return [event async for event in gen]
 
 
+def _stub_default_model_catalog(monkeypatch) -> None:
+    """Stub offline du catalogue Ollama avec le modèle par défaut.
+
+    Adaptation SIGNALÉE au pré-vol fail-fast (Constitution VI, obligatoire
+    en tête de stream_course) : les tests ci-dessous mockent le streamer
+    (backend contourné) mais utilisent un vrai TutorService — sans ce stub,
+    le démon local (catalogue réel SANS gemma4:e2b) ferait échouer fail-fast
+    AVANT le streamer mocké. Environnement sans démon : catalogue vide de
+    toute façon (skip offline-first). ASSERTIONS DES TESTS INCHANGÉES.
+    """
+
+    async def _tags(self):
+        return [SimpleNamespace(name="gemma4:e2b")]
+
+    monkeypatch.setattr(OllamaClient, "list_models", _tags)
+
+
 def test_stream_deltas_done_and_persisted(tmp_path: Path, monkeypatch) -> None:
     config_dir, _store, step = _seed(tmp_path)
     monkeypatch.setattr(TutorService, "stream_lesson_text", _ok_stream)
+    _stub_default_model_catalog(monkeypatch)
     with TestClient(create_app(config_dir=config_dir)) as client:
         disc_id = _discuss(client, step.id)
         r = client.get(
@@ -94,6 +114,7 @@ def test_stream_deltas_done_and_persisted(tmp_path: Path, monkeypatch) -> None:
 def test_stream_error_event_without_persistence(tmp_path: Path, monkeypatch) -> None:
     config_dir, _store, step = _seed(tmp_path)
     monkeypatch.setattr(TutorService, "stream_lesson_text", _failing_stream)
+    _stub_default_model_catalog(monkeypatch)
     with TestClient(create_app(config_dir=config_dir)) as client:
         disc_id = _discuss(client, step.id)
         r = client.get(
@@ -143,6 +164,7 @@ def test_stream_stall_timeout_error_event(tmp_path: Path, monkeypatch) -> None:
     config_dir, _store, step = _seed(tmp_path)
     monkeypatch.setattr(TutorService, "stream_lesson_text", _hanging_stream)
     monkeypatch.setattr(ld_module, "LESSON_STREAM_TIMEOUT_S", 0.05)
+    _stub_default_model_catalog(monkeypatch)
     with TestClient(create_app(config_dir=config_dir)) as client:
         disc_id = _discuss(client, step.id)
         r = client.get(

@@ -175,3 +175,52 @@ def test_learners_filtered_validation_and_switch_coherence(tmp_path: Path):
             assert {l["id"] for l in r_py.json()["learners"]} == {alice.id}
             r_java = client.get("/api/tutor/learners", params={"subject_id": s_java.id})
             assert {l["id"] for l in r_java.json()["learners"]} == {bob.id}
+
+
+def test_learner_create_bound_to_subject_visible_immediately(tmp_path: Path):
+    """T031/FR-005/US3-AC1: POST ?subject_id= binds the new learner so it is
+    immediately visible in the filtered list (before any path/discussion)."""
+    store = LibraryStore(tmp_path / "config")
+    s_python = store.create_subject("Python")
+    s_java = store.create_subject("java")
+
+    client = _client(tmp_path)
+    with client:
+        # Create Alice bound to java: visible in java at once, invisible in Python
+        r_alice = client.post(
+            "/api/tutor/learners",
+            params={"subject_id": s_java.id},
+            json={"name": "Alice"},
+        )
+        assert r_alice.status_code == 200, r_alice.text
+        alice_id = r_alice.json()["id"]
+
+        r_java = client.get("/api/tutor/learners", params={"subject_id": s_java.id})
+        assert alice_id in {l["id"] for l in r_java.json()["learners"]}
+        r_py = client.get("/api/tutor/learners", params={"subject_id": s_python.id})
+        assert alice_id not in {l["id"] for l in r_py.json()["learners"]}
+
+        # Reload-equivalent: a fresh GET still shows her (membership persisted)
+        r_java2 = client.get("/api/tutor/learners", params={"subject_id": s_java.id})
+        assert alice_id in {l["id"] for l in r_java2.json()["learners"]}
+
+        # Global creation (compat): not visible in filtered lists until activity
+        r_bob = client.post("/api/tutor/learners", json={"name": "Bob"})
+        assert r_bob.status_code == 200, r_bob.text
+        bob_id = r_bob.json()["id"]
+        assert bob_id not in {
+            l["id"]
+            for l in client.get(
+                "/api/tutor/learners", params={"subject_id": s_java.id}
+            ).json()["learners"]
+        }
+
+        # Validation: empty subject_id -> 400, unknown -> 404
+        r_empty = client.post(
+            "/api/tutor/learners", params={"subject_id": ""}, json={"name": "Zoe"}
+        )
+        assert r_empty.status_code == 400
+        r_unknown = client.post(
+            "/api/tutor/learners", params={"subject_id": "nope"}, json={"name": "Zoe"}
+        )
+        assert r_unknown.status_code == 404

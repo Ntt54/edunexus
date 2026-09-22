@@ -273,6 +273,78 @@ def validate_lesson_codeblocks(
     return {"blocks": results, "checked_at": _now_iso()}
 
 
+#: Actionable remedy shown with every lesson generation failure.
+_LLM_RETRY_HINT = (
+    "Réessayez plus tard ou choisissez un modèle local (Ollama) "
+    "dans Réglages — la bascule est automatique."
+)
+
+#: HTTP status embedded in ``OpenAIClientError`` messages
+#: (« OpenAI API error 401: … » — the exception carries no status attr).
+_API_ERROR_STATUS_RE = re.compile(r"\bAPI error (\d{3})\b")
+
+
+def _chain(exc: BaseException) -> list[BaseException]:
+    """Exception chain (cause/context), outermost first, cycle-safe."""
+    out: list[BaseException] = []
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        out.append(cur)
+        nxt = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+        cur = nxt if isinstance(nxt, BaseException) else None
+    return out
+
+
+def _code_for_status(status: int) -> str | None:
+    """Stable code for an HTTP status (None = no opinion)."""
+    if status == 401 or status == 404:
+        return "model_unknown"  # bad key / model absent from catalog
+    if status == 408 or 500 <= status <= 599:
+        return "upstream_timeout"  # gateway-side failure, retry later
+    if 400 <= status <= 499:
+        return "generic"
+    return None
+
+
+def _classify_llm_error(exc: BaseException) -> str:
+    """Stable error code for an LLM failure (never raises).
+
+    Walks the chain root-cause first: typed HTTP status (``.status`` —
+    ``SyncChatHTTPError``/``OllamaAPIError``), embedded status
+    (``OpenAIClientError`` carries none — « OpenAI API error 401… »),
+    transport errors by type name (``ConnectError``) or message (« Cannot
+    connect… », « timed out… » — no hard httpx import), router
+    « Modèle inconnu ». Falls back to ``generic``.
+    """
+    for err in reversed(_chain(exc)):
+        status = getattr(err, "status", None)
+        if isinstance(status, int):
+            code = _code_for_status(status)
+            if code is not None:
+                return code
+        name = type(err).__name__
+        msg = str(err) or ""
+        low = msg.lower()
+        m = _API_ERROR_STATUS_RE.search(msg)
+        if m:
+            code = _code_for_status(int(m.group(1)))
+            if code is not None:
+                return code
+        if name == "LLMRoutingError" and "inconnu" in low:
+            return "model_unknown"
+        if name == "ConnectError" or "cannot connect" in low:
+            return "provider_unreachable"
+        if (
+            name in ("TimeoutError", "TimeoutException", "ConnectTimeout",
+                     "ReadTimeout", "WriteTimeout", "PoolTimeout")
+            or "timed out" in low
+        ):
+            return "upstream_timeout"
+    return "generic"
+
+
 class LessonDiscussionService:
     """Service for lesson-centred discussions (Feature 009, US1)."""
 
@@ -389,6 +461,99 @@ class LessonDiscussionService:
             return name or None
         except Exception:
             return None
+
+    def _llm_provider(self) -> str | None:
+        """Active LLM provider name behind the tutor_service hook.
+
+        Reads ``tutor_service.config.llm_provider``. ``None`` when
+        unknown (e.g. no tutor_service) — error events carry nulls
+        rather than invented names. Never raises.
+        """
+        try:
+            cfg = getattr(self.tutor_service, "config", None)
+            name = getattr(cfg, "llm_provider", None)
+            name = str(name).strip() if name is not None else ""
+            return name or None
+        except Exception:
+            return None
+
+    def _lesson_error_event(
+        self, code: str, message: str, hint: str | None = None
+    ) -> dict[str, Any]:
+        """Structured SSE error event (Constitution VI — observability).
+
+        ``error`` keeps the human-readable FR message (current frontend
+        compat); ``code`` is stable for UI branching; ``provider``/``model``
+        name the failing backend (null when unknown); ``hint`` is the
+        actionable remedy. Never raises.
+        """
+        return {
+            "error": message,
+            "code": code,
+            "provider": self._llm_provider(),
+            "model": self._llm_model(),
+            "hint": hint if hint else _LLM_RETRY_HINT,
+        }
+
+    def _generation_failure_message(self, code: str, step: str, exc: Any) -> str:
+        """FR message naming provider + model + step for ``code``.
+
+        ``step`` is « cours » or « réponse ». ``generic`` appends the raw
+        technical detail (existing contract: the raw text stays visible).
+        Never raises.
+        """
+        try:
+            provider = self._llm_provider() or "le fournisseur configuré"
+            model = self._llm_model() or "le modèle configuré"
+            if code == "upstream_empty":
+                return (
+                    f"Le fournisseur « {provider} » a coupé la connexion "
+                    f"sans répondre pour le modèle « {model} » pendant la "
+                    f"génération {step} (0 contenu reçu)."
+                )
+            if code == "upstream_timeout":
+                return (
+                    f"Le fournisseur « {provider} » n'a pas répondu à temps "
+                    f"pour le modèle « {model} » pendant la génération "
+                    f"{step} (délai dépassé)."
+                )
+            if code == "model_unknown":
+                return (
+                    f"Modèle « {model} » inconnu du fournisseur « {provider} » "
+                    f"pendant la génération {step}. Choisissez un modèle de "
+                    f"la liste Réglages — la bascule est automatique."
+                )
+            if code == "provider_unreachable":
+                return (
+                    f"Fournisseur « {provider} » injoignable pour le modèle "
+                    f"« {model} » pendant la génération {step} (connexion "
+                    f"impossible)."
+                )
+            detail = str(exc).strip() if exc is not None else ""
+            return (
+                f"La génération {step} a échoué (fournisseur "
+                f"« {provider} », modèle « {model} »)."
+                + (f" Détail technique : {detail}" if detail else "")
+            )
+        except Exception:
+            return f"La génération {step} a échoué."
+
+    def _preflight_error_event(self, exc: Any) -> dict[str, Any]:
+        """Structured event for a failed lesson pre-flight (duck-typed).
+
+        Uses the preflight's own ``code``/message/``hint`` when present
+        (``LessonPreflightError``), else maps like any LLM failure. Never
+        raises, never imports the service layer (no cycle).
+        """
+        try:
+            code = getattr(exc, "code", None) or _classify_llm_error(exc)
+            message = str(exc).strip()
+            hint = getattr(exc, "hint", None)
+            if not message:
+                message = self._generation_failure_message(code, "du cours", exc)
+            return self._lesson_error_event(code, message, hint)
+        except Exception:
+            return {"error": str(exc) or "Génération impossible"}
 
     def _sources_footer(self, chunks: list[dict[str, Any]]) -> str:
         """Readable « Sources : … » footer (book TITLES, never raw ids).
@@ -562,6 +727,22 @@ class LessonDiscussionService:
         chunks = self._filtered_chunks(disc.subject_id, keywords)
         sources = self._sources_from_chunks(chunks)
         notion = self._resolve_notion(disc)
+        # Fail-fast pre-flight (Constitution VI) — sync generator, never
+        # touches asyncio: only a sync-capable preflight runs here; an
+        # async one (TutorService.preflight_lesson_model) is covered by
+        # stream_course. Missing method (service=None, fakes) ⇒ skip,
+        # current behavior unchanged.
+        _preflight = (
+            getattr(self.tutor_service, "preflight_lesson_model", None)
+            if self.tutor_service is not None
+            else None
+        )
+        if callable(_preflight) and not asyncio.iscoroutinefunction(_preflight):
+            try:
+                _preflight()
+            except Exception as exc:
+                yield self._preflight_error_event(exc)
+                return
         self.store.add_lesson_message(discussion_id, "user", question, sources=[])
         hook: Any = (
             getattr(self.tutor_service, "generate_lesson_text_stream", None)
@@ -569,7 +750,9 @@ class LessonDiscussionService:
             else None
         )
         if not callable(hook):
-            yield {"error": "LLM indisponible pour la réponse"}
+            yield self._lesson_error_event(
+                "llm_unavailable", "LLM indisponible pour la réponse"
+            )
             return
         excerpts = [(c.get("text") or "")[:500] for c in chunks[:6]]
         parts: list[str] = []
@@ -585,11 +768,17 @@ class LessonDiscussionService:
                         parts.append(text)
                         yield {"delta": text}
         except Exception as exc:
-            yield {"error": str(exc) or "Génération de la réponse impossible"}
+            code = _classify_llm_error(exc)
+            yield self._lesson_error_event(
+                code, self._generation_failure_message(code, "de la réponse", exc)
+            )
             return
         answer = "".join(parts)
         if not answer.strip():
-            yield {"error": "Réponse vide du modèle"}
+            yield self._lesson_error_event(
+                "upstream_empty",
+                self._generation_failure_message("upstream_empty", "de la réponse", None),
+            )
             return
         self.store.add_lesson_message(discussion_id, "assistant", answer, sources=sources)
         yield {
@@ -674,16 +863,37 @@ class LessonDiscussionService:
         sources = self._sources_from_chunks(chunks)
         confidence = 0.85 if sources else 0.0
         notion = self._resolve_notion(disc)
+        # Fail-fast pre-flight (Constitution VI) : unknown model or
+        # unreachable provider surfaces NOW with code model_unknown /
+        # provider_unreachable — no 91 s of silence. Missing method
+        # (service=None, fakes, offline paths) ⇒ skip, current behavior
+        # unchanged (llm_unavailable below, never blocks offline fallback).
+        _preflight = (
+            getattr(self.tutor_service, "preflight_lesson_model", None)
+            if self.tutor_service is not None
+            else None
+        )
+        if callable(_preflight):
+            try:
+                await _preflight()
+            except Exception as exc:
+                yield self._preflight_error_event(exc)
+                return
         streamer = (
             getattr(self.tutor_service, "stream_lesson_text", None)
             if self.tutor_service is not None
             else None
         )
         if not callable(streamer):
-            yield {"error": "LLM indisponible pour la génération du cours"}
+            yield self._lesson_error_event(
+                "llm_unavailable", "LLM indisponible pour la génération du cours"
+            )
             return
         excerpts = [(c.get("text") or "")[:500] for c in chunks[:6]]
         parts: list[str] = []
+        got_any = False  # trace every received delta: clean EOF with 0
+        # content and a truly-empty answer are observably identical
+        # gateway-side — both yield upstream_empty with the same message.
         try:
             it: Any = streamer("lesson_course", notion, excerpts)
             while True:
@@ -694,19 +904,30 @@ class LessonDiscussionService:
                 except StopAsyncIteration:
                     break
                 if delta:
+                    got_any = True
                     parts.append(delta)
                     yield {"delta": delta}
         except asyncio.TimeoutError:
-            yield {
-                "error": f"Délai de génération dépassé ({int(LESSON_STREAM_TIMEOUT_S)} s)"
-            }
+            yield self._lesson_error_event(
+                "upstream_timeout",
+                f"Le fournisseur « {self._llm_provider() or 'le fournisseur configuré'} » "
+                f"n'a pas répondu à temps pour le modèle "
+                f"« {self._llm_model() or 'le modèle configuré'} » pendant la "
+                f"génération du cours (délai {int(LESSON_STREAM_TIMEOUT_S)} s).",
+            )
             return
         except Exception as exc:
-            yield {"error": str(exc) or "Génération du cours impossible"}
+            code = _classify_llm_error(exc)
+            yield self._lesson_error_event(
+                code, self._generation_failure_message(code, "du cours", exc)
+            )
             return
         content = "".join(parts)
         if not content.strip():
-            yield {"error": "Réponse vide du modèle"}
+            yield self._lesson_error_event(
+                "upstream_empty",
+                self._generation_failure_message("upstream_empty", "du cours", None),
+            )
             return
         self.store.add_generated_content(
             discussion_id, "lesson_course", content, sources=sources, confidence=confidence,

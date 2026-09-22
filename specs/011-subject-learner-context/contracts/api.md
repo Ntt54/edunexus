@@ -36,6 +36,8 @@ Filtre par matière dérivé (Q3=B).
 
 ## POST /api/tutor/learners
 Create learner pour matière active (FR-005).
+- `?subject_id=` optionnel : lie le nouvel apprenant à la matière (visible aussitôt en liste filtrée, 011/T031) ; sans lui la création reste globale (compat).
+- **400** `Nom requis` / `Nom déjà utilisé` ; **404** si `subject_id` inconnu.
 
 ## POST /api/tutor/learners/{id}/activate + DELETE
 

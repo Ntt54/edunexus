@@ -25,7 +25,7 @@ class LearnerService:
     # CRUD
     # ------------------------------------------------------------------
 
-    def create(self, name: str, avatar: str = "") -> dict[str, Any]:
+    def create(self, name: str, avatar: str = "", subject_id: str | None = None) -> dict[str, Any]:
         name = name.strip()
         if not name:
             raise ValueError("Nom requis")
@@ -35,6 +35,10 @@ class LearnerService:
         if any(l.name.lower() == name.lower() for l in self.store.list_learners()):
             raise ValueError("Nom déjà utilisé")
         learner = self.store.create_learner(name, avatar=avatar)
+        if subject_id:
+            # Bind to the active subject so the learner is immediately visible
+            # in the filtered list (011/T031, FR-005). KeyError if unknown.
+            self.store.add_learner_to_subject(subject_id, learner.id)
         return learner.to_dict()
 
     def list(self) -> dict[str, Any]:

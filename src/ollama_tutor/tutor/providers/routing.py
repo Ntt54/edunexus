@@ -184,7 +184,13 @@ class RoutingLLMClient:
     async def chat_stream(
         self, messages: Any, model: Any = None, **kwargs: Any
     ):
-        """Yield backend events for *model*, with fallback on failure."""
+        """Yield backend events for *model*, with fallback on failure.
+
+        A failure BEFORE any event falls back to the other configured
+        backend; once events flowed, the error propagates (partial content
+        already yielded — the caller emits an explicit error event, never
+        silent). Same rule as :meth:`iter_chat_tokens` (sync twin).
+        """
         await self.refresh_models()
         try:
             primary, effective, backend = self.client_for(model)
@@ -206,14 +212,22 @@ class RoutingLLMClient:
             else:
                 raise LLMRoutingError("Aucun backend LLM configuré")
         last_exc: Exception | None = None
+        yielded_any = False
         for client, eff_model, be in candidates:
             try:
                 async for ev in client.chat_stream(messages, eff_model, **kwargs):
+                    yielded_any = True
                     yield ev
                 self.mark_healthy(be)
                 return
             except Exception as exc:
                 self.mark_unhealthy(be)
+                if yielded_any:
+                    # Partial content already streamed: never fall back
+                    # silently onto a second backend mid-answer (hot-reload
+                    # close, dropped connection, ...). The caller surfaces
+                    # an explicit error event instead.
+                    raise
                 last_exc = exc
                 logger.warning("LLM route %s failed for %r: %s", be, model, exc)
         raise LLMRoutingError(

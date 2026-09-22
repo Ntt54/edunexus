@@ -175,7 +175,15 @@ def test_ask_notion_rag_off_no_sources_and_no_chunk_in_prompt(
     result = lesson.ask_notion(disc.id, "comment déclarer une variable ?", "alice")
     assert result["sources"] == []
     joined = " ".join(m.get("content", "") for m in captured["payload"]["messages"])
-    assert "aucun extrait indexé" in joined
+    # Nouveau contrat RAG off (_build_lesson_prompts sans extraits) : le
+    # prompt n'évoque NI extraits NI sources (l'ancien « aucun extrait
+    # indexé » faisait écrire au modèle « selon les extraits, aucune
+    # définition n'est fournie… » au lieu d'enseigner) ; il ordonne
+    # d'enseigner et ne contient aucun texte de chunk.
+    low = joined.lower()
+    assert "extrait" not in low
+    assert "source" not in low
+    assert "enseigne" in low
     assert "Les variables en Java" not in joined
     assert "Apprenez a programmer en Java" not in joined
 
@@ -196,7 +204,12 @@ def test_generate_course_rag_off_sources_empty_no_chunk_in_prompt(
     assert course["confidence"] == 0.0
     assert course["fallback"] is False
     joined = " ".join(m.get("content", "") for m in captured["payload"]["messages"])
-    assert "aucun extrait indexé" in joined
+    # Même contrat RAG off que ask_notion (voir ci-dessus) : ni extraits ni
+    # sources évoqués, directive d'enseignement, aucun texte de chunk.
+    low = joined.lower()
+    assert "extrait" not in low
+    assert "source" not in low
+    assert "enseigne" in low
     assert "Les variables en Java" not in joined
     assert "Apprenez a programmer en Java" not in joined
 

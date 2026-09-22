@@ -35,11 +35,13 @@ class FakeBackend:
         models: list[str] | None = None,
         fail_chat: bool = False,
         fail_list: bool = False,
+        fail_after: int | None = None,
     ) -> None:
         self.tag = tag
         self._models = list(models or [])
         self.fail_chat = fail_chat
         self.fail_list = fail_list
+        self.fail_after = fail_after
         self.calls: list = []
         self.closed = False
 
@@ -52,7 +54,12 @@ class FakeBackend:
         self.calls.append(model)
         if self.fail_chat:
             raise RuntimeError(f"{self.tag} down")
-        yield SimpleNamespace(kind="content", text=f"[{self.tag}:{model}]")
+        if self.fail_after is None:
+            yield SimpleNamespace(kind="content", text=f"[{self.tag}:{model}]")
+            return
+        for i in range(self.fail_after):
+            yield SimpleNamespace(kind="content", text=f"[{self.tag}:{model}#{i}]")
+        raise RuntimeError(f"{self.tag} cut mid-stream")
 
     async def close(self) -> None:
         self.closed = True
@@ -210,3 +217,38 @@ async def test_quiz_and_lessons_follow_routing(tmp_path: Path) -> None:
         [ev async for ev in svc.stream_lesson_text("lesson_summary", "notion", ["extrait"])]
     )
     assert "[cloud:gpt-4o-mini]" in text
+
+
+# ---------------------------------------------------------------------------
+# C1 (revue) : panne mid-stream ⇒ erreur explicite, jamais de mix silencieux.
+# Scénario prod : hot-reload (PUT settings/models) ferme l'ancien client
+# cloud pendant qu'une réponse cloud est en vol ; le routeur async ne doit
+# pas recoller la fin avec l'autre backend sans marqueur.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_partial_yield_failure_propagates_no_silent_mix() -> None:
+    ollama = FakeBackend("ollama", models=["gemma4:e2b-t3"])
+    cloud = FakeBackend("cloud", models=["gpt-4o-mini"], fail_after=1)
+    router = RoutingLLMClient(ollama_client=ollama, cloud_client=cloud)
+    await router.refresh_models()
+    seen: list = []
+    with pytest.raises(Exception):
+        async for ev in router.chat_stream([], "gpt-4o-mini"):
+            seen.append(ev.text)
+    # Préfixe cloud préservé, aucune queue Ollama recollée.
+    assert seen == ["[cloud:gpt-4o-mini#0]"]
+    assert ollama.calls == []
+
+
+@pytest.mark.asyncio
+async def test_prefailure_still_falls_back_to_ollama() -> None:
+    # Garde-fou inverse : une panne AVANT tout chunk conserve le repli.
+    ollama = FakeBackend("ollama", models=["gemma4:e2b-t3"])
+    cloud = FakeBackend("cloud", models=["gpt-4o-mini"], fail_after=0)
+    router = RoutingLLMClient(ollama_client=ollama, cloud_client=cloud)
+    await router.refresh_models()
+    text = await _collect(router.chat_stream([], "gpt-4o-mini"))
+    assert text.startswith("[ollama:")
+    assert cloud.calls == ["gpt-4o-mini"]

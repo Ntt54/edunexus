@@ -51,3 +51,82 @@ edunexus                                  # run the web GUI (http://127.0.0.1:92
 - Feature 005: multi-space UI (36/36 tasks, committed). Feature 006: adaptive learning (47 tests, committed). Feature 007: MVP audit+evolution (95 tasks, 18 phases, committed).
 - Agent mode targets low-spec machines (≤8 GB RAM): stdlib-only agent core, no new runtime deps, bounded loop (default 8 iterations).
 - Throughput parity with `ollama run` is a regression gate — rerun `./benchmark.sh` after touching `client.py` or render paths.
+
+## Web Research & Documentation
+
+When working on this project, do not guess about external libraries, APIs, frameworks, models, protocols, or tools.
+
+### Mandatory Web Research
+
+Use Web research when:
+
+* you do not know the answer with confidence;
+* an external API or library is involved;
+* the behavior of a dependency may depend on its version;
+* documentation, syntax, configuration, or CLI options may have changed;
+* an error involves an external dependency and the cause is unclear;
+* implementing integration with Ollama, OpenAI-compatible APIs, FastAPI, httpx, SQLite, GGUF/llama.cpp, embeddings, rerankers, document parsers, or other external components;
+* evaluating whether a proposed dependency or technology is compatible with this project.
+
+### Before Using an External API
+
+1. Check the installed version in the project.
+2. Search the official documentation for that version.
+3. Prefer official documentation and official GitHub repositories.
+4. Verify the API or behavior before implementing it.
+5. Do not invent undocumented parameters, methods, endpoints, or configuration options.
+
+### Source Priority
+
+Prefer sources in this order:
+
+1. Official documentation.
+2. Official GitHub repository / source code.
+3. Official release notes / changelog.
+4. Reliable technical documentation.
+5. Community sources such as Stack Overflow only when official documentation is insufficient.
+
+### Version Awareness
+
+Always consider the version actually installed in this project.
+
+Do not copy an API example from a newer or older version without verifying compatibility.
+
+When relevant, inspect:
+
+```bash
+python --version
+venv/bin/pip show <package>
+```
+
+and/or:
+
+```bash
+venv/bin/pip freeze
+```
+
+### Research Before Guessing
+
+If you are uncertain, research first.
+
+Do not compensate for uncertainty by writing speculative code.
+
+If Web research cannot establish a reliable answer, state the uncertainty explicitly and prefer a solution that can be verified locally.
+
+### Local Verification
+
+Web research does not replace testing.
+
+After implementing a solution based on external documentation:
+
+1. Run the relevant tests.
+2. Add or update tests when appropriate.
+3. Verify that the implementation respects the project's architecture and Constitution.
+4. For dependency/API changes, verify that existing offline tests remain offline.
+
+### Avoid Unnecessary Research
+
+Do not search the Web for stable Python language features, standard-library behavior, or project-specific information already documented in this repository.
+
+Repository code, tests, specs, `.specify/`, `pyproject.toml`, and this `AGENTS.md` are the primary sources for project-specific behavior.
+

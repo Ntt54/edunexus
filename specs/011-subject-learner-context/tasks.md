@@ -188,3 +188,12 @@ Merge after each checkpoint, run `quickstart.md` Sc 1-4.
 - Each story independently testable via quickstart Scenarios 1-4
 - 400 "Nom déjà utilisé" message i18n exists (FR/EN) — reuse
 - No new runtime dep; confirm modale reuses existing component
+
+---
+
+## Phase 7: Convergence
+
+**Source**: `/speckit.converge` assessment 2026-09-16 — code vs spec.md/plan.md/tasks.md + constitution. Full suite green (1178 passed), 26/26 feature-011 tests pass. Two residual gaps below; all other backend PARTIALs reviewed and dismissed as intentional Principle-II compat (optional `subject_id` fallback, legacy PUT 409, last-subject delete shape, NULL-`learner_id` legacy paths are same-subject, learner-delete fallback handled frontend-side in `LearnersView.vue:124-131`).
+
+- [X] T031 Make a newly created learner appear immediately in the filtered #/apprenants list for the active subject (with success confirmation) per FR-005 / US3-AC1 (partial)
+- [X] T032 Return an exploitable length-exceeded message instead of "Nom déjà utilisé" when renaming a subject beyond 64 chars per FR-008 (partial)

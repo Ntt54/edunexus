@@ -228,3 +228,157 @@ def test_key_change_rebuilds(tmp_path: Path, app_client, monkeypatch) -> None:
     assert svc._llm_client.cloud_client is not first_cloud
     assert isinstance(svc._llm_client.cloud_client, FakeLLMClient)
     assert first_cloud.closed is True
+
+
+# ---------------------------------------------------------------------------
+# PUT /api/tutor/models : la sélection d'un modèle auto-bascule le provider
+# (« avoir les deux fournisseurs »). 100 % offline : listages mockés via
+# les seams existants (OllamaClient de module + sonde OpenAICompatProvider),
+# rebuild observé via le seam _build_tutor_client.
+# ---------------------------------------------------------------------------
+
+LOCAL_MODELS = ["hf.co/local-model", "gemma3:1b"]
+CLOUD_MODELS = ["cloud-model-x"]
+
+
+class _ListingOllama(web_server.OllamaClient):
+    """OllamaClient mocké : listage scripté, jamais de réseau."""
+
+    NAMES: list = []
+
+    def __init__(self, *a, **k):
+        pass
+
+    async def list_models(self) -> list:
+        from types import SimpleNamespace as _NS
+
+        return [_NS(name=n) for n in self.NAMES]
+
+    async def close(self):
+        pass
+
+
+class _ListingProbe:
+    """Sonde OpenAICompatProvider mockée : listage scripté, jamais de réseau."""
+
+    NAMES: list = []
+
+    def __init__(self, base_url=None, api_key=None):
+        self.base_url = base_url
+        self.api_key = api_key
+
+    async def list_models(self):
+        from types import SimpleNamespace as _NS
+
+        return [_NS(name=n) for n in self.NAMES]
+
+    async def close(self):
+        pass
+
+
+def _mock_listings(monkeypatch, ollama_names, cloud_names) -> None:
+    _ListingOllama.NAMES = list(ollama_names)
+    _ListingProbe.NAMES = list(cloud_names)
+    monkeypatch.setattr(web_server, "OllamaClient", _ListingOllama)
+    import src.ollama_tutor.tutor.providers.openai_compat as compat_mod
+
+    monkeypatch.setattr(compat_mod, "OpenAICompatProvider", _ListingProbe)
+
+
+def _provider_of(c) -> str:
+    return c.get("/api/tutor/settings").json()["tutor"]["llm_provider"]
+
+
+def _switch_to_openai(c) -> None:
+    r = c.put(
+        "/api/tutor/settings",
+        json={
+            "llm_provider": "openai",
+            "llm_base_url": "https://api.openai.com/v1",
+            "llm_api_key": "sk-test",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert _provider_of(c) == "openai"
+
+
+def test_models_put_local_model_switches_openai_to_ollama(
+    tmp_path: Path, app_client, monkeypatch
+) -> None:
+    """Le bug : PUT {"llm": <modèle local>} sur provider openai ⇒ ollama."""
+    app, c = app_client
+    svc = _service(app)
+    _mock_listings(monkeypatch, LOCAL_MODELS, CLOUD_MODELS)
+    calls: list = []
+    _mock_builder(monkeypatch, calls, tag="openai-mock")
+    _switch_to_openai(c)
+    old_llm = svc._llm_client
+    calls.clear()
+
+    r = c.put("/api/tutor/models", json={"llm": "hf.co/local-model"})
+    assert r.status_code == 200, r.text
+    assert r.json()["current"]["llm"] == "hf.co/local-model"
+    assert _provider_of(c) == "ollama", "auto-bascule vers la source du modèle"
+    assert len(calls) == 1 and calls[0][0] == "ollama", "rebuild à chaud"
+    assert svc._llm_client is not old_llm, "service rebranché"
+
+
+def test_models_put_cloud_model_resolves_openai(
+    tmp_path: Path, app_client, monkeypatch
+) -> None:
+    """Modèle cloud (listé quand provider==openai) ⇒ provider openai confirmé.
+
+    Triplet inchangé ⇒ aucune reconstruction (helper partagé).
+    """
+    app, c = app_client
+    _mock_listings(monkeypatch, LOCAL_MODELS, CLOUD_MODELS)
+    calls: list = []
+    _mock_builder(monkeypatch, calls, tag="openai-mock")
+    _switch_to_openai(c)  # rend le cloud visible, comme la dropdown UI
+    calls.clear()
+
+    r = c.put("/api/tutor/models", json={"llm": "cloud-model-x"})
+    assert r.status_code == 200, r.text
+    assert r.json()["current"]["llm"] == "cloud-model-x"
+    assert _provider_of(c) == "openai"
+    assert calls == [], "triplet inchangé ⇒ pas de rebuild"
+
+
+def test_models_put_duplicate_name_prefers_ollama(
+    tmp_path: Path, app_client, monkeypatch
+) -> None:
+    """Doublon dans les deux listages ⇒ priorité Ollama (comme le GET)."""
+    app, c = app_client
+    svc = _service(app)
+    _mock_listings(monkeypatch, ["dup-model"], ["dup-model"])
+    calls: list = []
+    _mock_builder(monkeypatch, calls, tag="openai-mock")
+    _switch_to_openai(c)
+    old_llm = svc._llm_client
+    calls.clear()
+
+    r = c.put("/api/tutor/models", json={"llm": "dup-model"})
+    assert r.status_code == 200, r.text
+    assert _provider_of(c) == "ollama"
+    assert len(calls) == 1 and calls[0][0] == "ollama"
+    assert svc._llm_client is not old_llm
+
+
+def test_models_put_unknown_model_keeps_provider_persists_name(
+    tmp_path: Path, app_client, monkeypatch
+) -> None:
+    """Listages vides/offline : provider inchangé, nom persisté, pas de 400."""
+    app, c = app_client
+    svc = _service(app)
+    _mock_listings(monkeypatch, [], [])
+    calls: list = []
+    _mock_builder(monkeypatch, calls)
+    old_llm = svc._llm_client
+    assert _provider_of(c) == "ollama"  # défaut frais
+
+    r = c.put("/api/tutor/models", json={"llm": "mystery-model"})
+    assert r.status_code == 200, r.text
+    assert r.json()["current"]["llm"] == "mystery-model"
+    assert _provider_of(c) == "ollama", "modèle inconnu ⇒ provider inchangé"
+    assert calls == [], "aucune reconstruction"
+    assert svc._llm_client is old_llm
