@@ -1,0 +1,18 @@
+{
+  "id": "maths-3e-equations-01",
+  "subject": "maths",
+  "title": "Résolution d'équation premier degré",
+  "lesson": "fr-3e-equations",
+  "submission": "2x+3=7 => x=2,5",
+  "mock_feedback": "Question : si tu soustrais 3 des deux côtés, que reste-t-il ? Indice : isole le terme en x d'abord.",
+  "must_include": [
+    "isole",
+    "Indice"
+  ],
+  "must_not_include": [
+    "x=2",
+    "solution complète"
+  ],
+  "hint_first": true,
+  "forbid_full_solution": true
+}

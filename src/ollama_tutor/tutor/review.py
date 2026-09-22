@@ -25,6 +25,52 @@ LADDER_DAYS = [1, 2, 5, 12, 30]
 # Beyond this, the UI proposes recompaction instead of piling up reviews.
 STALE_PLAN_DAYS = 7
 
+# 013 Vague 1 Socle — forgetting forecast read-model (I2, FR-004)
+# Seuils fixes : overdue (seuil déjà passé), urgent ≤3j, warning ≤7j, ok au-delà.
+RETENTION_THRESHOLD = 0.90
+FORECAST_URGENT_DAYS = 3
+FORECAST_WARNING_DAYS = 7
+_FORECAST_ORDER = "overdue-first"
+_URGENCY_ORDER = {"overdue": 0, "urgent": 1, "warning": 2, "ok": 3}
+
+
+def _total_days_to_threshold(
+    stability: float, threshold: float = RETENTION_THRESHOLD
+) -> float:
+    """Jours depuis last_review jusqu'à chute sous *threshold* via fsrs.
+
+    Formule FSRS : R(t) = (1 + t/(9·decay·S))^-decay  =>  t = 9·decay·S·(threshold^(-1/decay)-1)
+    """
+    if stability <= 0:
+        return 0.0
+    if threshold <= 0 or threshold >= 1:
+        return 0.0
+    decay = _fsrs.DEFAULT_W[20] if len(_fsrs.DEFAULT_W) > 20 else 1.0
+    try:
+        return 9 * decay * stability * (pow(threshold, -1.0 / decay) - 1)
+    except (ValueError, OverflowError, ZeroDivisionError):
+        return 0.0
+
+
+def _forecast_urgency(days_remaining: float, retrievability: float | None = None) -> str:
+    """Urgence fixe 013 (overdue/urgent≤3j/warning≤7j/ok)."""
+    eps = 1e-7
+    if days_remaining <= eps:
+        return "overdue"
+    if days_remaining <= FORECAST_URGENT_DAYS + eps:
+        return "urgent"
+    if days_remaining <= FORECAST_WARNING_DAYS + eps:
+        return "warning"
+    return "ok"
+
+
+def _as_utc_forecast(moment: datetime | None) -> datetime:
+    if moment is None:
+        return datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=timezone.utc)
+    return moment
+
 
 def overdue_days(next_due_iso: str | None, today: date | None = None) -> int:
     """Days a review is overdue (0 when due today or in the future)."""
@@ -348,11 +394,100 @@ class ReviewScheduler:
         cards = [self._card_from_row(dict(r)) for r in rows]
         return _fsrs.estimate_forgetting_cost(cards, now=now)
 
+    # ------------------------------------------------------------------
+    # 013 Vague 1 — forgetting forecast read-model (I2, FR-004)
+    # Pure math/datetime, réutilise fsrs.retrievability, aucun second moteur,
+    # aucune table. Tri overdue-first puis days_until_threshold croissant.
+    # ------------------------------------------------------------------
+
+    def get_forgetting_queue(
+        self, subject_id: str, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """File par urgence d'oubli — read-model FSRS (I2).
+
+        Projection ``{notion_id, retrievability, days_until_threshold,
+        predicted_drop_date, urgency}`` triée overdue-first puis
+        ``days_until_threshold`` croissant puis ``notion_id`` (déterministe).
+
+        - ``retrievability`` via :func:`tutor.fsrs.retrievability`
+        - ``days_until_threshold`` = ``total_to_threshold - elapsed`` (seuil
+          :data:`RETENTION_THRESHOLD` = 0.90), clampé à 0 pour overdue
+        - ``urgency`` seuils fixes : overdue (≤0), urgent (≤3j),
+          warning (≤7j), ok (>7j)
+        - ``predicted_drop_date`` = ``now + max(remaining,0)`` (ISO date)
+        """
+        self._ensure_fsrs_columns()
+        now_utc = _as_utc_forecast(now)
+        # Flashcards of subject with FSRS state
+        rows = self.store._conn.execute(
+            "SELECT rs.*, f.id AS flashcard_id, f.concept_id AS concept_id "
+            "FROM review_schedule rs "
+            "JOIN flashcards f ON f.id = rs.flashcard_id "
+            "WHERE f.subject_id = ? AND rs.stability > 0 "
+            "AND rs.last_review IS NOT NULL",
+            (subject_id,),
+        ).fetchall()
+        items: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            stability = float(d.get("stability") or 0.0)
+            if stability <= 0:
+                continue
+            last_review = self._parse_moment(d.get("last_review"))
+            if last_review is None:
+                continue
+            elapsed = max((now_utc - _as_utc_forecast(last_review)).total_seconds() / 86400, 0.0)
+            retr = _fsrs.retrievability(elapsed, stability)
+            total = _total_days_to_threshold(stability, RETENTION_THRESHOLD)
+            remaining = total - elapsed
+            # days_until_threshold : clampé à 0, arrondi à 1 décimale si >0
+            # epsilon 1e-7 inclusive ; dut 0.0 patché à 0.1 pour rester urgent
+            if remaining <= 1e-7:
+                days_until: float = 0
+            else:
+                dut = round(float(remaining), 1)
+                if dut == 0 and remaining > 1e-7:
+                    dut = 0.1
+                days_until = float(dut)
+            urgency = _forecast_urgency(remaining, retr)
+            # predicted_drop_date : now + max(remaining,0)
+            drop_date = (now_utc + timedelta(days=max(remaining, 0))).date().isoformat()
+            notion_id = str(d.get("flashcard_id") or d.get("concept_id") or "")
+            items.append(
+                {
+                    "notion_id": notion_id,
+                    "retrievability": float(retr),
+                    "days_until_threshold": days_until,
+                    "predicted_drop_date": drop_date,
+                    "urgency": urgency,
+                    "stability": float(stability),
+                    "elapsed_days": float(round(elapsed, 2)),
+                }
+            )
+        # Tri overdue-first puis days_until croissant puis notion_id (déterministe sur 20 tirages)
+        items.sort(
+            key=lambda it: (
+                _URGENCY_ORDER.get(it["urgency"], 4),
+                float(it["days_until_threshold"]),
+                it["notion_id"],
+            )
+        )
+        return {"items": items, "order": _FORECAST_ORDER}
+
+    # Alias for contract tests that may call forgetting_forecast
+    def forgetting_forecast(
+        self, subject_id: str, now: datetime | None = None
+    ) -> dict[str, Any]:
+        return self.get_forgetting_queue(subject_id, now=now)
+
 
 __all__ = [
     "LADDER_DAYS",
     "MAX_STREAK_INDEX",
     "STALE_PLAN_DAYS",
+    "RETENTION_THRESHOLD",
+    "FORECAST_URGENT_DAYS",
+    "FORECAST_WARNING_DAYS",
     "interval_for_streak",
     "interval_for",
     "next_due_for",

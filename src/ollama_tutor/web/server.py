@@ -1613,9 +1613,36 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
 
     @app.get("/api/tutor/subjects/{subject_id}/adaptation/stability")
     async def tutor_stability_portion(subject_id: str) -> dict[str, Any]:
-        """Stability portion: objectives, main notion, success criterion (FR-019)."""
+        """Stability portion: objectives, main notion, success criterion (FR-019) + forgetting queue (013 I2, FR-004).
+
+        Enrichissement additif : clés existantes ``objective``, ``main_notion``,
+        ``success_criterion`` intactes, plus ``forgetting_queue`` triée
+        overdue-first (seuils fixes overdue/urgent≤3j/warning≤7j/ok) via
+        :meth:`tutor.review.ReviewScheduler.get_forgetting_queue` (read-model
+        pur, réutilise ``fsrs.retrievability``, aucun second moteur).
+        """
+        from datetime import datetime, timezone
+
         from ..tutor.adaptation import AdaptationService
-        return AdaptationService(tutor_store).stability_portion(subject_id)
+
+        base = AdaptationService(tutor_store).stability_portion(subject_id)
+        try:
+            now = datetime.now(timezone.utc)
+            queue = tutor_service.review.get_forgetting_queue(subject_id, now=now)
+        except Exception as exc:
+            _log_error(
+                config,
+                "adaptation-stability",
+                f"forgetting_queue failed: {exc}",
+                traceback.format_exc(),
+            )
+            queue = {"items": [], "order": "overdue-first"}
+        # base may be any dict from adaptation; enrich additively
+        if isinstance(base, dict):
+            base = dict(base)
+            base["forgetting_queue"] = queue
+            return base
+        return {"forgetting_queue": queue, **(base if isinstance(base, dict) else {})}
 
     @app.post("/api/tutor/subjects/{subject_id}/adaptation/recompute")
     async def tutor_recompute_window(subject_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "1.0",
+  "id": "fr-4e-pythagore",
+  "title": "Appliquer le théorème de Pythagore (4e)",
+  "prerequisites": ["fr-5e-racine-carree"],
+  "concepts": ["triangle-rectangle", "hypotenuse", "pythagore"],
+  "exercise": {
+    "prompt": "Écris une fonction `hypotenuse(a, b)` qui retourne la longueur de l'hypoténuse d'un triangle rectangle de côtés a et b.",
+    "starter": "def hypotenuse(a, b):\n    return 0.0",
+    "visible": [
+      {"id": "v1", "input": "hypotenuse(3, 4)", "expected": "5.0"}
+    ],
+    "hidden": []
+  },
+  "mastery": {"pass_hidden_tests": true},
+  "common_mistakes": [
+    {"id": "m1", "description": "Additionner les côtés sans passer par les carrés.", "category": "orthograf"}
+  ]
+}

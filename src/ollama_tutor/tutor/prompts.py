@@ -11,8 +11,249 @@ UI-framework-free by contract (no textual/fastapi imports).
 
 from __future__ import annotations
 
+import logging
+import re
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
 from .retrieval import assemble_context_blocks
 from .vector import ScoredChunk
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# 013 Vague 1 Socle — Prompt pack loader (I6, FR-005/FR-006)
+# Stdlib only (pathlib), file absent/illisible never crashes, no secret.
+# ---------------------------------------------------------------------------
+
+# Fallback FR intégré (jamais de secret, hint-first)
+FALLBACK_EVALUATION_PROMPT = (
+    "Tu es un tuteur bienveillant et rigoureux, spécialisé en pédagogie francophone.\n"
+    "Tu réponds toujours en français, en guidant l'élève par des indices progressifs (hint-first) "
+    "sans jamais donner la solution complète d'emblée.\n"
+    "Commence par une question ou un indice léger, puis affine si l'élève bloque.\n"
+    "Tu cites les preuves fournies et tu exiges que l'élève explique la notion avec ses mots "
+    "quand c'est demandé (explain_concept)."
+)
+
+FALLBACK_HINT_PROMPT = (
+    "Tu es un tuteur qui fournit un indice progressif en français, sans révéler la solution complète."
+)
+
+FALLBACK_DIAGNOSIS_PROMPT = (
+    "Tu es un analyste d'erreurs qui classe l'erreur en français, de façon constructive."
+)
+
+FALLBACK_PROMPTS: dict[str, str] = {
+    "evaluation": FALLBACK_EVALUATION_PROMPT,
+    "hint": FALLBACK_HINT_PROMPT,
+    "diagnosis": FALLBACK_DIAGNOSIS_PROMPT,
+    "tutor-system": FALLBACK_EVALUATION_PROMPT,
+}
+
+# Emplacement canonique assets/prompts (repo root) — fallback package
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_PKG_ASSETS = Path(__file__).resolve().parent.parent / "assets" / "prompts"
+PROMPTS_DIR = _REPO_ROOT / "assets" / "prompts"
+if not PROMPTS_DIR.exists() and _PKG_ASSETS.exists():
+    PROMPTS_DIR = _PKG_ASSETS
+
+# Champs du gabarit YAML (T014)
+GABARIT_FIELDS = ("lesson", "submission", "proofs", "hint_level", "recurring_mistakes", "explain_concept")
+
+_SECRET_RE = re.compile(r"(sk-|api[_-]?key|AKIA|ghp_|secret)", re.IGNORECASE)
+
+
+def _contains_secret(text: str) -> bool:
+    t = text or ""
+    if _SECRET_RE.search(t):
+        return True
+    # Align with test_assets_prompts_contain_zero_secret:189-191 → no absolute machine path leak
+    if "/home/" in t or "C:\\" in t:
+        return True
+    return False
+
+
+def _log_prompt_error(config: Any, message: str) -> None:
+    try:
+        logger.warning("prompts: %s", message)
+        if config is not None and hasattr(config, "config_dir"):
+            line = f"[{datetime.now().astimezone().isoformat()}] [prompts] {message}"
+            log_file = Path(config.config_dir) / "errors.log"  # type: ignore[attr-defined]
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_file, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+    except Exception:
+        pass
+
+
+def get_fallback_prompt(name: str) -> str:
+    """Retourne le FALLBACK pour un nom donné, jamais 500."""
+    try:
+        return FALLBACK_PROMPTS.get(name, FALLBACK_EVALUATION_PROMPT)
+    except Exception:
+        return FALLBACK_EVALUATION_PROMPT
+
+
+def _parse_list_value(raw: str) -> list[str]:
+    raw = raw.strip()
+    if not raw:
+        return []
+    if raw.startswith("[") and raw.endswith("]"):
+        inner = raw[1:-1].strip()
+        if not inner:
+            return []
+        # split by comma
+        parts = [p.strip().strip("'\"") for p in inner.split(",")]
+        return [p for p in parts if p]
+    # single value or comma-separated without brackets
+    if "," in raw:
+        return [p.strip().strip("'\"") for p in raw.split(",") if p.strip()]
+    return [raw.strip().strip("'\"")]
+
+
+def parse_gabarit_block(text: str) -> tuple[str, dict[str, Any]]:
+    """Extrait corps Markdown FR + gabarit YAML optionnel (fence ```yaml context).
+
+    Retourne (body, gabarit). Gabarit vidé si absent. Parsing stdlib only.
+    """
+    if not text:
+        return "", {}
+    # cherche fence yaml context
+    # supporte ```yaml context et ```yaml
+    fence_re = re.compile(r"```yaml(?:\s+context)?\s*\n(.*?)\n```", re.DOTALL)
+    m = fence_re.search(text)
+    if not m:
+        return text.strip(), {}
+    body = text[: m.start()].strip()
+    gabarit_raw = m.group(1)
+    gabarit: dict[str, Any] = {}
+    for line in gabarit_raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" not in line:
+            continue
+        key, val = line.split(":", 1)
+        key = key.strip()
+        val = val.strip().strip("'\"")
+        if key not in GABARIT_FIELDS:
+            continue
+        if key == "hint_level":
+            try:
+                iv = int(val.strip())
+                gabarit[key] = iv
+            except (ValueError, TypeError):
+                gabarit[key] = val  # laisser invalide pour validation ultérieure
+        elif key == "recurring_mistakes":
+            gabarit[key] = _parse_list_value(val)
+        else:
+            gabarit[key] = val
+    return body, gabarit
+
+
+def _validate_gabarit(gabarit: dict[str, Any]) -> list[str]:
+    """Valide le gabarit, retourne liste d'erreurs (vide=valide)."""
+    errors: list[str] = []
+    if "hint_level" in gabarit:
+        hl = gabarit["hint_level"]
+        if not isinstance(hl, int) or hl not in (0, 1, 2):
+            errors.append(f"hint_level: {hl!r} invalide (attendu 0,1,2)")
+    if "recurring_mistakes" in gabarit:
+        rm = gabarit["recurring_mistakes"]
+        if not isinstance(rm, list):
+            errors.append(f"recurring_mistakes: {rm!r} doit être une liste")
+        else:
+            for item in rm:
+                if not isinstance(item, str) or not item.strip():
+                    errors.append(f"recurring_mistakes: item invalide {item!r}")
+    for field in ("lesson", "submission", "proofs", "explain_concept"):
+        if field in gabarit and not isinstance(gabarit[field], str):
+            errors.append(f"{field}: doit être une chaîne")
+    return errors
+
+
+def load_prompt_with_gabarit(
+    name: str,
+    prompts_dir: Path | str | None = None,
+    config: Any = None,
+) -> tuple[str, dict[str, Any]]:
+    """Charge assets/prompts/{name}.md + gabarit, FALLBACK si absent/illisible/invalide.
+
+    Jamais de crash, jamais 500. Log dans errors.log si config fourni.
+    """
+    fallback = get_fallback_prompt(name)
+    directory = Path(prompts_dir) if prompts_dir is not None else PROMPTS_DIR
+    target = directory / f"{name}.md"
+    try:
+        if not target.is_file():
+            _log_prompt_error(config, f"{name}.md absent → FALLBACK")
+            return fallback, {}
+        try:
+            text = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            _log_prompt_error(config, f"{name}.md illisible → FALLBACK: {exc}")
+            return fallback, {}
+        if _contains_secret(text):
+            _log_prompt_error(config, f"{name}.md contient un secret potentiel → FALLBACK")
+            return fallback, {}
+        body, gabarit = parse_gabarit_block(text)
+        if not body:
+            body = fallback
+        # validate gabarit
+        errs = _validate_gabarit(gabarit)
+        if errs:
+            _log_prompt_error(config, f"{name}.md gabarit invalide → FALLBACK: {'; '.join(errs)}")
+            return fallback, {}
+        if gabarit and _contains_secret(str(gabarit)):
+            _log_prompt_error(config, f"{name}.md gabarit secret → FALLBACK")
+            return fallback, {}
+        # if file exists but body empty fallback to fallback
+        return (body if body else fallback), gabarit
+    except Exception as exc:  # jamais de crash
+        _log_prompt_error(config, f"{name}.md erreur inattendue → FALLBACK: {exc}")
+        return fallback, {}
+
+
+def load_prompt(
+    name: str,
+    prompts_dir: Path | str | None = None,
+    config: Any = None,
+) -> str:
+    """Charge le corps Markdown FR pour {name}, FALLBACK si absent/illisible."""
+    body, _ = load_prompt_with_gabarit(name, prompts_dir=prompts_dir, config=config)
+    return body
+
+
+# ---------------------------------------------------------------------------
+# 013 Vague 1 — cache single-load pour evaluation (US3 AC1, oracle G4)
+# stdlib only, never 500, editing assets/prompts/evaluation.md effective
+# ---------------------------------------------------------------------------
+_EVALUATION_CACHE: str | None = None
+_EVALUATION_CACHE_GABARIT: dict[str, Any] | None = None
+
+
+def get_evaluation_preamble(config: Any = None) -> str:
+    """Retourne le préambule evaluation (cache single-load, jamais de crash)."""
+    global _EVALUATION_CACHE, _EVALUATION_CACHE_GABARIT
+    if _EVALUATION_CACHE is not None:
+        return _EVALUATION_CACHE
+    try:
+        body, gabarit = load_prompt_with_gabarit("evaluation", config=config)
+        _EVALUATION_CACHE = body
+        _EVALUATION_CACHE_GABARIT = gabarit
+    except Exception:
+        _EVALUATION_CACHE = FALLBACK_EVALUATION_PROMPT
+        _EVALUATION_CACHE_GABARIT = {}
+    return _EVALUATION_CACHE  # type: ignore[return-value]
+
+
+def clear_evaluation_cache() -> None:
+    """Invalide le cache (tests uniquement)."""
+    global _EVALUATION_CACHE, _EVALUATION_CACHE_GABARIT
+    _EVALUATION_CACHE = None
+    _EVALUATION_CACHE_GABARIT = None
 
 _VALID_LEVELS = {"beginner", "intermediate", "advanced", "expert"}
 

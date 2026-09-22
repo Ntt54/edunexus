@@ -1,0 +1,18 @@
+{
+  "id": "maths-4e-pythagore-01",
+  "subject": "maths",
+  "title": "Théorème de Pythagore - orientation",
+  "lesson": "fr-4e-pythagore",
+  "submission": "hypoténuse = 3, côtés 4 et 5 => 3² = 4²+5²",
+  "mock_feedback": "Piste : quel est le plus grand côté dans un triangle rectangle ? Indice : l'hypoténuse est toujours le côté le plus long. Peux-tu identifier lequel est l'hypoténuse ici ?",
+  "must_include": [
+    "hypoténuse",
+    "Indice"
+  ],
+  "must_not_include": [
+    "la réponse complète est",
+    "voici le calcul final"
+  ],
+  "hint_first": true,
+  "forbid_full_solution": true
+}

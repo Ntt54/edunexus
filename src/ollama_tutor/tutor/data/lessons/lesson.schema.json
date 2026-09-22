@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://edunexus.local/schemas/013-lesson-1.0.json",
+  "title": "013 LessonFile — leçon curriculum JSON (Vague 1 Socle)",
+  "description": "Schéma strict des leçons FR versionnées (research D1, data-model LessonFile). Validé en stdlib par tutor/curriculum.py : fichier invalide = log-and-skip, doublon d'id = warning + premier gagnant.",
+  "type": "object",
+  "required": ["schemaVersion", "id", "title", "prerequisites", "concepts", "exercise", "mastery", "common_mistakes"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {"const": "1.0"},
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "description": "Slug unique (ex. fr-6e-fractions-addition). Doublon = warning, premier fichier gagnant."
+    },
+    "title": {"type": "string", "minLength": 1},
+    "prerequisites": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
+      "description": "Ids de leçons exigées avant celle-ci, même format slug que `id` (parcours-prérequis US1). Vide = aucune."
+    },
+    "concepts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "exercise": {
+      "type": "object",
+      "required": ["prompt", "starter", "visible", "hidden"],
+      "additionalProperties": false,
+      "properties": {
+        "prompt": {"type": "string", "minLength": 1},
+        "starter": {"type": "string"},
+        "visible": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "required": ["id", "input", "expected"],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "input": {"type": "string"},
+              "expected": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "hidden": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["id", "input", "expected", "failure_hint"],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "input": {"type": "string"},
+              "expected": {"type": "string", "minLength": 1},
+              "failure_hint": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Raison d'échec / indice hint-first montré si ce test caché échoue (jamais la solution)."
+              }
+            }
+          }
+        }
+      }
+    },
+    "mastery": {
+      "type": "object",
+      "required": ["pass_hidden_tests", "explain_concept"],
+      "additionalProperties": false,
+      "properties": {
+        "pass_hidden_tests": {"type": "boolean"},
+        "explain_concept": {
+          "type": "boolean",
+          "description": "Si vrai, l'apprenant doit expliquer la notion avec ses mots (juste-sans-explication = partiel, US1)."
+        }
+      }
+    },
+    "common_mistakes": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Pièges classiques rédigés, unifiés à la taxonomie diagnostic 5-cats existante (research D2, gate G1).",
+      "items": {
+        "type": "object",
+        "required": ["id", "description", "category"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "description": {"type": "string", "minLength": 1},
+          "category": {
+            "type": "string",
+            "enum": ["conceptual", "procedural", "computational", "reading", "careless"]
+          }
+        }
+      }
+    }
+  }
+}

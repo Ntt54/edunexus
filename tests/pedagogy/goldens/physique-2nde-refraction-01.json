@@ -1,0 +1,18 @@
+{
+  "id": "physique-2nde-refraction-01",
+  "subject": "physique",
+  "title": "Réfraction n1 sin i = n2 sin r",
+  "lesson": "fr-2nde-refraction",
+  "submission": "n1=1 n2=1.5 i=30° => r=30°",
+  "mock_feedback": "Question : que devient le sinus de l'angle réfracté quand l'indice change ? Indice : isole sin r = (n1/n2) sin i.",
+  "must_include": [
+    "sin r",
+    "Indice"
+  ],
+  "must_not_include": [
+    "r=19,47°",
+    "solution complète"
+  ],
+  "hint_first": true,
+  "forbid_full_solution": true
+}

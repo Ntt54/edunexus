@@ -1,0 +1,18 @@
+{
+  "id": "svt-5e-photosynthese-01",
+  "subject": "svt",
+  "title": "Photosynthèse - équation bilan",
+  "lesson": "fr-5e-photosynthese",
+  "submission": "CO2 + H2O => O2 (sans lumière ni glucose)",
+  "mock_feedback": "Indice : quels sont les réactifs et les produits complets de la photosynthèse ? Piste : où intervient la lumière et quel est le glucide produit ?",
+  "must_include": [
+    "lumière",
+    "Indice"
+  ],
+  "must_not_include": [
+    "6CO2+6H2O+ lumière => C6H12O6+6O2 est la réponse complète à recopier",
+    "voici la solution à recopier"
+  ],
+  "hint_first": true,
+  "forbid_full_solution": true
+}

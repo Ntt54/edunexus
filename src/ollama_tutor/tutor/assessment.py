@@ -18,6 +18,13 @@ from dataclasses import dataclass, field
 from typing import Any
 import re
 
+# 013 Vague 1 — prompt éditable evaluation.md (cached single-load, US3 AC1)
+# stdlib only, relative import, tutor never imports fastapi/textual
+try:
+    from .prompts import get_evaluation_preamble  # type: ignore[import]
+except Exception:  # pragma: no cover
+    get_evaluation_preamble = lambda config=None: ""  # type: ignore
+
 from ..models import Message, MessageRole, OllamaOptions
 from .adaptation import build_interleaved_session
 from .sandbox import RunResult
@@ -276,9 +283,34 @@ def build_evaluation_prompt(
     section: str | None = None,
     question: str | None = None,
     refs: list[dict[str, Any]] | None = None,
+    # 013 Vague 1 gabarit (FR-006) — optionnels, sans régression
+    hint_level: int | None = None,
+    recurring_mistakes: list[str] | None = None,
+    explain_concept: str | None = None,
+    lesson: str | None = None,
+    submission: str | None = None,
+    proofs: str | None = None,
 ) -> str:
-    """Paquet d'évidence factuel pour le juge LLM (source, sans invention)."""
-    lines: list[str] = [
+    """Paquet d'évidence factuel pour le juge LLM (source, sans invention).
+
+    Gabarit 013 (FR-006): hint_level/recurring_mistakes/explain_concept (+
+    lesson/submission/proofs) sont injectés sans régression sur les champs
+    existants. Tous optionnels, stdlib only. Préambule éditable
+    assets/prompts/evaluation.md (cached single-load, US3 AC1) — édition
+    effective au prochain boot, FALLBACK jamais 500.
+    """
+    # Préambule éditable (cached, single file IO at first call, never 500)
+    try:
+        _preamble = get_evaluation_preamble()  # type: ignore
+        if not isinstance(_preamble, str) or not _preamble.strip():
+            _preamble = ""
+    except Exception:
+        _preamble = ""
+    lines: list[str] = []
+    if _preamble:
+        lines.append(_preamble)
+        lines.append("")
+    lines += [
         "You are reviewing a student's Python attempt. Use only the runtime"
         " evidence below — do not claim outputs or behaviour you can't see."
         " Reply in three short parts:",
@@ -291,6 +323,37 @@ def build_evaluation_prompt(
             "  4. If you cite documentation, use only URLs from the"
             " 'Reference material' list below. Do not invent links."
         )
+    # Gabarit pedagogy (injecté avant le contexte existant pour que le juge en tienne compte)
+    if hint_level is not None:
+        try:
+            hl = int(hint_level)
+            if 0 <= hl <= 2:
+                lines.append(f"Hint level: {hl} (0=léger, 1=intermédiaire, 2=guidage fort, jamais la solution complète).")
+        except Exception:
+            pass
+    if recurring_mistakes:
+        try:
+            rm = [str(x).strip() for x in recurring_mistakes if str(x).strip()]
+            if rm:
+                lines.append(f"Recurring mistakes to watch: {', '.join(rm)}.")
+        except Exception:
+            pass
+    if explain_concept:
+        ec = str(explain_concept).strip()
+        if ec:
+            lines.append(f"Explain concept required: {ec}")
+    if lesson:
+        ls = str(lesson).strip()
+        if ls:
+            lines.append(f"Lesson: {ls}")
+    if submission:
+        # submission alias for code if differs
+        if str(submission).strip() and str(submission).strip() != str(code).strip():
+            lines.append(f"Submission (élève): {str(submission).strip()}")
+    if proofs:
+        pr = str(proofs).strip()
+        if pr:
+            lines.append(f"Proofs: {pr}")
     lines.append("")
     if section:
         lines.append(f'Section context: "{section}".')

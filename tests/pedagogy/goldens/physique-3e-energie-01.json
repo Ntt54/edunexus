@@ -1,0 +1,18 @@
+{
+  "id": "physique-3e-energie-01",
+  "subject": "physique",
+  "title": "Énergie cinétique Ec=1/2 m v²",
+  "lesson": "fr-3e-energie-cinetique",
+  "submission": "m=2kg v=3m/s => Ec=9J (oubli du 1/2)",
+  "mock_feedback": "Piste : quelle est la formule complète de l'énergie cinétique ? Indice : n'oublie pas le facteur 1/2 devant m v².",
+  "must_include": [
+    "1/2",
+    "Indice"
+  ],
+  "must_not_include": [
+    "Ec=9J est faux, la réponse est 9",
+    "voici la correction complète"
+  ],
+  "hint_first": true,
+  "forbid_full_solution": true
+}

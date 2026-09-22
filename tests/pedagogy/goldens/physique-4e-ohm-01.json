@@ -1,0 +1,18 @@
+{
+  "id": "physique-4e-ohm-01",
+  "subject": "physique",
+  "title": "Loi d'Ohm U=RI",
+  "lesson": "fr-4e-ohm",
+  "submission": "U=5V, R=10Ω => I=50A",
+  "mock_feedback": "Indice : vérifie les unités et la formule U = R × I. Piste : comment isoler I dans cette formule ? Que vaut I = U/R ?",
+  "must_include": [
+    "U = R",
+    "Indice"
+  ],
+  "must_not_include": [
+    "I=0,5A est la réponse",
+    "solution complète"
+  ],
+  "hint_first": true,
+  "forbid_full_solution": true
+}

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "1.0",
+  "id": "fr-6e-fractions-addition",
+  "title": "Addition de fractions — COPIE concurrente (doit être ignorée, premier gagnant)",
+  "prerequisites": [],
+  "concepts": ["fraction-numérateur-dénominateur"],
+  "exercise": {
+    "prompt": "Copie divergente : ne doit jamais être servie.",
+    "starter": "def ajoute(a, b, d):\n    return \"\"",
+    "visible": [
+      {"id": "v1", "input": "ajoute(1, 2, 3)", "expected": "3/3"}
+    ],
+    "hidden": [
+      {"id": "h1", "input": "ajoute(2, 4, 6)", "expected": "6/6", "failure_hint": "Indice de la copie, ne doit pas apparaître."}
+    ]
+  },
+  "mastery": {"pass_hidden_tests": false, "explain_concept": false},
+  "common_mistakes": [
+    {"id": "m1", "description": "Copie : confondre numérateur et dénominateur.", "category": "reading"}
+  ]
+}

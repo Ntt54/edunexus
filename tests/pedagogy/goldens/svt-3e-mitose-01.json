@@ -1,0 +1,18 @@
+{
+  "id": "svt-3e-mitose-01",
+  "subject": "svt",
+  "title": "Mitose - étapes",
+  "lesson": "fr-3e-mitose",
+  "submission": "La cellule se divise en 4 cellules filles",
+  "mock_feedback": "Question : combien de cellules filles la mitose produit-elle à partir d'une cellule mère ? Indice : pense à la conservation du nombre de chromosomes.",
+  "must_include": [
+    "cellules filles",
+    "Indice"
+  ],
+  "must_not_include": [
+    "2 cellules filles identiques est la réponse complète",
+    "voici la correction intégrale"
+  ],
+  "hint_first": true,
+  "forbid_full_solution": true
+}

@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "1.0",
+  "id": "fr-6e-fractions-addition",
+  "title": "Additionner deux fractions de même dénominateur (6e)",
+  "prerequisites": [],
+  "concepts": ["fraction-numérateur-dénominateur", "addition-fractions-même-dénominateur", "simplification"],
+  "exercise": {
+    "prompt": "Écris une fonction Python `ajoute(a, b, d)` qui retourne la somme des fractions a/d + b/d sous forme de chaîne « numérateur/dénominateur » simplifiée.",
+    "starter": "def ajoute(a, b, d):\n    # a/d + b/d : additionne les numérateurs, garde le dénominateur\n    return \"\"",
+    "visible": [
+      {"id": "v1", "input": "ajoute(1, 2, 3)", "expected": "1/1"},
+      {"id": "v2", "input": "ajoute(1, 1, 4)", "expected": "1/2"}
+    ],
+    "hidden": [
+      {"id": "h1", "input": "ajoute(2, 4, 6)", "expected": "1/1", "failure_hint": "As-tu pensé à simplifier le résultat par le PGCD ?"},
+      {"id": "h2", "input": "ajoute(3, 3, 5)", "expected": "6/5", "failure_hint": "Le dénominateur ne change pas quand on additionne : seul le numérateur bouge."}
+    ]
+  },
+  "mastery": {"pass_hidden_tests": true, "explain_concept": true},
+  "common_mistakes": [
+    {"id": "m1", "description": "Additionner aussi les dénominateurs (1/3 + 2/3 = 3/6).", "category": "conceptual"},
+    {"id": "m2", "description": "Oublier de simplifier la fraction résultat.", "category": "procedural"},
+    {"id": "m3", "description": "Erreur de calcul sur le PGCD lors de la simplification.", "category": "computational"}
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "id": "python-boucle-01",
+  "subject": "python",
+  "title": "Boucle for - somme des éléments",
+  "lesson": "fr-python-boucles",
+  "submission": "for i in range(len(lst)): sum += lst[i+1]",
+  "mock_feedback": "Indice : que vaut le dernier indice valide d'une liste de taille n ? Piste : que se passe-t-il quand i vaut len(lst)-1 et que tu fais lst[i+1] ? Question : comment parcourir sans dépasser ?",
+  "must_include": [
+    "Indice",
+    "len(lst)"
+  ],
+  "must_not_include": [
+    "voici la solution complète : for x in lst",
+    "corrige en remplaçant tout le code par"
+  ],
+  "hint_first": true,
+  "forbid_full_solution": true
+}

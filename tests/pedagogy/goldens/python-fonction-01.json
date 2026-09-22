@@ -1,0 +1,18 @@
+{
+  "id": "python-fonction-01",
+  "subject": "python",
+  "title": "Fonction avec paramètre mutable",
+  "lesson": "fr-python-fonctions",
+  "submission": "def ajouter(lst=[]): lst.append(1); return lst",
+  "mock_feedback": "Piste : que se passe-t-il quand on utilise une liste mutable comme valeur par défaut ? Indice : à quel moment cette liste est-elle créée ? Question : comment éviter le partage entre appels ?",
+  "must_include": [
+    "mutable",
+    "Indice"
+  ],
+  "must_not_include": [
+    "remplace par def ajouter(lst=None)",
+    "voici la solution complète à copier"
+  ],
+  "hint_first": true,
+  "forbid_full_solution": true
+}

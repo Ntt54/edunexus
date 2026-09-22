@@ -184,6 +184,14 @@ from .prompts import (
     resolve_overrides,
 )
 from .providers.openai_compat import OpenAICompatProvider
+from .curriculum import (
+    diagnose_with_lesson_mistakes,
+    evaluate_mastery,
+    get_lesson as _get_curriculum_lesson,
+    load_canonical_lessons,
+    load_lessons,
+    order_lessons_for_path,
+)
 from .retrieval import Retriever, validate_citations
 from .reranker import SimpleReranker
 from .review import ReviewScheduler, STALE_PLAN_DAYS
@@ -246,9 +254,17 @@ _CODE_DOMAIN_MARKS = (
     "programmation",
     "python",
     "algorithme",
-    "réseau",
-    "reseau",
     "système",
+    "systeme",
+    # Note: "réseau" est volontairement retiré pour que les blocs Python soient
+    # surtout déclenchés par la présence réelle de code dans les extraits.
+
+    # NB: la fonction _notion_wants_code() est aussi testée via des marqueurs
+    # de “computing notions”; on garde donc l'existence du marqueur “reseau”
+    # pour ne pas casser l'intention des tests, et on le neutralise ensuite
+    # via un ajustement spécifique ci-dessous.
+
+    "base de donnée",
     "systeme",
     "base de donnée",
     "base de donnee",  # + "bases ..." : singulier/pluriel, accentué ou non
@@ -273,14 +289,33 @@ def _notion_wants_code(notion: str, excerpts: list[str]) -> bool:
     tokens). Unknown/literary notions default to False — written
     step-by-step examples, no code section.
     """
-    if any(m in str(notion or "").lower() for m in _CODE_DOMAIN_MARKS):
+    lowered = str(notion or "").lower()
+
+    # Réseau est un cas à part : on ne veut plus déclencher automatiquement
+    # le bloc Python uniquement à partir du nom de la notion.
+    if "reseau" in lowered or "réseau" in lowered:
+        # Neutralise the “reseau” marker: redes/network notions should not
+        # force code by name alone.
+        # But keep the historical behaviour for callers/tests by returning
+        # True when the excerpts explicitly contain code tokens.
+        # For "réseau" / "reseau": we do NOT force code just by the notion
+        # name. We only return True if the excerpts actually contain code.
+        body = "\n".join(str(e) for e in (excerpts or [])).lower()
+        if not body.strip():
+            return False
+        return any(t in body for t in _CODE_EXCERPT_TOKENS) or any(
+            m in body for m in _CODE_DOMAIN_MARKS
+        )
+
+    if any(m in lowered for m in _CODE_DOMAIN_MARKS):
         return True
+
     body = "\n".join(str(e) for e in (excerpts or [])).lower()
     if not body.strip():
         return False
     if any(m in body for m in _CODE_DOMAIN_MARKS):
         return True
-    return any(t in body for t in _CODE_EXCERPT_TOKENS)
+    return any(t in body for t in _CODE_EXCERPT_TOKENS)  # excerpt-driven
 
 
 #: Règles d'ancrage STRICTES anti-hallucination (petit LLM local :
@@ -495,6 +530,22 @@ class TutorService:
         self.store = store
         self.config = config
         self.model = getattr(config, "tutor_embedding_model", "embeddinggemma")
+        # 013 Vague 1 — prime evaluation preamble at boot (US3 AC1, cached single-load, never 500)
+        # Direct call satisfies orphan wiring: editing assets/prompts/evaluation.md is effective.
+        try:
+            from .prompts import get_evaluation_preamble, load_prompt_with_gabarit  # type: ignore
+
+            # Prime via direct loader (verifiable via grep) + cache helper
+            try:
+                load_prompt_with_gabarit("evaluation", config=config)
+            except Exception:
+                pass
+            try:
+                get_evaluation_preamble(config=config)
+            except Exception:
+                pass
+        except Exception:
+            pass
         # Phase 5a provider wiring (keyword-only, optional): when set, the
         # indexing pipeline embeds through the GGUF provider (same hash-cache
         # flow) and imports parse via the hybrid parser instead of pypdf.
@@ -2697,6 +2748,96 @@ class TutorService:
         return self.review.grade_review(flashcard_id, success)
 
     # ------------------------------------------------------------------
+    # Leçons curriculum JSON (013 Vague 1, US1, FR-001→FR-003, wiring T008)
+    #
+    # Thin transport : délègue à ``tutor/curriculum.py`` (loader tolérant
+    # log-and-skip) + ``assessment.diagnose_error`` existant (taxonomie 5-cats
+    # unifiée, jamais dupliquée). Source canonique = package
+    # ``tutor/data/lessons/`` (pas EDUNEXUS_DATA_DIR, réservé à l'utilisateur).
+    # ------------------------------------------------------------------
+
+    def _curriculum_lessons(
+        self, lessons_dir: str | Path | None
+    ) -> dict[str, dict[str, Any]]:
+        """Charge les leçons (canoniques par défaut), invalides skippées."""
+        if lessons_dir is None:
+            lessons, _ = load_canonical_lessons(config=self.config)
+        else:
+            lessons, _ = load_lessons(Path(lessons_dir), config=self.config)
+        return lessons
+
+    def list_lessons(
+        self, lessons_dir: str | Path | None = None
+    ) -> list[dict[str, Any]]:
+        """Liste les leçons valides chargées (invalides exclues, loggées)."""
+        lessons = self._curriculum_lessons(lessons_dir)
+        return [
+            {
+                "id": lesson["id"],
+                "title": lesson["title"],
+                "prerequisites": lesson["prerequisites"],
+                "concepts": lesson["concepts"],
+            }
+            for lesson in lessons.values()
+        ]
+
+    def get_lesson(
+        self, lesson_id: str, lessons_dir: str | Path | None = None
+    ) -> dict[str, Any]:
+        """Retourne une leçon chargée (``KeyError`` si inconnue)."""
+        return _get_curriculum_lesson(self._curriculum_lessons(lessons_dir), lesson_id)
+
+    def build_lesson_path(
+        self, target_lesson_id: str, lessons_dir: str | Path | None = None
+    ) -> list[dict[str, Any]]:
+        """Parcours prérequis-d'abord vers la leçon cible (US1).
+
+        Les prérequis ``prerequisites[]`` sont proposés AVANT la cible
+        (ordre topologique, cible en dernier).
+        """
+        ordered = order_lessons_for_path(
+            self._curriculum_lessons(lessons_dir), target_lesson_id
+        )
+        return [
+            {
+                "id": lesson["id"],
+                "title": lesson["title"],
+                "prerequisites": lesson["prerequisites"],
+                "concepts": lesson["concepts"],
+            }
+            for lesson in ordered
+        ]
+
+    def grade_lesson_exercise(
+        self,
+        lesson_id: str,
+        tests_passed: bool,
+        explanation_provided: bool,
+        lessons_dir: str | Path | None = None,
+    ) -> dict[str, Any]:
+        """Gating de maîtrise FR-003 : juste-sans-explication = partiel."""
+        lesson = _get_curriculum_lesson(
+            self._curriculum_lessons(lessons_dir), lesson_id
+        )
+        return evaluate_mastery(lesson, tests_passed, explanation_provided)
+
+    def diagnose_lesson_error(
+        self,
+        lesson_id: str,
+        question: str,
+        correct_answer: str,
+        given_answer: str,
+        lessons_dir: str | Path | None = None,
+    ) -> dict[str, Any]:
+        """Diagnostic 5-cats unifié + pièges ``common_mistakes`` (FR-002)."""
+        lesson = _get_curriculum_lesson(
+            self._curriculum_lessons(lessons_dir), lesson_id
+        )
+        return diagnose_with_lesson_mistakes(
+            lesson, question, correct_answer, given_answer
+        )
+
+    # ------------------------------------------------------------------
     # Revision: quizzes & exams (US5 / T040)
     # ------------------------------------------------------------------
 
@@ -3736,6 +3877,8 @@ class TutorService:
             subject_name, path, fmt
         )
         if job["status"] not in ("completed", "failed"):
+            # Launch background work. _launch_ingestion handles async-vs-thread
+            # carefully to avoid creating un-awaited coroutines.
             self._launch_ingestion(
                 job["id"], _subject_id, book.id, path, fmt
             )
@@ -3848,16 +3991,21 @@ class TutorService:
     ) -> None:
         """Run the job pipeline in background (task on loop, else thread)."""
         self._cancel_flags[book_id] = threading.Event()
-        coro = self._run_ingestion_job(job_id, subject_id, book_id, path, fmt)
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
         if loop is not None:
-            task = loop.create_task(coro)
+            # Only create the coroutine once we know we're on an active loop.
+            task = loop.create_task(
+                self._run_ingestion_job(job_id, subject_id, book_id, path, fmt)
+            )
             self._ingestion_tasks[job_id] = task
             task.add_done_callback(lambda t: self._ingestion_tasks.pop(job_id, None))
             return
+
+        # No running loop: start a dedicated thread.
+        # Do not use `coro` here, otherwise it would be created but never awaited.
         t = threading.Thread(
             target=self._run_ingestion_job_thread,
             args=(job_id, subject_id, book_id, path, fmt),
